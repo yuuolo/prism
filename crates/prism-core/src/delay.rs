@@ -56,6 +56,9 @@ pub async fn url_test(reg: &Registry, name: &str, url: &str, timeout: Duration) 
         Ok(r) => r,
         Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout")),
     };
+    if let Err(e) = &res {
+        tracing::debug!("url test {name} {url}: {e}");
+    }
     let delay = res.as_ref().map(|d| (*d).clamp(1, u16::MAX as u128) as u16).unwrap_or(0);
     reg.delays.record(name, delay);
     res.map(|_| delay)
