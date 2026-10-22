@@ -1,0 +1,244 @@
+//! Share-link subscriptions: plain or base64 lists of `anytls://`, `ss://`,
+//! `trojan://`, `vless://`, `vmess://`, `hysteria2://` and `socks5://` URIs.
+
+use std::collections::HashMap;
+
+use anyhow::{anyhow, bail, Result};
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+use base64::Engine;
+use percent_encoding::percent_decode_str;
+use url::Url;
+
+use super::{ProxyConfig, ProxyKind};
+
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let t: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD]
+        .iter()
+        .find_map(|e| e.decode(t.as_bytes()).ok())
+}
+
+fn decode(s: &str) -> String {
+    percent_decode_str(s).decode_utf8_lossy().into_owned()
+}
+
+/// Returns the parsed nodes plus warnings for lines that were skipped.
+pub fn parse_list(raw: &str) -> (Vec<ProxyConfig>, Vec<String>) {
+    let mut text = raw.trim().to_string();
+    if !text.contains("://") {
+        if let Some(bytes) = b64_decode(&text) {
+            text = String::from_utf8_lossy(&bytes).into_owned();
+        }
+    }
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        match parse_uri(line) {
+            Ok(mut p) => {
+                // Clash requires unique names.
+                let count = seen.entry(p.name.clone()).or_insert(0);
+                *count += 1;
+                if *count > 1 {
+                    p.name = format!("{} {}", p.name, count);
+                }
+                out.push(p);
+            }
+            Err(e) => warnings.push(format!("{e}: {}", line.chars().take(40).collect::<String>())),
+        }
+    }
+    (out, warnings)
+}
+
+pub fn parse_uri(line: &str) -> Result<ProxyConfig> {
+    let scheme = line.split("://").next().unwrap_or_default().to_ascii_lowercase();
+    match scheme.as_str() {
+        "vmess" => parse_vmess(line),
+        "ss" => parse_ss(line),
+        "anytls" | "trojan" | "vless" | "hysteria2" | "hy2" | "socks5" | "socks" => parse_generic(line, &scheme),
+        _ => bail!("unsupported scheme {scheme}"),
+    }
+}
+
+fn host_port(u: &Url) -> Result<(String, u16)> {
+    let host = u.host_str().ok_or_else(|| anyhow!("missing host"))?;
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let port = u.port().ok_or_else(|| anyhow!("missing port"))?;
+    Ok((host, port))
+}
+
+fn name_of(u: &Url, host: &str, port: u16) -> String {
+    u.fragment()
+        .map(decode)
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("{host}:{port}"))
+}
+
+fn truthy(v: Option<&String>) -> bool {
+    matches!(v.map(String::as_str), Some("1" | "true"))
+}
+
+fn parse_generic(line: &str, scheme: &str) -> Result<ProxyConfig> {
+    let u = Url::parse(line)?;
+    let (server, port) = host_port(&u)?;
+    let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
+    let user = decode(u.username());
+    let kind = match scheme {
+        "anytls" => ProxyKind::AnyTls,
+        "trojan" => ProxyKind::Trojan,
+        "vless" => ProxyKind::Vless,
+        "hysteria2" | "hy2" => ProxyKind::Hysteria2,
+        _ => ProxyKind::Socks5,
+    };
+    let mut p = ProxyConfig {
+        name: name_of(&u, &server, port),
+        kind: Some(kind),
+        server,
+        port,
+        sni: q.get("sni").or_else(|| q.get("peer")).cloned().filter(|s| !s.is_empty()),
+        skip_cert_verify: truthy(q.get("insecure")) || truthy(q.get("allowInsecure")),
+        alpn: q.get("alpn").map(|a| a.split(',').map(String::from).collect()).unwrap_or_default(),
+        fingerprint: q.get("fp").cloned().filter(|s| !s.is_empty()),
+        udp: true,
+        ..Default::default()
+    };
+    match kind {
+        ProxyKind::Vless => {
+            p.uuid = Some(user);
+            let security = q.get("security").map(String::as_str).unwrap_or("none");
+            p.tls = security == "tls" || security == "reality";
+            if security == "reality" {
+                p.reality_public_key = q.get("pbk").cloned();
+                p.reality_short_id = q.get("sid").cloned();
+            }
+            p.flow = q.get("flow").cloned().filter(|f| !f.is_empty());
+        }
+        ProxyKind::Socks5 => {
+            p.username = Some(user).filter(|u| !u.is_empty());
+            p.password = u.password().map(decode);
+            p.udp = false;
+        }
+        _ => {
+            // anytls / trojan / hysteria2: the userinfo is the password. Some
+            // links put it as user:pass, keep everything.
+            p.password = Some(match u.password() {
+                Some(pw) => format!("{user}:{}", decode(pw)),
+                None => user,
+            });
+            p.tls = true;
+            if kind == ProxyKind::Hysteria2 {
+                p.obfs = q.get("obfs").cloned();
+                p.obfs_password = q.get("obfs-password").cloned();
+            }
+        }
+    }
+    if matches!(kind, ProxyKind::Vless | ProxyKind::Trojan) {
+        match q.get("type").map(String::as_str) {
+            Some("ws") => {
+                p.network = Some("ws".into());
+                p.ws_path = q.get("path").cloned();
+                p.ws_host = q.get("host").cloned();
+            }
+            Some("grpc") => {
+                p.network = Some("grpc".into());
+                p.grpc_service = q.get("serviceName").cloned();
+            }
+            _ => {}
+        }
+    }
+    Ok(p)
+}
+
+fn parse_ss(line: &str) -> Result<ProxyConfig> {
+    let body = &line[5..];
+    let (main, frag) = body.split_once('#').map(|(a, b)| (a, Some(b))).unwrap_or((body, None));
+    let main = main.split('?').next().unwrap_or(main).trim_end_matches('/');
+    let (userinfo, hostport) = match main.rsplit_once('@') {
+        Some((u, h)) => {
+            let u = decode(u);
+            let info = match b64_decode(&u) {
+                Some(b) if String::from_utf8_lossy(&b).contains(':') => String::from_utf8_lossy(&b).into_owned(),
+                _ => u,
+            };
+            (info, h.to_string())
+        }
+        None => {
+            // Legacy: base64(method:password@host:port)
+            let dec = String::from_utf8(b64_decode(main).ok_or_else(|| anyhow!("bad ss link"))?)?;
+            let (u, h) = dec.rsplit_once('@').ok_or_else(|| anyhow!("bad ss link"))?;
+            (u.to_string(), h.to_string())
+        }
+    };
+    let (cipher, password) = userinfo.split_once(':').ok_or_else(|| anyhow!("bad ss userinfo"))?;
+    let (host, port) = hostport.rsplit_once(':').ok_or_else(|| anyhow!("bad ss host"))?;
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let port: u16 = port.parse()?;
+    if line.contains("plugin=") {
+        bail!("ss plugins are not supported");
+    }
+    Ok(ProxyConfig {
+        name: frag.map(decode).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("{host}:{port}")),
+        kind: Some(ProxyKind::Shadowsocks),
+        server: host,
+        port,
+        cipher: Some(cipher.to_string()),
+        password: Some(password.to_string()),
+        udp: true,
+        ..Default::default()
+    })
+}
+
+fn parse_vmess(line: &str) -> Result<ProxyConfig> {
+    let raw = b64_decode(&line[8..]).ok_or_else(|| anyhow!("bad vmess base64"))?;
+    let v: serde_json::Value = serde_json::from_slice(&raw)?;
+    let st = |k: &str| match v.get(k) {
+        Some(serde_json::Value::String(s)) => Some(s.clone()).filter(|s| !s.is_empty()),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    };
+    let server = st("add").ok_or_else(|| anyhow!("vmess: missing add"))?;
+    let port: u16 = st("port").and_then(|p| p.parse().ok()).ok_or_else(|| anyhow!("vmess: bad port"))?;
+    let net = st("net").filter(|n| n != "tcp");
+    Ok(ProxyConfig {
+        name: st("ps").unwrap_or_else(|| format!("{server}:{port}")),
+        kind: Some(ProxyKind::Vmess),
+        uuid: st("id"),
+        alter_id: st("aid").and_then(|a| a.parse().ok()).unwrap_or(0),
+        cipher: st("scy").or(Some("auto".into())),
+        tls: st("tls").as_deref() == Some("tls"),
+        sni: st("sni"),
+        ws_path: st("path"),
+        ws_host: st("host"),
+        grpc_service: if net.as_deref() == Some("grpc") { st("path") } else { None },
+        network: net,
+        server,
+        port,
+        udp: true,
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sbm_anytls_base64() {
+        let list = "anytls://p%40ss@jp.example.com:8443/?sni=jp.example.com#%E4%B8%9C%E4%BA%AC\n\
+                    ss://YWVzLTI1Ni1nY206c2VjcmV0@1.2.3.4:8388#ss1\n\
+                    vless://0b6a0b4e-0000-4000-8000-000000000000@v.example.com:443?security=tls&sni=v.example.com&type=ws&path=%2Fray#v\n\
+                    hysteria2://pw@h.example.com:443?sni=h.example.com&insecure=1#h";
+        let encoded = STANDARD.encode(list);
+        let (nodes, warns) = parse_list(&encoded);
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(nodes.len(), 4);
+        let a = &nodes[0];
+        assert_eq!(a.kind, Some(ProxyKind::AnyTls));
+        assert_eq!(a.name, "东京");
+        assert_eq!(a.password.as_deref(), Some("p@ss"));
+        assert_eq!(a.port, 8443);
+        assert_eq!(nodes[1].cipher.as_deref(), Some("aes-256-gcm"));
+        assert_eq!(nodes[2].ws_path.as_deref(), Some("/ray"));
+        assert!(nodes[3].skip_cert_verify);
+    }
+}

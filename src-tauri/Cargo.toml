@@ -1,0 +1,32 @@
+[package]
+name = "prism"
+description = "Prism proxy client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "prism_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+rand = "0.8"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+prism-core = { path = "../crates/prism-core" }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinInet"] }
