@@ -32,20 +32,25 @@ fn generated_singbox_config_passes_check() {
         eprintln!("SINGBOX not set, skipping");
         return;
     };
-    let o = Overrides {
+    let mut o = Overrides {
         mixed_port: 17891,
         controller: "127.0.0.1:19098".into(),
         secret: "s".into(),
         mode: Mode::Rule,
         allow_lan: false,
         log_level: "info".into(),
+        tun: false,
     };
     let dir = std::env::temp_dir().join(format!("prism-sbcheck-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    for (name, raw) in [
-        ("clash", CLASH.to_string()),
-        ("uri", "anytls://pw@jp.example.com:443/?sni=jp.example.com#jp\nss://YWVzLTI1Ni1nY206cHc@1.2.3.4:8388#ss".to_string()),
+    let uri = "anytls://pw@jp.example.com:443/?sni=jp.example.com#jp\nss://YWVzLTI1Ni1nY206cHc@1.2.3.4:8388#ss";
+    for (name, raw, tun) in [
+        ("clash", CLASH, false),
+        ("clash-tun", CLASH, true),
+        ("uri", uri, false),
+        ("uri-tun", uri, true),
     ] {
+        o.tun = tun;
         let p = config::parse_any(&raw).unwrap();
         let cfg = singbox::emit(&p, &o);
         let path = dir.join(format!("{name}.json"));

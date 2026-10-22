@@ -133,9 +133,7 @@ pub fn other(msg: impl Into<String>) -> io::Error {
 
 /// Dials a TCP connection to `addr`, resolving domains with the system resolver.
 pub async fn tcp_connect(host: &str, port: u16) -> io::Result<tokio::net::TcpStream> {
-    let s = tokio::net::TcpStream::connect((host.trim_start_matches('[').trim_end_matches(']'), port)).await?;
-    let _ = s.set_nodelay(true);
-    Ok(s)
+    crate::net::tcp_connect(host, port).await
 }
 
 /// Bridges a protocol implemented as two plain async loops into a single

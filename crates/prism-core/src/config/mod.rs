@@ -213,6 +213,25 @@ impl Mode {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TunConfig {
+    pub enable: bool,
+    pub auto_route: bool,
+    /// Plain-IP DNS servers used for queries sent to the TUN's own DNS address.
+    pub dns: Vec<String>,
+}
+
+impl TunConfig {
+    pub fn dns_upstream(&self) -> Vec<std::net::IpAddr> {
+        let v: Vec<std::net::IpAddr> = self.dns.iter().filter_map(|s| s.trim().parse().ok()).collect();
+        if v.is_empty() {
+            vec!["223.5.5.5".parse().unwrap(), "119.29.29.29".parse().unwrap()]
+        } else {
+            v
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct General {
     pub mixed_port: u16,
@@ -222,6 +241,8 @@ pub struct General {
     pub log_level: String,
     pub external_controller: Option<String>,
     pub secret: String,
+    #[serde(default)]
+    pub tun: TunConfig,
 }
 
 impl Default for General {
@@ -234,6 +255,7 @@ impl Default for General {
             log_level: "info".into(),
             external_controller: Some("127.0.0.1:9090".into()),
             secret: String::new(),
+            tun: TunConfig::default(),
         }
     }
 }

@@ -52,6 +52,7 @@ fn overrides(s: &Settings) -> clash::Overrides {
         mode: s.mode,
         allow_lan: s.allow_lan,
         log_level: s.log_level.clone(),
+        tun: s.tun,
     }
 }
 

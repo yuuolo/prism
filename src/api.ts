@@ -12,6 +12,7 @@ export interface Settings {
   allow_lan: boolean;
   log_level: string;
   system_proxy: boolean;
+  tun: boolean;
   proxy_bypass: string;
   active_profile: string | null;
   mihomo_path: string | null;
@@ -42,6 +43,7 @@ export interface Snapshot {
   profiles: ProfileMeta[];
   running: CoreKind | null;
   system_proxy: boolean;
+  elevated: boolean;
   core_paths: Record<CoreKind, { path: string; exists: boolean }>;
   data_dir: string;
 }
@@ -111,6 +113,8 @@ export const api = {
   selectProxy: (group: string, name: string) => invoke<void>("select_proxy", { group, name }),
   setMode: (mode: Mode) => invoke<void>("set_mode", { mode }),
   setSystemProxy: (enable: boolean) => invoke<void>("set_system_proxy", { enable }),
+  setTun: (enable: boolean) => invoke<void>("set_tun", { enable }),
+  restartAsAdmin: () => invoke<void>("restart_as_admin"),
   logs: () => invoke<string[]>("get_logs"),
   clearLogs: () => invoke<void>("clear_logs"),
   downloadCore: (kind: CoreKind) => invoke<string>("download_core", { kind }),

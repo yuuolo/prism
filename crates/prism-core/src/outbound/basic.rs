@@ -25,14 +25,7 @@ impl Outbound for Direct {
         true
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
-        let s = match target {
-            Address::Ip(sa) => {
-                let s = tokio::net::TcpStream::connect(sa).await?;
-                let _ = s.set_nodelay(true);
-                s
-            }
-            Address::Domain(d, p) => tcp_connect(d, *p).await?,
-        };
+        let s = tcp_connect(&target.host(), target.port()).await?;
         Ok(Box::new(s))
     }
 }

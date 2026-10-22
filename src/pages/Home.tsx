@@ -164,14 +164,32 @@ export default function Home({ go }: { go: (p: PageKey) => void }) {
         </div>
 
         <div className="card">
-          <h3>系统代理</h3>
+          <h3>流量接管</h3>
           <div className="row">
-            <span>{snap.system_proxy ? "已开启" : "已关闭"}</span>
+            <div>
+              <div>系统代理</div>
+              <div className="small muted">浏览器等应用走 127.0.0.1:{s.mixed_port}</div>
+            </div>
             <span className="spacer" />
             <button className={`switch ${snap.system_proxy ? "on" : ""}`} onClick={() => run(() => api.setSystemProxy(!snap.system_proxy))} />
           </div>
-          <div className="small muted" style={{ marginTop: 10 }}>
-            开启后浏览器等应用会通过 127.0.0.1:{s.mixed_port} 上网
+          <div className="row" style={{ marginTop: 14 }}>
+            <div>
+              <div>
+                TUN 模式 {!snap.elevated && <span className="tag">需管理员</span>}
+              </div>
+              <div className="small muted">虚拟网卡接管所有应用（含游戏、命令行）</div>
+            </div>
+            <span className="spacer" />
+            <button
+              className={`switch ${s.tun ? "on" : ""}`}
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                await run(() => api.setTun(!s.tun), s.tun ? "TUN 模式已关闭" : "TUN 模式已开启");
+                setBusy(false);
+              }}
+            />
           </div>
         </div>
 

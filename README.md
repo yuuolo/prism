@@ -28,7 +28,11 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 - 模式：规则 / 全局 / 直连
 - Clash API：`/proxies`、`/proxies/{name}/delay`、`/group/{name}/delay`、`/connections`、`/rules`、`/configs`、`/traffic`、`/version`
 
-**暂不支持**（需要时切换到 mihomo / sing-box 内核）：UDP、TUN、DNS 模块 / fake-ip、VMess、Hysteria2、VLESS Reality/Vision、WebSocket/gRPC 传输、proxy-providers、rule-providers。
+- TUN 模式（Windows，需管理员权限 + wintun.dll）：wintun 虚拟网卡 + smoltcp 用户态协议栈；自动路由 0.0.0.0/1、128.0.0.0/1，内核自身连接绑定物理网卡防回环；嗅探 TLS SNI / HTTP Host 按域名分流；劫持 UDP 53 转发上游 DNS；丢弃 QUIC（UDP 443）让浏览器回落 TCP；其余 UDP 仅在规则为 DIRECT 时直连转发。命令行：`prism-core -f config.yaml --tun`
+
+**暂不支持**（需要时切换到 mihomo / sing-box 内核）：经代理节点转发 UDP、TUN 的 IPv6 路由、DNS 模块 / fake-ip、VMess、Hysteria2、VLESS Reality/Vision、WebSocket/gRPC 传输、proxy-providers、rule-providers。
+
+> prism-core 的 TUN 模式尚未在真实网卡上做过端到端测试（mihomo / sing-box 的 TUN 配置已通过 `mihomo -t` / `sing-box check` 校验）。
 
 ## 开发
 

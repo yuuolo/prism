@@ -161,11 +161,12 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
         .unwrap_or_else(|| "DIRECT".into());
     let detour = if final_target == "REJECT" { "DIRECT".to_string() } else { final_target.clone() };
 
-    let mut rules = vec![
-        json!({ "action": "sniff" }),
-        json!({ "clash_mode": "Direct", "outbound": "DIRECT" }),
-        json!({ "clash_mode": "Global", "outbound": "GLOBAL" }),
-    ];
+    let mut rules = vec![json!({ "action": "sniff" })];
+    if o.tun {
+        rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
+    }
+    rules.push(json!({ "clash_mode": "Direct", "outbound": "DIRECT" }));
+    rules.push(json!({ "clash_mode": "Global", "outbound": "GLOBAL" }));
     let mut sets: BTreeSet<(String, String)> = BTreeSet::new();
     for r in &p.rules {
         let pl = r.payload.clone();
@@ -204,15 +205,27 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
         }
         rules.push(rule);
     }
-    let listen = if o.allow_lan { "::" } else { "127.0.0.1" };
+    let dns = if o.tun {
+        // System DNS would loop through the TUN: resolve explicitly, foreign
+        // names through the proxy (same layout as the sbm subscription).
+        sets.insert(("geosite-cn".into(), GEOSITE_URL.replace("{}", "cn")));
+        let mut remote = json!({ "type": "https", "tag": "remote", "server": "1.1.1.1" });
+        if detour != "DIRECT" {
+            remote["detour"] = json!(detour);
+        }
+        json!({
+            "servers": [remote, { "type": "https", "tag": "local", "server": "223.5.5.5" }],
+            "rules": [{ "rule_set": "geosite-cn", "server": "local" }],
+            "final": "remote",
+            "strategy": "prefer_ipv4",
+        })
+    } else {
+        json!({ "servers": [{ "type": "local", "tag": "local" }], "final": "local", "strategy": "prefer_ipv4" })
+    };
     json!({
         "log": { "level": singbox_level(&o.log_level), "timestamp": true },
-        "dns": {
-            "servers": [{ "type": "local", "tag": "local" }],
-            "final": "local",
-            "strategy": "prefer_ipv4",
-        },
-        "inbounds": [{ "type": "mixed", "tag": "mixed-in", "listen": listen, "listen_port": o.mixed_port }],
+        "dns": dns,
+        "inbounds": inbounds(o),
         "outbounds": outbounds,
         "route": {
             "rules": rules,
@@ -223,6 +236,19 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
         },
         "experimental": clash_api(o),
     })
+}
+
+fn inbounds(o: &Overrides) -> Value {
+    let listen = if o.allow_lan { "::" } else { "127.0.0.1" };
+    let mut v = vec![json!({ "type": "mixed", "tag": "mixed-in", "listen": listen, "listen_port": o.mixed_port })];
+    if o.tun {
+        v.push(json!({
+            "type": "tun", "tag": "tun-in", "interface_name": "Prism",
+            "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+            "mtu": 9000, "auto_route": true, "strict_route": true, "stack": "mixed",
+        }));
+    }
+    Value::Array(v)
 }
 
 fn singbox_level(l: &str) -> &'static str {
@@ -258,11 +284,23 @@ fn clash_api(o: &Overrides) -> Value {
 /// rights, the GUI uses system proxy) and forces the Clash API settings.
 pub fn apply_overrides(v: &mut Value, o: &Overrides) {
     let Some(root) = v.as_object_mut() else { return };
-    let listen = if o.allow_lan { "::" } else { "127.0.0.1" };
-    root.insert(
-        "inbounds".into(),
-        json!([{ "type": "mixed", "tag": "mixed-in", "listen": listen, "listen_port": o.mixed_port }]),
-    );
+    root.insert("inbounds".into(), inbounds(o));
+    if o.tun {
+        // Make sure DNS from the TUN is answered by sing-box.
+        let route = root.entry("route").or_insert_with(|| json!({}));
+        if let Some(r) = route.as_object_mut() {
+            r.insert("auto_detect_interface".into(), json!(true));
+            let rules = r.entry("rules").or_insert_with(|| json!([]));
+            if let Some(list) = rules.as_array_mut() {
+                if !list.iter().any(|x| x.get("action").and_then(|a| a.as_str()) == Some("hijack-dns")) {
+                    list.insert(0, json!({ "protocol": "dns", "action": "hijack-dns" }));
+                }
+                if !list.iter().any(|x| x.get("action").and_then(|a| a.as_str()) == Some("sniff")) {
+                    list.insert(0, json!({ "action": "sniff" }));
+                }
+            }
+        }
+    }
     let exp = root.entry("experimental").or_insert_with(|| json!({}));
     if let Some(e) = exp.as_object_mut() {
         if let Value::Object(api) = clash_api(o) {
@@ -445,6 +483,7 @@ mod tests {
             mode: Mode::Rule,
             allow_lan: false,
             log_level: "info".into(),
+            tun: false,
         }
     }
 

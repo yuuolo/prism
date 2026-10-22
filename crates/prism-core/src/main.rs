@@ -22,6 +22,9 @@ struct Args {
     /// Override the API secret
     #[arg(long)]
     secret: Option<String>,
+    /// Enable TUN mode (Windows, needs administrator rights and wintun.dll)
+    #[arg(long)]
+    tun: bool,
     /// Print the config converted to `clash` or `singbox` format and exit
     #[arg(long, value_name = "FORMAT")]
     convert: Option<String>,
@@ -37,6 +40,10 @@ fn main() -> Result<()> {
     if let Some(s) = args.secret {
         profile.general.secret = s;
     }
+    if args.tun {
+        profile.general.tun.enable = true;
+        profile.general.tun.auto_route = true;
+    }
     if let Some(fmt) = args.convert.as_deref() {
         let g = &profile.general;
         let o = prism_core::config::clash::Overrides {
@@ -46,6 +53,7 @@ fn main() -> Result<()> {
             mode: g.mode,
             allow_lan: g.allow_lan,
             log_level: g.log_level.clone(),
+            tun: g.tun.enable,
         };
         let out = match fmt {
             "clash" => {

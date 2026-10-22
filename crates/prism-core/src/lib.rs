@@ -11,13 +11,16 @@ pub mod config;
 pub mod delay;
 pub mod geo;
 pub mod inbound;
+pub mod net;
 pub mod outbound;
 pub mod rules;
+pub mod sniff;
+pub mod tun;
 pub mod tunnel;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
@@ -28,6 +31,7 @@ use tunnel::{Stats, Tunnel};
 
 pub struct Core {
     pub general: General,
+    pub home: PathBuf,
     pub tunnel: Arc<Tunnel>,
     pub warnings: Vec<String>,
 }
@@ -92,7 +96,7 @@ pub fn build(mut profile: Profile, home: &Path) -> Result<Core> {
         mode: RwLock::new(profile.general.mode),
         stats: Arc::new(Stats::default()),
     });
-    Ok(Core { general: profile.general, tunnel, warnings })
+    Ok(Core { general: profile.general, home: home.to_path_buf(), tunnel, warnings })
 }
 
 fn listen_addr(g: &General) -> SocketAddr {
@@ -117,6 +121,10 @@ pub async fn run(core: Core) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listen on {addr}"))?;
     tracing::info!("Mixed(http+socks) proxy listening at: {addr}");
     tokio::spawn(inbound::serve(listener, core.tunnel.clone()));
+
+    if core.general.tun.enable {
+        tun::start(&core.general.tun, &core.home, core.tunnel.clone()).await.context("start TUN")?;
+    }
 
     if let Some(ctl) = core.general.external_controller.clone() {
         let ctl = if ctl.starts_with(':') { format!("127.0.0.1{ctl}") } else { ctl };

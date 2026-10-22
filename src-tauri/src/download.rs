@@ -116,6 +116,29 @@ pub async fn geodata(dir: &Path, proxy_port: Option<u16>) -> Result<()> {
     Ok(())
 }
 
+const WINTUN_URL: &str = "https://www.wintun.net/builds/wintun-0.14.1.zip";
+const WINTUN_SHA256: &str = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51";
+
+/// Downloads the official, signed wintun.dll (needed by prism-core's TUN).
+pub async fn wintun(dir: &Path, proxy_port: Option<u16>) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let data = fetch(&client(proxy_port)?, WINTUN_URL).await?;
+    let hash = hex(&Sha256::digest(&data));
+    if hash != WINTUN_SHA256 {
+        bail!("wintun.zip checksum mismatch ({hash})");
+    }
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data))?;
+    let mut f = zip.by_name("wintun/bin/amd64/wintun.dll").context("wintun.dll not in zip")?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    std::fs::write(dir.join("wintun.dll"), buf)?;
+    Ok(())
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// Version string printed by a core binary (`-v` / `version`).
 pub async fn core_version(kind: CoreKind, bin: &Path) -> Option<String> {
     if !bin.exists() {

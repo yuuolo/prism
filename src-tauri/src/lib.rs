@@ -1,5 +1,6 @@
 mod core;
 mod download;
+mod elevate;
 mod store;
 mod sysproxy;
 
@@ -50,6 +51,7 @@ struct Snapshot {
     profiles: Vec<ProfileMeta>,
     running: Option<CoreKind>,
     system_proxy: bool,
+    elevated: bool,
     core_paths: Value,
     data_dir: String,
 }
@@ -69,6 +71,7 @@ async fn get_state(st: State<'_, AppState>) -> Res<Snapshot> {
         settings: s,
         profiles: st.store.profiles(),
         running: st.core.running().await,
+        elevated: elevate::is_elevated(),
         core_paths: paths,
         data_dir: st.store.dir.display().to_string(),
     })
@@ -89,9 +92,14 @@ async fn core_versions(st: State<'_, AppState>) -> Res<Value> {
 async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settings) -> Res<()> {
     let old = st.settings();
     let new = st.update(|s| {
-        let selections = std::mem::take(&mut s.selections);
+        // Fields with their own commands keep their live values.
+        let keep = s.clone();
         *s = settings;
-        s.selections = selections;
+        s.selections = keep.selections;
+        s.tun = keep.tun;
+        s.system_proxy = keep.system_proxy;
+        s.mode = keep.mode;
+        s.active_profile = keep.active_profile;
     })?;
     let restart = old.core != new.core
         || old.mixed_port != new.mixed_port
@@ -218,8 +226,18 @@ async fn activate_profile(app: AppHandle, st: State<'_, AppState>, id: String) -
     Ok(())
 }
 
+/// Error prefix the UI recognises to offer "restart as administrator".
+const NEED_ADMIN: &str = "NEED_ADMIN: TUN 模式需要管理员权限";
+
 async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
     let s = st.settings();
+    if s.tun && !elevate::is_elevated() {
+        return Err(NEED_ADMIN.into());
+    }
+    if s.tun && s.core == CoreKind::Prism && !st.store.runtime_dir().join("wintun.dll").exists() {
+        st.core.push_log(app, "[prism] 正在下载 wintun.dll ...".into());
+        download::wintun(&st.store.runtime_dir(), None).await.map_err(|err| format!("下载 wintun.dll 失败: {err:#}"))?;
+    }
     // prism-core needs geodata for GEOSITE/GEOIP rules; fetch it once.
     let rt = st.store.runtime_dir();
     if s.core == CoreKind::Prism && !(rt.join("geosite.dat").exists() && rt.join("geoip.dat").exists()) {
@@ -312,6 +330,31 @@ async fn set_system_proxy(app: AppHandle, st: State<'_, AppState>, enable: bool)
 }
 
 #[tauri::command]
+async fn set_tun(app: AppHandle, st: State<'_, AppState>, enable: bool) -> Res<()> {
+    if enable && !elevate::is_elevated() {
+        return Err(NEED_ADMIN.into());
+    }
+    st.update(|s| s.tun = enable)?;
+    if st.core.running().await.is_some() {
+        if let Err(err) = start(&app, &st).await {
+            st.update(|s| s.tun = false)?;
+            return Err(err);
+        }
+    }
+    refresh_tray(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn restart_as_admin(app: AppHandle) -> Res<()> {
+    if !elevate::relaunch_as_admin() {
+        return Err("已取消".into());
+    }
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
 fn get_logs(st: State<'_, AppState>) -> Vec<String> {
     st.core.logs.lock().unwrap().iter().cloned().collect()
 }
@@ -360,13 +403,14 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let s = st.settings();
     let show = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
     let sys = CheckMenuItem::with_id(app, "sysproxy", "系统代理", true, s.system_proxy, None::<&str>)?;
+    let tun = CheckMenuItem::with_id(app, "tun", "TUN 模式", true, s.tun, None::<&str>)?;
     let rule = CheckMenuItem::with_id(app, "mode_rule", "规则模式", true, s.mode == Mode::Rule, None::<&str>)?;
     let global = CheckMenuItem::with_id(app, "mode_global", "全局模式", true, s.mode == Mode::Global, None::<&str>)?;
     let direct = CheckMenuItem::with_id(app, "mode_direct", "直连模式", true, s.mode == Mode::Direct, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     Menu::with_items(
         app,
-        &[&show, &PredefinedMenuItem::separator(app)?, &sys, &rule, &global, &direct, &PredefinedMenuItem::separator(app)?, &quit],
+        &[&show, &PredefinedMenuItem::separator(app)?, &sys, &tun, &rule, &global, &direct, &PredefinedMenuItem::separator(app)?, &quit],
     )
 }
 
@@ -386,6 +430,10 @@ fn on_menu(app: &AppHandle, id: &str) {
             "sysproxy" => {
                 let on = !st.settings().system_proxy;
                 set_system_proxy(app.clone(), st.clone(), on).await
+            }
+            "tun" => {
+                let on = !st.settings().tun;
+                set_tun(app.clone(), st.clone(), on).await
             }
             "mode_rule" | "mode_global" | "mode_direct" => {
                 set_mode(app.clone(), st.clone(), id.trim_start_matches("mode_").to_string()).await
@@ -467,6 +515,8 @@ pub fn run() {
             select_proxy,
             set_mode,
             set_system_proxy,
+            set_tun,
+            restart_as_admin,
             get_logs,
             clear_logs,
             download_core,

@@ -89,15 +89,30 @@ impl Tunnel {
         *self.mode.read().unwrap()
     }
 
-    pub async fn dial(&self, meta: &mut Metadata) -> io::Result<Dialed> {
-        let (target, rule, payload) = match self.mode() {
+    /// Picks the outbound name for a connection: (target, rule, payload).
+    async fn target(&self, meta: &mut Metadata) -> (String, String, String) {
+        match self.mode() {
             Mode::Direct => ("DIRECT".to_string(), "Direct".to_string(), String::new()),
             Mode::Global => ("GLOBAL".to_string(), "Global".to_string(), String::new()),
             Mode::Rule => match self.router.route(meta).await {
                 Some(r) => (r.target.clone(), r.display(), r.payload.clone()),
                 None => ("DIRECT".to_string(), "Match".to_string(), String::new()),
             },
-        };
+        }
+    }
+
+    /// UDP is only relayed for connections the rules send to DIRECT
+    /// (proxy outbounds don't carry UDP yet).
+    pub async fn udp_direct(&self, meta: &mut Metadata) -> bool {
+        let (target, rule, _) = self.target(meta).await;
+        let leaf = self.reg.resolve(&target, &meta.dst).map(|(o, _)| o.name().to_string()).unwrap_or_default();
+        let ok = leaf == "DIRECT";
+        tracing::debug!("[UDP] {} --> {} match {rule} using {target}{}", meta.src, meta.dst, if ok { "" } else { " (dropped: UDP proxy unsupported)" });
+        ok
+    }
+
+    pub async fn dial(&self, meta: &mut Metadata) -> io::Result<Dialed> {
+        let (target, rule, payload) = self.target(meta).await;
         let (out, chain) = self.reg.resolve(&target, &meta.dst)?;
         let shown = if chain.len() > 1 { format!("{target}[{}]", chain.last().unwrap()) } else { target.clone() };
         let res = tokio::time::timeout(Duration::from_secs(10), out.connect(&meta.dst)).await;

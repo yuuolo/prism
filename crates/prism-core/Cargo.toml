@@ -45,3 +45,9 @@ clap = { version = "4", features = ["derive"] }
 ipnet = "2"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
+netstack-smoltcp = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
+
+[target.'cfg(windows)'.dependencies]
+wintun = "0.5"
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Foundation"] }

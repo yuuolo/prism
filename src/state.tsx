@@ -45,7 +45,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (ok) toast(ok);
         return true;
       } catch (e) {
-        toast(errText(e), "err");
+        const msg = errText(e);
+        if (msg.startsWith("NEED_ADMIN")) {
+          if (confirm("TUN 模式需要管理员权限。\n是否以管理员身份重新启动 Prism？")) {
+            api.restartAsAdmin().catch((err) => toast(errText(err), "err"));
+          }
+        } else {
+          toast(msg, "err");
+        }
         return false;
       } finally {
         refresh();

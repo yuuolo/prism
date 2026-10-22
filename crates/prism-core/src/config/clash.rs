@@ -116,6 +116,13 @@ pub fn parse(v: &Value) -> Result<Profile> {
     }
     g.external_controller = s(root, "external-controller").filter(|x| !x.is_empty());
     g.secret = s(root, "secret").unwrap_or_default();
+    if let Some(t) = sub(root, "tun") {
+        g.tun.enable = b(t, "enable");
+        g.tun.auto_route = !matches!(t.get("auto-route"), Some(Value::Bool(false)));
+    }
+    if let Some(d) = sub(root, "dns") {
+        g.tun.dns = list(d, "default-nameserver").into_iter().filter(|x| x.parse::<std::net::IpAddr>().is_ok()).collect();
+    }
 
     if root.contains_key("proxy-providers") {
         p.warnings.push("proxy-providers are not supported by prism-core and were ignored".into());
@@ -285,6 +292,12 @@ pub struct Overrides {
     pub mode: Mode,
     pub allow_lan: bool,
     pub log_level: String,
+    #[serde(default)]
+    pub tun: bool,
+}
+
+fn seq(items: &[&str]) -> Value {
+    Value::Sequence(items.iter().map(|s| Value::String(s.to_string())).collect())
 }
 
 /// Patches a Clash YAML document in place with the GUI's runtime settings,
@@ -294,6 +307,29 @@ pub fn apply_overrides(v: &mut Value, o: &Overrides) {
     let Some(root) = v.as_mapping_mut() else { return };
     for k in ["port", "socks-port", "redir-port", "tproxy-port", "tun", "external-ui", "external-controller-tls"] {
         root.remove(k);
+    }
+    if o.tun {
+        let mut t = Mapping::new();
+        put(&mut t, "enable", true);
+        put(&mut t, "stack", "mixed");
+        put(&mut t, "device", "Prism");
+        put(&mut t, "auto-route", true);
+        put(&mut t, "auto-detect-interface", true);
+        put(&mut t, "dns-hijack", seq(&["any:53"]));
+        put(&mut t, "mtu", 9000u64);
+        put(root, "tun", Value::Mapping(t));
+        // TUN needs a DNS module; keep the profile's if it has one.
+        let dns_on = root.get("dns").and_then(|d| d.as_mapping()).is_some_and(|d| b(d, "enable"));
+        if !dns_on {
+            let mut d = Mapping::new();
+            put(&mut d, "enable", true);
+            put(&mut d, "enhanced-mode", "fake-ip");
+            put(&mut d, "fake-ip-range", "198.18.0.1/16");
+            put(&mut d, "fake-ip-filter", seq(&["*.lan", "+.local", "+.msftconnecttest.com", "+.msftncsi.com", "localhost.ptlogin2.qq.com"]));
+            put(&mut d, "default-nameserver", seq(&["223.5.5.5", "119.29.29.29"]));
+            put(&mut d, "nameserver", seq(&["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query"]));
+            put(root, "dns", Value::Mapping(d));
+        }
     }
     put(root, "mixed-port", o.mixed_port as u64);
     put(root, "external-controller", o.controller.clone());
