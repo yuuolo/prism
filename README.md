@@ -2,6 +2,8 @@
 
 类似 Clash Verge Rev 的桌面代理客户端，带**自研 Rust 代理内核**（`prism-core`），并可一键切换到 **mihomo** 或 **sing-box** 内核。
 
+**[使用手册](docs/manual.md)**：安装与界面说明、系统代理与 TUN、订阅格式、配置语法（Clash YAML / 分享链接 / sing-box）、命令行与常见问题。
+
 ```
 ┌──────────── Prism GUI (Tauri 2 + React) ────────────┐
 │ 概览 · 代理 · 订阅 · 连接 · 规则 · 日志 · 设置        │

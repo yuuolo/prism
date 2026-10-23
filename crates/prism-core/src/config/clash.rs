@@ -55,6 +55,10 @@ pub fn parse_proxy(m: &Mapping) -> Result<ProxyConfig> {
     let Some(kind) = ProxyKind::from_clash_type(&ty) else {
         bail!("proxy {name}: unsupported type {ty}");
     };
+    // Plugin settings can't be carried over; without them the node is broken.
+    if kind == ProxyKind::Shadowsocks && s(m, "plugin").is_some_and(|p| !p.is_empty()) {
+        bail!("proxy {name}: shadowsocks plugin {} is not supported", s(m, "plugin").unwrap_or_default());
+    }
     let mut p = ProxyConfig {
         name,
         kind: Some(kind),
@@ -363,6 +367,13 @@ proxies:
     type: snell
     server: a
     port: 1
+  - name: obfs
+    type: ss
+    server: b
+    port: 2
+    cipher: aes-128-gcm
+    password: x
+    plugin: obfs
 proxy-groups:
   - name: PROXY
     type: select
