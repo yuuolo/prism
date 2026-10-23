@@ -5,6 +5,7 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
@@ -64,12 +65,25 @@ async fn connect_addr(addr: SocketAddr) -> io::Result<TcpStream> {
     Ok(s)
 }
 
-/// Resolves `host` (system resolver; in TUN mode its DNS queries are served by
-/// the core's DNS hijack over pinned sockets).
+static RESOLVER: std::sync::RwLock<Option<Arc<crate::dns::Resolver>>> = std::sync::RwLock::new(None);
+
+/// Name resolution for the core's own connections goes through the DNS
+/// module when it is enabled.
+pub fn set_resolver(r: Option<Arc<crate::dns::Resolver>>) {
+    *RESOLVER.write().unwrap() = r;
+}
+
+/// Resolves `host`: DNS module when enabled, else the system resolver (in
+/// TUN mode its queries are served by the DNS hijack over pinned sockets).
 pub async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = h.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let resolver = RESOLVER.read().unwrap().clone();
+    if let Some(r) = resolver {
+        let ips = r.lookup(h).await?;
+        return Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect());
     }
     let addrs: Vec<SocketAddr> = tokio::time::timeout(Duration::from_secs(10), tokio::net::lookup_host((h, port)))
         .await

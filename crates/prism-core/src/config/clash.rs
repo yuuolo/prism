@@ -127,10 +127,35 @@ pub fn parse(v: &Value) -> Result<Profile> {
     }
     if let Some(d) = sub(root, "dns") {
         g.tun.dns = list(d, "default-nameserver").into_iter().filter(|x| x.parse::<std::net::IpAddr>().is_ok()).collect();
+        p.dns = parse_dns(d);
+        if d.contains_key("fallback") {
+            p.warnings.push("dns: fallback / fallback-filter are not supported by prism-core and were ignored".into());
+        }
     }
-
-    if root.contains_key("proxy-providers") {
-        p.warnings.push("proxy-providers are not supported by prism-core and were ignored".into());
+    if let Some(h) = sub(root, "hosts") {
+        for (k, v) in h {
+            let Some(name) = k.as_str() else { continue };
+            let ips = match v {
+                Value::String(s) => vec![s.clone()],
+                Value::Sequence(seq) => seq.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                _ => vec![],
+            };
+            for ip in ips {
+                p.hosts.push((name.to_string(), ip));
+            }
+        }
+    }
+    if let Some(m) = sub(root, "proxy-providers") {
+        for (k, v) in m {
+            let (Some(name), Some(c)) = (k.as_str(), v.as_mapping()) else { continue };
+            p.proxy_providers.push(parse_proxy_provider(name, c, &mut p.warnings));
+        }
+    }
+    if let Some(m) = sub(root, "rule-providers") {
+        for (k, v) in m {
+            let (Some(name), Some(c)) = (k.as_str(), v.as_mapping()) else { continue };
+            p.rule_providers.push(parse_rule_provider(name, c));
+        }
     }
     if let Some(Value::Sequence(seq)) = root.get("proxies") {
         for item in seq {
@@ -165,9 +190,9 @@ pub fn parse(v: &Value) -> Result<Profile> {
             if let Some(t) = n(m, "tolerance") {
                 gc.tolerance = t;
             }
-            if m.contains_key("use") {
-                p.warnings.push(format!("group {name}: `use` (providers) is not supported"));
-            }
+            gc.use_providers = list(m, "use");
+            gc.filter = s(m, "filter").filter(|f| !f.is_empty());
+            gc.exclude_filter = s(m, "exclude-filter").filter(|f| !f.is_empty());
             p.groups.push(gc);
         }
     }
@@ -182,6 +207,79 @@ pub fn parse(v: &Value) -> Result<Profile> {
         }
     }
     Ok(p)
+}
+
+fn parse_dns(d: &Mapping) -> DnsConfig {
+    let mut policy = Vec::new();
+    if let Some(np) = sub(d, "nameserver-policy") {
+        for (k, v) in np {
+            let Some(key) = k.as_str() else { continue };
+            let servers = match v {
+                Value::String(s) => s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
+                Value::Sequence(_) => {
+                    let mut tmp = Mapping::new();
+                    tmp.insert(Value::String("v".into()), v.clone());
+                    list(&tmp, "v")
+                }
+                _ => vec![],
+            };
+            policy.push((key.to_string(), servers));
+        }
+    }
+    DnsConfig {
+        enable: b(d, "enable"),
+        listen: s(d, "listen"),
+        ipv6: b(d, "ipv6"),
+        enhanced_mode: s(d, "enhanced-mode").unwrap_or_else(|| "normal".into()),
+        fake_ip_range: s(d, "fake-ip-range").unwrap_or_default(),
+        fake_ip_filter: list(d, "fake-ip-filter"),
+        default_nameserver: list(d, "default-nameserver"),
+        nameserver: list(d, "nameserver"),
+        proxy_server_nameserver: list(d, "proxy-server-nameserver"),
+        nameserver_policy: policy,
+    }
+}
+
+fn parse_proxy_provider(name: &str, c: &Mapping, warnings: &mut Vec<String>) -> ProxyProviderConfig {
+    let hc = sub(c, "health-check");
+    let mut inline = Vec::new();
+    if let Some(Value::Sequence(seq)) = c.get("payload") {
+        for item in seq {
+            match item.as_mapping().map(parse_proxy) {
+                Some(Ok(px)) => inline.push(px),
+                Some(Err(e)) => warnings.push(format!("provider {name}: {e}")),
+                None => {}
+            }
+        }
+    }
+    ProxyProviderConfig {
+        name: name.to_string(),
+        kind: s(c, "type").unwrap_or_else(|| "http".into()),
+        url: s(c, "url"),
+        path: s(c, "path"),
+        interval: n(c, "interval").unwrap_or(0),
+        filter: s(c, "filter").filter(|f| !f.is_empty()),
+        exclude_filter: s(c, "exclude-filter").filter(|f| !f.is_empty()),
+        health_check: hc.is_some_and(|h| b(h, "enable")),
+        health_check_url: hc.and_then(|h| s(h, "url")),
+        health_check_interval: hc.and_then(|h| n(h, "interval")).unwrap_or(300),
+        proxy: s(c, "proxy"),
+        inline,
+    }
+}
+
+fn parse_rule_provider(name: &str, c: &Mapping) -> RuleProviderConfig {
+    RuleProviderConfig {
+        name: name.to_string(),
+        kind: s(c, "type").unwrap_or_else(|| "http".into()),
+        behavior: s(c, "behavior").unwrap_or_else(|| "classical".into()).to_ascii_lowercase(),
+        format: s(c, "format").unwrap_or_else(|| "yaml".into()).to_ascii_lowercase(),
+        url: s(c, "url"),
+        path: s(c, "path"),
+        interval: n(c, "interval").unwrap_or(0),
+        proxy: s(c, "proxy"),
+        inline: list(c, "payload"),
+    }
 }
 
 fn put(m: &mut Mapping, k: &str, v: impl Into<Value>) {

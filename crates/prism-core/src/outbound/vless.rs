@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::tls::Tls;
 use super::Outbound;
-use crate::common::{pump, tcp_connect, Address, BoxedStream};
+use crate::common::{pump, tcp_connect, udp_over_stream, Address, BoxedStream, Framing, UdpPipe};
 use crate::config::ProxyConfig;
 
 pub struct Vless {
@@ -42,11 +42,12 @@ impl Vless {
     }
 }
 
-fn header(uuid: &[u8; 16], target: &Address) -> Vec<u8> {
+/// Request header; `cmd` 1 = TCP, 2 = UDP.
+fn header(uuid: &[u8; 16], cmd: u8, target: &Address) -> Vec<u8> {
     let mut h = vec![0u8];
     h.extend_from_slice(uuid);
     h.push(0); // addons
-    h.push(1); // tcp
+    h.push(cmd);
     h.extend_from_slice(&target.port().to_be_bytes());
     match target {
         Address::Ip(std::net::SocketAddr::V4(sa)) => {
@@ -100,12 +101,32 @@ impl Outbound for Vless {
     fn api_type(&self) -> &'static str {
         "Vless"
     }
+    fn udp(&self) -> bool {
+        true
+    }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
         let tcp = tcp_connect(&self.server, self.port).await?;
-        let head = header(&self.uuid, target);
+        let head = header(&self.uuid, 1, target);
         match &self.tls {
             Some(t) => finish(t.wrap(tcp).await?, head).await,
             None => finish(tcp, head).await,
         }
+    }
+    async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
+        let tcp = tcp_connect(&self.server, self.port).await?;
+        let head = header(&self.uuid, 2, target);
+        Ok(match &self.tls {
+            Some(t) => {
+                let mut s = t.wrap(tcp).await?;
+                s.write_all(&head).await?;
+                s.flush().await?;
+                udp_over_stream(s, Framing::Vless)
+            }
+            None => {
+                let mut s = tcp;
+                s.write_all(&head).await?;
+                udp_over_stream(s, Framing::Vless)
+            }
+        })
     }
 }

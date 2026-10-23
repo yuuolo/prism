@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, delayClass, enc, lastDelay, type ProxyItem } from "../api";
 import { useApp } from "../state";
 import type { PageKey } from "../App";
+import { ProxyProviders } from "./Providers";
 
 type ProxyMap = Record<string, ProxyItem>;
 
@@ -106,6 +107,8 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
           刷新
         </button>
       </div>
+
+      <ProxyProviders onChange={load} />
 
       {groups.map((g) => {
         const isOpen = open[g.name] ?? groups.length <= 3;

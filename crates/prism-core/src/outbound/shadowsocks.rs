@@ -16,7 +16,7 @@ use sha1::Sha1;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::Outbound;
-use crate::common::{invalid, pump, tcp_connect, Address, BoxedStream};
+use crate::common::{invalid, other, pump, tcp_connect, udp_pump, Address, BoxedStream, UdpPipe};
 use crate::config::ProxyConfig;
 
 const TAG: usize = 16;
@@ -150,6 +150,57 @@ impl Outbound for Shadowsocks {
     }
     fn api_type(&self) -> &'static str {
         "Shadowsocks"
+    }
+    fn udp(&self) -> bool {
+        true
+    }
+    /// AEAD UDP: each packet is `salt | seal(addr | payload)` with a fresh
+    /// salt (so a fresh subkey) and nonce 0.
+    async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
+        let server = *crate::net::resolve(&self.server, self.port)
+            .await?
+            .iter()
+            .min_by_key(|a| a.is_ipv6())
+            .ok_or_else(|| other("no address"))?;
+        let sock = crate::net::udp_socket(server).await?;
+        sock.connect(server).await?;
+        let (method, key, target) = (self.method, self.key.clone(), target.clone());
+        Ok(udp_pump(move |mut out, inc| async move {
+            let kl = method.key_len();
+            let mut buf = vec![0u8; 65535];
+            loop {
+                tokio::select! {
+                    p = out.recv() => match p {
+                        Some(p) => {
+                            let mut plain = Vec::with_capacity(p.len() + 300);
+                            target.write_socks(&mut plain);
+                            plain.extend_from_slice(&p);
+                            let mut pkt = vec![0u8; kl];
+                            rand::thread_rng().fill_bytes(&mut pkt);
+                            let mut c = Cipher::new(method, &key, &pkt);
+                            pkt.extend(c.seal(&plain));
+                            sock.send(&pkt).await?;
+                        }
+                        None => return Ok(()),
+                    },
+                    r = sock.recv(&mut buf) => {
+                        let n = r?;
+                        if n < kl + TAG {
+                            continue;
+                        }
+                        let mut c = Cipher::new(method, &key, &buf[..kl]);
+                        let Ok(plain) = c.open(&buf[kl..n]) else { continue };
+                        let mut cur = &plain[..];
+                        if Address::read_socks(&mut cur).await.is_err() {
+                            continue;
+                        }
+                        if inc.send(cur.to_vec()).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }))
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
         let tcp = tcp_connect(&self.server, self.port).await?;

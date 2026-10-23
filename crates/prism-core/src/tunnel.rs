@@ -12,14 +12,31 @@ use chrono::{DateTime, Utc};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{Address, BoxedStream, ProxyStream};
+use crate::common::{Address, BoxedStream, ProxyStream, UdpPipe};
 use crate::config::Mode;
 use crate::outbound::Registry;
 use crate::rules::Router;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Network {
+    #[default]
+    Tcp,
+    Udp,
+}
+
+impl Network {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Network::Tcp => "tcp",
+            Network::Udp => "udp",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Metadata {
-    /// Inbound protocol: HTTP, HTTPS (CONNECT) or Socks5.
+    pub network: Network,
+    /// Inbound protocol: HTTP, HTTPS (CONNECT), Socks5 or Tun.
     pub inbound: &'static str,
     pub src: SocketAddr,
     pub dst: Address,
@@ -77,11 +94,19 @@ pub struct Dialed {
     pub rule_payload: String,
 }
 
+pub struct DialedUdp {
+    pub pipe: UdpPipe,
+    pub chains: Vec<String>,
+    pub rule: String,
+    pub rule_payload: String,
+}
+
 pub struct Tunnel {
     pub reg: Arc<Registry>,
     pub router: Router,
     pub mode: RwLock<Mode>,
     pub stats: Arc<Stats>,
+    pub dns: Option<Arc<crate::dns::Resolver>>,
 }
 
 impl Tunnel {
@@ -89,8 +114,22 @@ impl Tunnel {
         *self.mode.read().unwrap()
     }
 
+    /// A destination that is a fake-ip handed out by our DNS is replaced by
+    /// the domain it stands for.
+    pub fn restore_fake_ip(&self, meta: &mut Metadata) {
+        let (Some(dns), Address::Ip(sa)) = (&self.dns, &meta.dst) else { return };
+        if !dns.is_fake(sa.ip()) {
+            return;
+        }
+        if let Some(domain) = dns.fake_domain(sa.ip()) {
+            meta.dst = Address::Domain(domain, sa.port());
+            meta.dst_ip = None;
+        }
+    }
+
     /// Picks the outbound name for a connection: (target, rule, payload).
     async fn target(&self, meta: &mut Metadata) -> (String, String, String) {
+        self.restore_fake_ip(meta);
         match self.mode() {
             Mode::Direct => ("DIRECT".to_string(), "Direct".to_string(), String::new()),
             Mode::Global => ("GLOBAL".to_string(), "Global".to_string(), String::new()),
@@ -101,14 +140,42 @@ impl Tunnel {
         }
     }
 
-    /// UDP is only relayed for connections the rules send to DIRECT
-    /// (proxy outbounds don't carry UDP yet).
-    pub async fn udp_direct(&self, meta: &mut Metadata) -> bool {
-        let (target, rule, _) = self.target(meta).await;
-        let leaf = self.reg.resolve(&target, &meta.dst).map(|(o, _)| o.name().to_string()).unwrap_or_default();
-        let ok = leaf == "DIRECT";
-        tracing::debug!("[UDP] {} --> {} match {rule} using {target}{}", meta.src, meta.dst, if ok { "" } else { " (dropped: UDP proxy unsupported)" });
-        ok
+    pub async fn dial_udp(&self, meta: &mut Metadata) -> io::Result<DialedUdp> {
+        let (target, rule, payload) = self.target(meta).await;
+        let (out, chain) = self.reg.resolve(&target, &meta.dst)?;
+        let shown = if chain.len() > 1 { format!("{target}[{}]", chain.last().unwrap()) } else { target.clone() };
+        let res = tokio::time::timeout(Duration::from_secs(10), out.connect_udp(&meta.dst)).await;
+        let pipe = match res {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                tracing::warn!("[UDP] {} --> {} match {rule} using {shown} failed: {e}", meta.src, meta.dst);
+                return Err(e);
+            }
+            Err(_) => {
+                tracing::warn!("[UDP] {} --> {} match {rule} using {shown} failed: timeout", meta.src, meta.dst);
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "dial timeout"));
+            }
+        };
+        tracing::info!("[UDP] {} --> {} match {rule} using {shown}", meta.src, meta.dst);
+        let mut chains = chain;
+        chains.reverse();
+        Ok(DialedUdp { pipe, chains, rule, rule_payload: payload })
+    }
+
+    fn register(&self, meta: Metadata, chains: Vec<String>, rule: String, rule_payload: String) -> Arc<Conn> {
+        let conn = Arc::new(Conn {
+            id: uuid::Uuid::new_v4().to_string(),
+            meta,
+            chains,
+            rule,
+            rule_payload,
+            start: Utc::now(),
+            upload: AtomicU64::new(0),
+            download: AtomicU64::new(0),
+            cancel: CancellationToken::new(),
+        });
+        self.stats.conns.lock().unwrap().insert(conn.id.clone(), conn.clone());
+        conn
     }
 
     pub async fn dial(&self, meta: &mut Metadata) -> io::Result<Dialed> {
@@ -135,18 +202,7 @@ impl Tunnel {
 
     /// Relays until both directions finish or the connection is closed via API.
     pub async fn relay<C: ProxyStream>(&self, client: C, dialed: Dialed, meta: Metadata, initial: &[u8]) {
-        let conn = Arc::new(Conn {
-            id: uuid::Uuid::new_v4().to_string(),
-            meta,
-            chains: dialed.chains,
-            rule: dialed.rule,
-            rule_payload: dialed.rule_payload,
-            start: Utc::now(),
-            upload: AtomicU64::new(0),
-            download: AtomicU64::new(0),
-            cancel: CancellationToken::new(),
-        });
-        self.stats.conns.lock().unwrap().insert(conn.id.clone(), conn.clone());
+        let conn = self.register(meta, dialed.chains, dialed.rule, dialed.rule_payload);
 
         let (cr, cw) = tokio::io::split(client);
         let (rr, mut rw) = tokio::io::split(dialed.stream);
@@ -191,5 +247,90 @@ where
         w.flush().await?;
         conn.fetch_add(n as u64, Ordering::Relaxed);
         total.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
+
+/// A datagram between a client and a destination, as seen by the inbound.
+pub struct UdpPacket {
+    /// The client.
+    pub src: SocketAddr,
+    /// The destination the client addressed (replies appear to come from it).
+    pub dst: Address,
+    pub data: Vec<u8>,
+}
+
+struct UdpSession {
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+
+/// UDP session table for one inbound: one outbound session per
+/// (client, destination). Replies go to `reply`, tagged with the client and
+/// the destination address the client used.
+pub struct UdpNat {
+    inbound: &'static str,
+    sessions: Mutex<HashMap<(SocketAddr, Address), Arc<UdpSession>>>,
+    reply: tokio::sync::mpsc::Sender<UdpPacket>,
+}
+
+impl UdpNat {
+    pub fn new(inbound: &'static str, reply: tokio::sync::mpsc::Sender<UdpPacket>) -> Arc<Self> {
+        Arc::new(UdpNat { inbound, sessions: Mutex::new(HashMap::new()), reply })
+    }
+
+    /// Sends a client datagram, opening a session (routed through `tunnel`)
+    /// on first use.
+    pub fn send(self: &Arc<Self>, tunnel: &Arc<Tunnel>, pkt: UdpPacket) {
+        let key = (pkt.src, pkt.dst.clone());
+        let existing = self.sessions.lock().unwrap().get(&key).cloned();
+        if let Some(s) = existing {
+            let _ = s.tx.try_send(pkt.data);
+            return;
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let session = Arc::new(UdpSession { tx });
+        let _ = session.tx.try_send(pkt.data);
+        self.sessions.lock().unwrap().insert(key.clone(), session.clone());
+        let nat = self.clone();
+        let tunnel = tunnel.clone();
+        tokio::spawn(async move {
+            nat.run_session(tunnel, key.0, key.1.clone(), rx).await;
+            let mut map = nat.sessions.lock().unwrap();
+            if map.get(&key).is_some_and(|s| Arc::ptr_eq(s, &session)) {
+                map.remove(&key);
+            }
+        });
+    }
+
+    async fn run_session(&self, tunnel: Arc<Tunnel>, src: SocketAddr, dst: Address, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let mut meta = Metadata { network: Network::Udp, inbound: self.inbound, src, dst: dst.clone(), dst_ip: dst.ip() };
+        let Ok(dialed) = tunnel.dial_udp(&mut meta).await else { return };
+        let conn = tunnel.register(meta, dialed.chains, dialed.rule, dialed.rule_payload);
+        let UdpPipe { tx: out, rx: mut inc } = dialed.pipe;
+        let stats = tunnel.stats.clone();
+        // DNS sessions are short-lived; everything else idles out after 60s.
+        let idle = Duration::from_secs(if dst.port() == 53 { 10 } else { 60 });
+        loop {
+            tokio::select! {
+                p = rx.recv() => match p {
+                    Some(p) => {
+                        conn.upload.fetch_add(p.len() as u64, Ordering::Relaxed);
+                        stats.upload.fetch_add(p.len() as u64, Ordering::Relaxed);
+                        if out.send(p).await.is_err() { break; }
+                    }
+                    None => break,
+                },
+                p = inc.recv() => match p {
+                    Some(p) => {
+                        conn.download.fetch_add(p.len() as u64, Ordering::Relaxed);
+                        stats.download.fetch_add(p.len() as u64, Ordering::Relaxed);
+                        if self.reply.send(UdpPacket { src, dst: dst.clone(), data: p }).await.is_err() { break; }
+                    }
+                    None => break,
+                },
+                _ = tokio::time::sleep(idle) => break,
+                _ = conn.cancel.cancelled() => break,
+            }
+        }
+        tunnel.stats.conns.lock().unwrap().remove(&conn.id);
     }
 }

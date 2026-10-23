@@ -136,6 +136,33 @@ pub async fn tcp_connect(host: &str, port: u16) -> io::Result<tokio::net::TcpStr
     crate::net::tcp_connect(host, port).await
 }
 
+/// A UDP session to one destination: datagrams to send go into `tx`,
+/// datagrams received from the destination come out of `rx`. Dropping `tx`
+/// ends the session.
+pub struct UdpPipe {
+    pub tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pub rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+/// Runs a UDP protocol implementation: `run` receives the datagrams to send
+/// and a sender for the datagrams it receives, and returns when the session
+/// is over (normally when the send side is closed).
+pub fn udp_pump<F, Fut>(run: F) -> UdpPipe
+where
+    F: FnOnce(tokio::sync::mpsc::Receiver<Vec<u8>>, tokio::sync::mpsc::Sender<Vec<u8>>) -> Fut,
+    Fut: std::future::Future<Output = io::Result<()>> + Send + 'static,
+{
+    let (tx, out_rx) = tokio::sync::mpsc::channel(256);
+    let (in_tx, rx) = tokio::sync::mpsc::channel(256);
+    let fut = run(out_rx, in_tx);
+    tokio::spawn(async move {
+        if let Err(e) = fut.await {
+            tracing::debug!("udp session closed: {e}");
+        }
+    });
+    UdpPipe { tx, rx }
+}
+
 /// Bridges a protocol implemented as two plain async loops into a single
 /// AsyncRead + AsyncWrite stream: the caller gets one end of an in-memory
 /// duplex pipe, `run` gets the other end and moves bytes to / from the wire.
@@ -203,4 +230,77 @@ mod tests {
         assert_eq!(Address::parse_authority("[::1]:80").unwrap().port(), 80);
         assert!(Address::parse_authority("nope").is_none());
     }
+}
+
+/// How datagrams are framed when carried over a stream.
+#[derive(Clone, Debug)]
+pub enum Framing {
+    /// `u16 BE length | payload` (VLESS, sing-box UDP-over-TCP v2 connect mode).
+    Length,
+    /// Like `Length`, but the stream starts with a VLESS response header.
+    Vless,
+    /// Trojan: `socks addr | u16 length | CRLF | payload`, sent to this address.
+    Trojan(Address),
+}
+
+/// Runs a UDP session over an already established stream.
+pub fn udp_over_stream<S>(s: S, framing: Framing) -> UdpPipe
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncWriteExt;
+    udp_pump(move |mut out, inc| async move {
+        let (mut rd, mut wr) = tokio::io::split(s);
+        let fr = framing.clone();
+        let reader = tokio::spawn(async move {
+            let res: io::Result<()> = async {
+                if let Framing::Vless = fr {
+                    let mut head = [0u8; 2];
+                    rd.read_exact(&mut head).await?;
+                    let mut addons = vec![0u8; head[1] as usize];
+                    rd.read_exact(&mut addons).await?;
+                }
+                loop {
+                    if let Framing::Trojan(_) = fr {
+                        Address::read_socks(&mut rd).await?;
+                    }
+                    let len = rd.read_u16().await? as usize;
+                    if let Framing::Trojan(_) = fr {
+                        let mut crlf = [0u8; 2];
+                        rd.read_exact(&mut crlf).await?;
+                    }
+                    let mut data = vec![0u8; len];
+                    rd.read_exact(&mut data).await?;
+                    if inc.send(data).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            .await;
+            if let Err(e) = res {
+                if e.kind() != io::ErrorKind::UnexpectedEof {
+                    tracing::debug!("udp stream reader: {e}");
+                }
+            }
+        });
+        let res: io::Result<()> = async {
+            while let Some(p) = out.recv().await {
+                let mut f = Vec::with_capacity(p.len() + 300);
+                if let Framing::Trojan(target) = &framing {
+                    target.write_socks(&mut f);
+                }
+                f.extend_from_slice(&(p.len().min(u16::MAX as usize) as u16).to_be_bytes());
+                if let Framing::Trojan(_) = &framing {
+                    f.extend_from_slice(b"\r\n");
+                }
+                f.extend_from_slice(&p[..p.len().min(u16::MAX as usize)]);
+                wr.write_all(&f).await?;
+                wr.flush().await?;
+            }
+            Ok(())
+        }
+        .await;
+        reader.abort();
+        res
+    })
 }

@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 
-use crate::common::{Address, BoxedStream};
+use crate::common::{Address, BoxedStream, UdpPipe};
 use crate::config::{ProxyConfig, ProxyKind};
 use crate::delay::DelayStore;
 
@@ -26,10 +26,15 @@ pub trait Outbound: Send + Sync {
     fn name(&self) -> &str;
     /// Type name for the Clash REST API (Shadowsocks, Trojan, Selector, ...).
     fn api_type(&self) -> &'static str;
+    /// Whether [`Outbound::connect_udp`] is supported.
     fn udp(&self) -> bool {
         false
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream>;
+    /// Opens a UDP session to `target` (one destination per session).
+    async fn connect_udp(&self, _target: &Address) -> io::Result<UdpPipe> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, format!("{} does not support UDP", self.name())))
+    }
     fn as_group(&self) -> Option<&ProxyGroup> {
         None
     }

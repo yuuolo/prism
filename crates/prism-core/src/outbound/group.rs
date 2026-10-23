@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{Outbound, RegistryCell};
-use crate::common::{other, Address, BoxedStream};
+use crate::common::{other, Address, BoxedStream, UdpPipe};
 use crate::config::{GroupConfig, GroupKind};
 
 pub struct ProxyGroup {
@@ -106,16 +106,24 @@ impl ProxyGroup {
         }
     }
 
-    pub fn spawn_health_loop(self: Arc<Self>) {
+    /// Periodic health checks for automatic groups, until `stop`.
+    pub fn spawn_health_loop(self: Arc<Self>, stop: tokio_util::sync::CancellationToken) {
         if self.cfg.kind == GroupKind::Select {
             return;
         }
         tokio::spawn(async move {
             // Give the core a moment to finish starting.
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let mut wait = Duration::from_secs(1);
             loop {
-                self.health_check().await;
-                tokio::time::sleep(Duration::from_secs(self.cfg.interval.max(10))).await;
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = tokio::time::sleep(wait) => {}
+                }
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = self.health_check() => {}
+                }
+                wait = Duration::from_secs(self.cfg.interval.max(10));
             }
         });
     }
@@ -129,10 +137,18 @@ impl Outbound for ProxyGroup {
     fn api_type(&self) -> &'static str {
         self.cfg.kind.api_type()
     }
+    fn udp(&self) -> bool {
+        true
+    }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
         let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
         let (out, _) = reg.resolve(&self.cfg.name, target)?;
         out.connect(target).await
+    }
+    async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
+        let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
+        let (out, _) = reg.resolve(&self.cfg.name, target)?;
+        out.connect_udp(target).await
     }
     fn as_group(&self) -> Option<&ProxyGroup> {
         Some(self)

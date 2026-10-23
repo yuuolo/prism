@@ -16,7 +16,7 @@
 pub async fn start(
     _: &crate::config::TunConfig,
     _: &std::path::Path,
-    _: std::sync::Arc<crate::tunnel::Tunnel>,
+    _: std::sync::Arc<crate::hub::Hub>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("TUN mode is only implemented on Windows")
 }
@@ -26,10 +26,9 @@ pub use imp::start;
 
 #[cfg(windows)]
 mod imp {
-    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use anyhow::{anyhow, bail, Context, Result};
@@ -40,7 +39,8 @@ mod imp {
 
     use crate::common::Address;
     use crate::config::TunConfig;
-    use crate::tunnel::{Metadata, Tunnel};
+    use crate::hub::Hub;
+    use crate::tunnel::{Metadata, Network, Tunnel, UdpNat, UdpPacket};
     use crate::{net, sniff};
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(172, 19, 0, 1);
@@ -83,7 +83,7 @@ mod imp {
             .ok_or_else(|| anyhow!("wintun.dll not found (put it in {} or next to prism-core)", home.display()))
     }
 
-    pub async fn start(cfg: &TunConfig, home: &Path, tunnel: Arc<Tunnel>) -> Result<()> {
+    pub async fn start(cfg: &TunConfig, home: &Path, hub: Arc<Hub>) -> Result<()> {
         let phys = default_interface()?;
         let wintun = unsafe { wintun::load_from_path(find_wintun(home)?) }.context("load wintun.dll")?;
         let adapter = wintun::Adapter::create(&wintun, "Prism", "Prism", Some(GUID))
@@ -152,16 +152,16 @@ mod imp {
         });
 
         if let Some(mut tcp) = tcp {
-            let t = tunnel.clone();
+            let h = hub.clone();
             tokio::spawn(async move {
                 while let Some((stream, src, dst)) = tcp.next().await {
-                    tokio::spawn(handle_tcp(stream, src, dst, t.clone()));
+                    tokio::spawn(handle_tcp(stream, src, dst, h.core().tunnel.clone()));
                 }
             });
         }
         if let Some(udp) = udp {
             let upstream = cfg.dns_upstream();
-            tokio::spawn(handle_udp(udp, tunnel, upstream));
+            tokio::spawn(handle_udp(udp, hub, upstream));
         }
         Ok(())
     }
@@ -187,6 +187,7 @@ mod imp {
         }
         let domain = sniff::domain(&buf[..n]);
         let mut meta = Metadata {
+            network: Network::Tcp,
             inbound: "Tun",
             src,
             dst: match domain {
@@ -200,79 +201,55 @@ mod imp {
         }
     }
 
-    type Msg = (Vec<u8>, SocketAddr, SocketAddr);
-
-    async fn handle_udp(udp: StackUdp, tunnel: Arc<Tunnel>, upstream: Vec<IpAddr>) {
+    async fn handle_udp(udp: StackUdp, hub: Arc<Hub>, upstream: Vec<IpAddr>) {
         let (mut rd, mut wr) = udp.split();
-        let (wtx, mut wrx) = mpsc::channel::<Msg>(4096);
+        let (reply_tx, mut reply_rx) = mpsc::channel::<UdpPacket>(4096);
         tokio::spawn(async move {
-            while let Some(m) = wrx.recv().await {
-                if wr.send(m).await.is_err() {
+            while let Some(p) = reply_rx.recv().await {
+                let Address::Ip(from) = p.dst else { continue };
+                if wr.send((p.data, from, p.src)).await.is_err() {
                     break;
                 }
             }
         });
-        let sessions: Arc<Mutex<HashMap<(SocketAddr, SocketAddr), Arc<tokio::net::UdpSocket>>>> = Default::default();
+        let nat = UdpNat::new("Tun", reply_tx.clone());
         while let Some((data, src, dst)) = rd.next().await {
             if dst.port() == 53 {
+                tokio::spawn(dns_query(hub.clone(), data, src, dst, upstream.clone(), reply_tx.clone()));
+                continue;
+            }
+            if dst.ip().is_multicast() || dst.ip() == IpAddr::V4(Ipv4Addr::BROADCAST) {
+                continue;
+            }
+            nat.send(&hub.core().tunnel, UdpPacket { src, dst: Address::Ip(dst), data });
+        }
+    }
+
+    /// DNS hijack: the DNS module answers when enabled (fake-ip etc.);
+    /// otherwise the query is forwarded to the server the client asked (or
+    /// the default upstream for the TUN's own DNS address).
+    async fn dns_query(hub: Arc<Hub>, query: Vec<u8>, src: SocketAddr, dst: SocketAddr, upstream: Vec<IpAddr>, reply: mpsc::Sender<UdpPacket>) {
+        let resp = match hub.core().dns.clone() {
+            Some(r) => r.handle(&query).await,
+            None => {
                 let target = if dst.ip() == IpAddr::V4(DNS) || dst.ip() == IpAddr::V4(ADDR) {
                     SocketAddr::new(upstream.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5))), 53)
                 } else {
                     dst
                 };
-                tokio::spawn(dns_forward(data, src, dst, target, wtx.clone()));
-                continue;
-            }
-            if dst.port() == 443 || dst.ip().is_multicast() || dst.ip() == IpAddr::V4(Ipv4Addr::BROADCAST) {
-                continue; // QUIC -> force TCP fallback; no multicast/broadcast
-            }
-            let existing = sessions.lock().unwrap().get(&(src, dst)).cloned();
-            if let Some(sock) = existing {
-                let _ = sock.send(&data).await;
-                continue;
-            }
-            let mut meta = Metadata { inbound: "Tun", src, dst: Address::Ip(dst), dst_ip: Some(dst.ip()) };
-            if !tunnel.udp_direct(&mut meta).await {
-                continue;
-            }
-            let Ok(sock) = net::udp_socket(dst).await else { continue };
-            if sock.connect(dst).await.is_err() {
-                continue;
-            }
-            let sock = Arc::new(sock);
-            sessions.lock().unwrap().insert((src, dst), sock.clone());
-            let _ = sock.send(&data).await;
-            let (sessions, wtx) = (sessions.clone(), wtx.clone());
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 65535];
-                while let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(60), sock.recv(&mut buf)).await {
-                    if wtx.send((buf[..n].to_vec(), dst, src)).await.is_err() {
-                        break;
+                match tokio::time::timeout(Duration::from_secs(5), crate::dns::upstream::udp_query(target, &query)).await {
+                    Ok(Ok(r)) => Some(r),
+                    Ok(Err(e)) => {
+                        tracing::debug!("dns {target}: {e}");
+                        None
                     }
+                    Err(_) => None,
                 }
-                sessions.lock().unwrap().remove(&(src, dst));
-            });
-        }
-    }
-
-    async fn dns_forward(query: Vec<u8>, src: SocketAddr, dst: SocketAddr, upstream: SocketAddr, wtx: mpsc::Sender<Msg>) {
-        let res = async {
-            let sock = net::udp_socket(upstream).await?;
-            sock.send_to(&query, upstream).await?;
-            let mut buf = vec![0u8; 4096];
-            let (n, _) = tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
-                .await
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "dns timeout"))??;
-            buf.truncate(n);
-            Ok::<_, std::io::Error>(buf)
-        }
-        .await;
-        match res {
-            // Reply appears to come from the address the client asked.
-            Ok(resp) => {
-                let _ = wtx.send((resp, dst, src)).await;
             }
-            Err(e) => tracing::debug!("dns {upstream}: {e}"),
+        };
+        if let Some(data) = resp {
+            // The reply appears to come from the address the client asked.
+            let _ = reply.send(UdpPacket { src, dst: Address::Ip(dst), data }).await;
         }
     }
 }

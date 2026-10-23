@@ -1,6 +1,6 @@
 # Prism 使用手册（Windows）
 
-适用版本：v0.1.1
+适用版本：v0.1.1 之后的开发版（UDP、DNS 模块、providers）
 
 - [1. 安装与首次使用](#1-安装与首次使用)
 - [2. 界面说明](#2-界面说明)
@@ -48,6 +48,7 @@
 - 点节点上的延迟数字测单个节点，点组标题右侧的 **测速** 测整组。
 - 延迟颜色：绿色 < 300 ms，黄色 < 800 ms，橙色更慢，红色「超时」表示测试失败。
 - 节点选择会按订阅分别记住，重启内核或 Prism 后自动恢复。
+- 订阅含 `proxy-providers` 时，顶部的 **代理集合** 卡片列出每个集合的类型、节点数和更新时间，可单独 **测速** 或 **更新**（HTTP 类型）。更新后内核热重载，已选节点保持不变。
 
 ### 订阅
 - **导入**：粘贴订阅链接后导入。Prism 以 `clash.meta` 作为 User-Agent 下载，所以多数机场会返回 Clash 格式。若直连下载失败且内核正在运行，会自动经代理重试。
@@ -59,11 +60,12 @@
 - **删除**：内核运行时不能删除正在使用的订阅，请先停止内核或切换到别的订阅。
 
 ### 连接
-- 实时列出经过内核的连接：主机、入站类型、命中的规则、链路（如 `节点选择 → 自动选择 → 东京`）、速度和流量。
+- 实时列出经过内核的连接：主机、入站类型和 TCP / UDP、命中的规则、链路（如 `节点选择 → 自动选择 → 东京`）、速度和流量。
 - 可按主机 / 规则 / 节点过滤，**暂停** 刷新，单独 **关闭** 某个连接或 **全部关闭**。
 
 ### 规则
 - 显示内核实际加载的规则（不受支持而被跳过的规则不会出现在这里，原因见日志）。
+- 订阅含 `rule-providers` 时，顶部的 **规则集合** 卡片列出每个规则集的类型、条数和更新时间，HTTP 类型可单独 **更新**。
 
 ### 日志
 - 内核的输出和 Prism 自身的提示（以 `[prism]` 开头，紫色显示），警告为黄色，错误为红色。
@@ -97,13 +99,13 @@
 | 来源 | 本项目自研（Rust），随安装包自带 | 设置页下载 | 设置页下载 |
 | AnyTLS / Shadowsocks / Trojan / VLESS | ✅（VLESS 仅 TCP/TLS） | ✅ | ✅ |
 | VMess / Hysteria2 / Reality / WebSocket / gRPC | ❌ | ✅ | ✅ |
-| 经代理转发 UDP | ❌ | ✅ | ✅ |
+| 经代理转发 UDP | ✅（每个目标一条会话） | ✅ | ✅ |
 | TUN 模式 | ✅（未经实网测试） | ✅ | ✅ |
-| DNS 模块 / fake-ip | ❌ | ✅ | ✅ |
-| proxy-providers / rule-providers | ❌ | ✅ | — |
+| DNS 模块 / fake-ip | ✅ | ✅ | ✅ |
+| proxy-providers / rule-providers | ✅（规则集仅 yaml / text 格式） | ✅ | — |
 
-- 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS(TCP) 节点、日常网页和应用使用：**Prism 内核**即可，体积小、启动快。
-- 需要游戏 / 语音通话等 UDP 流量走代理，或订阅含 VMess、Hysteria2、Reality 等：切换到 **Mihomo** 或 **sing-box**。
+- 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS(TCP) 节点：**Prism 内核**即可，体积小、启动快，TCP 和 UDP 都可经代理。
+- 订阅含 VMess、Hysteria2、Reality、WebSocket / gRPC 节点，或用到 `PROCESS-NAME`、`AND/OR` 等规则、`.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
 - 同一份订阅三个内核通用，Prism 会自动转换格式（见第 5、8 节）。Prism 内核遇到不支持的节点或规则会跳过，并在日志中给出警告。
 
 ## 4. 系统代理与 TUN 模式
@@ -115,10 +117,10 @@
 - Prism 内核首次使用 TUN 时会自动下载官方签名的 `wintun.dll`（校验 SHA-256）。
 - Prism 内核的 TUN：
   - 通过 TLS SNI / HTTP Host 识别域名，按域名规则分流；
-  - 接管发往 53 端口的 DNS 请求：发给某个 DNS 服务器的查询会原样转发给该服务器（绕过虚拟网卡），发给虚拟网卡自身 DNS 地址的查询转发到 `dns.default-nameserver`（默认 `223.5.5.5`、`119.29.29.29`）；
-  - 丢弃 QUIC（UDP 443），浏览器会自动改用 TCP；
-  - 其他 UDP 仅在规则为 DIRECT 时直连转发，不经代理；
+  - 接管发往 53 端口的 DNS 请求：启用了 DNS 模块（见 6.6）时由它应答（包括 fake-ip）；否则发给某个 DNS 服务器的查询原样转发给该服务器（绕过虚拟网卡），发给虚拟网卡自身 DNS 地址的查询转发到 `dns.default-nameserver`（默认 `223.5.5.5`、`119.29.29.29`）；
+  - 其他 UDP（包括 QUIC）按规则分流，可经代理转发；
   - 只接管 IPv4。
+- 在 Prism 里打开 TUN 时，如果订阅没有启用 `dns`，会自动加上 fake-ip 的 DNS 配置（`doh.pub`、`dns.alidns.com`），Prism 和 Mihomo 内核都会使用它。
 - 不要同时开启其他客户端（如 FlClash、Clash Verge）的 TUN，两个虚拟网卡会互相抢路由。
 - 按设计，内核退出时虚拟网卡和路由会随进程一起删除，异常退出也不会残留。（Prism 内核的 TUN 尚未在真实网卡上做过端到端测试，遇到问题请改用 Mihomo / sing-box 内核的 TUN。）
 - 开着 TUN 时如果以普通权限启动 Prism，内核不会自动启动（日志中会提示需要管理员权限）。请以管理员身份运行，或先关闭 TUN。
@@ -219,7 +221,9 @@ rules:
 | `unified-delay` | 测速只计第二次请求 |
 | `tun.enable` | 启用 TUN（需管理员权限） |
 | `tun.auto-route` | 自动添加路由，默认 `true` |
-| `dns.default-nameserver` | TUN 模式下，发给虚拟网卡自身 DNS 地址的查询转发到这里（只取纯 IP 地址），默认 `223.5.5.5`、`119.29.29.29` |
+| `dns` | DNS 模块，见 6.6 |
+| `hosts` | 静态解析，见 6.6 |
+| `proxy-providers`、`rule-providers` | 见 6.7、6.8 |
 
 **由 Prism 管理的字段**：在客户端中运行时，`mixed-port`、`external-controller`、`secret`、`mode`、`allow-lan`、`log-level`、`unified-delay`、`tun` 会被设置页的值覆盖；`port`、`socks-port`、`redir-port`、`tproxy-port`、`external-ui` 会被删除。在订阅里写这些字段不会生效，请在设置页修改。
 
@@ -286,6 +290,9 @@ proxy-groups:
     url: https://www.gstatic.com/generate_204   # 健康检查地址（自动类型使用）
     interval: 300                               # 检查间隔（秒），最小 10
     tolerance: 50                               # url-test 切换阈值（毫秒）
+    use: [集合名, ...]                          # 追加 proxy-providers 中的节点
+    filter: '香港|HK'                           # 只要名字匹配该正则的集合节点
+    exclude-filter: '过期|剩余'                  # 去掉名字匹配该正则的集合节点
 ```
 
 | 类型 | 行为 |
@@ -298,7 +305,7 @@ proxy-groups:
 - 组可以嵌套组（`proxies` 里写其他组的名字）。
 - 内置的 `DIRECT`（直连）、`REJECT`（拒绝）可直接使用；`GLOBAL` 组由内核自动生成，包含所有组和节点，供全局模式使用。
 - 引用了不存在名字的成员会被删除并记录警告；成员全部无效的组会变成只含 `DIRECT`。
-- 不支持 `use`（proxy-providers）。
+- `use` 的节点排在 `proxies` 之后；`filter` / `exclude-filter` 只作用于集合节点。
 
 ### 6.5 rules（规则）
 
@@ -325,13 +332,136 @@ MATCH,目标
 | `DST-PORT` | 目标端口，可用 `-` 表示范围、`/` 分隔多个 | `DST-PORT,22,DIRECT`、`DST-PORT,8000-9000,PROXY`、`DST-PORT,80/443,PROXY` |
 | `SRC-PORT` | 来源端口 | `SRC-PORT,50000-60000,DIRECT` |
 | `IN-TYPE` | 入站类型：`HTTP`（普通 HTTP 代理）、`HTTPS`（CONNECT）、`SOCKS5`、`TUN` | `IN-TYPE,TUN,PROXY` |
+| `NETWORK` | `tcp` 或 `udp` | `NETWORK,udp,DIRECT` |
+| `RULE-SET` | 规则集合（rule-providers，见 6.8）中的任一条 | `RULE-SET,reject,REJECT`、`RULE-SET,telegram,PROXY,no-resolve` |
 | `MATCH`（或 `FINAL`） | 匹配所有，放在最后 | `MATCH,PROXY` |
 
 **no-resolve**：`GEOIP`、`IP-CIDR` 类规则遇到域名目标时，默认会先解析出 IP 再匹配（超时 3 秒）。加上 `no-resolve` 则域名目标直接跳过这条规则，避免为了匹配规则而做 DNS 查询。一般给 IP 类规则都加上 `no-resolve`，只在确实需要按 IP 分流的规则上去掉。
 
 **GEOSITE / GEOIP 数据**：Prism 内核读取 v2ray 格式的 `geosite.dat`、`geoip.dat`（MetaCubeX/meta-rules-dat），首次使用时自动下载，设置页可手动更新。数据文件缺失时这两类规则会被整体跳过；数据文件中不存在的分类，对应规则也会被忽略。
 
-**Prism 内核不支持的规则**（会被跳过并在日志中警告，Mihomo 内核可用）：`RULE-SET`、`PROCESS-NAME`、`PROCESS-PATH`、`AND` / `OR` / `NOT`、`NETWORK`、`GEOIP` 之外的 `SRC-GEOIP` 等。
+**Prism 内核不支持的规则**（会被跳过并在日志中警告，Mihomo 内核可用）：`PROCESS-NAME`、`PROCESS-PATH`、`AND` / `OR` / `NOT`、`SRC-GEOIP` 等。
+
+### 6.6 dns（DNS 模块）与 hosts
+
+```yaml
+hosts:
+  router.lan: 192.168.1.1
+  myserver.test: [10.0.0.2, 10.0.0.3]
+
+dns:
+  enable: true
+  listen: 127.0.0.1:1053          # 可选：对外提供 DNS 服务（UDP）
+  ipv6: false                     # false 时 AAAA 查询返回空
+  enhanced-mode: fake-ip          # fake-ip / redir-host / normal
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:                 # 这些域名返回真实地址
+    - '*.lan'
+    - '+.msftconnecttest.com'
+    - 'geosite:cn'
+  default-nameserver:             # 只能写 IP，用来解析下面服务器的域名
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+  nameserver-policy:              # 按域名指定服务器，从上到下第一个匹配生效
+    'geosite:geolocation-!cn': ['https://1.1.1.1/dns-query#PROXY']
+    '+.corp.example': 'tcp://10.1.1.1'
+  proxy-server-nameserver:        # 可选：专门解析代理服务器域名
+    - https://doh.pub/dns-query
+```
+
+**服务器写法**：
+
+| 写法 | 协议 |
+|---|---|
+| `223.5.5.5`、`udp://1.1.1.1:53` | UDP |
+| `tcp://8.8.8.8` | TCP |
+| `tls://dns.alidns.com` | DNS over TLS（853） |
+| `https://dns.alidns.com/dns-query` | DNS over HTTPS |
+| 以上任意写法后加 `#组名或节点名` | 通过该代理查询（如 `https://1.1.1.1/dns-query#PROXY`）；`#DIRECT` 表示直连 |
+
+不支持 `quic://`、`h3://`、`dhcp://`、`system`，以及 `fallback` / `fallback-filter`（会忽略并警告）。
+
+**域名写法**（`fake-ip-filter`、`nameserver-policy` 的键）：`example.com` 仅该域名；`+.example.com` 该域名及所有子域名；`.example.com` 所有子域名；`*.example.com` 恰好一级子域名；`geosite:分类`（可写 `geosite:cn,private`）。
+
+**工作方式**：
+- 应用的查询（`listen` 端口、TUN 接管的 DNS）：先查 `hosts`；fake-ip 模式下，不在 `fake-ip-filter` 中的域名返回一个假地址（TTL 1 秒），之后连向该地址的连接会还原成域名，再按域名规则分流、由代理服务器解析；其余查询按 `nameserver-policy` / `nameserver` 转发，所有服务器同时查询、取最先返回的结果，并按 TTL 缓存。
+- 内核自己的解析（直连目标、代理服务器域名、IP 类规则）只用直连的服务器：`proxy-server-nameserver`，没有则用不带 `#代理` 的 `nameserver`，再没有则用 `default-nameserver`。因此代理服务器的域名不会绕回经过代理本身来解析，也不会得到假地址。
+- 重新加载配置（热重载）时 fake-ip 映射会保留。
+
+### 6.7 proxy-providers（代理集合）
+
+```yaml
+proxy-providers:
+  airport:
+    type: http                        # http / file / inline
+    url: https://example.com/sub?token=xxx
+    path: ./providers/airport.yaml    # 缓存文件（相对数据目录 runtime\），默认 ./proxy_providers/<名字>.yaml
+    interval: 3600                    # 刷新间隔（秒）
+    filter: '香港|日本'                # 只保留名字匹配的节点
+    exclude-filter: '剩余|过期'
+    proxy: DIRECT                     # 下载经过的出站，默认直连
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+  local:
+    type: file
+    path: ./my-nodes.yaml
+  inline-nodes:
+    type: inline
+    payload:
+      - {name: 备用, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw}
+
+proxy-groups:
+  - {name: PROXY, type: select, use: [airport, local], filter: '香港'}
+```
+
+- 集合内容可以是 Clash YAML（含 `proxies:`）或分享链接列表（含 Base64），格式同订阅。
+- `http` 集合：缓存文件不存在或超过 `interval` 时，启动内核时下载；下载失败时继续使用旧的缓存文件（日志中提示）。内核运行期间每 `interval` 秒刷新一次，内容有变化时自动热重载，已选节点保持不变。
+- 集合中的节点名与已有名字重复时，会改名为 `节点名 [集合名]`。
+- 集合节点只能通过组的 `use` 使用（不会直接出现在全局模式的 GLOBAL 列表顶层）。
+
+### 6.8 rule-providers（规则集合）
+
+```yaml
+rule-providers:
+  reject:
+    type: http                        # http / file / inline
+    behavior: domain                  # domain / ipcidr / classical
+    format: yaml                      # yaml / text
+    url: https://example.com/reject.yaml
+    path: ./rules/reject.yaml         # 默认 ./rule_providers/<名字>.yaml
+    interval: 86400
+  telegram:
+    type: http
+    behavior: ipcidr
+    format: text
+    url: https://example.com/telegram.txt
+    interval: 86400
+  custom:
+    type: inline
+    behavior: classical
+    payload:
+      - DOMAIN-KEYWORD,ads
+      - DST-PORT,6881-6889
+
+rules:
+  - RULE-SET,reject,REJECT
+  - RULE-SET,telegram,PROXY,no-resolve
+  - RULE-SET,custom,REJECT
+```
+
+| behavior | 每一条的写法 |
+|---|---|
+| `domain` | `example.com`、`+.example.com`、`.example.com`、`*.example.com`（同 6.6 的域名写法） |
+| `ipcidr` | `91.108.4.0/22`、`2001:b28:f23d::/48` |
+| `classical` | 不带目标的规则：`DOMAIN-SUFFIX,google.com`、`IP-CIDR,1.0.0.0/8`、`DST-PORT,22`、`NETWORK,udp` 等（不支持其中的 `GEOSITE` / `GEOIP` / `RULE-SET`） |
+
+- `format: yaml` 时内容为 `payload:` 列表；`format: text` 时每行一条，`#` 开头为注释。mihomo 的二进制 `mrs` 格式不支持。
+- 下载、缓存、刷新和热重载与代理集合相同。
 
 ## 7. 分享链接语法
 
@@ -423,7 +553,7 @@ VLESS 的 Reality / Vision / WS / gRPC、Trojan 的 WS / gRPC、VMess、Hysteria
 | 目标 `REJECT` | `action: reject` |
 | `MATCH` | `route.final` |
 
-  其他类型的规则在转换时会被丢弃。代理组 `select` 转为 `selector`，其余自动类型都转为 `urltest`。
+  其他类型的规则（包括 `RULE-SET`）在转换时会被丢弃；`proxy-providers` 也不会转换（组里只保留 `proxies` 中写明的成员）。代理组 `select` 转为 `selector`，其余自动类型都转为 `urltest`。
 
 - **规则集**：GEOSITE / GEOIP 对应的 `.srs` 规则集由 Prism 下载到 `runtime/rule-set/`（优先经运行中的代理，其次 jsdelivr 镜像，最后 GitHub），再以本地规则集交给 sing-box。这样 sing-box 启动时不依赖网络，节点不可用也能启动。超过 7 天的规则集会在后台刷新；实在下载不到的规则集会连同使用它的规则一起跳过，并在日志中提示。原生 sing-box 订阅里的远程规则集也按同样方式处理。
 - 全局 / 直连模式通过 sing-box 的 `clash_mode`（`Global` / `Direct`）实现。
@@ -466,6 +596,7 @@ prism-core -f config.yaml -d 目录
 |---|---|
 | `GET /version` | 版本 |
 | `GET /configs`、`PATCH /configs` | 读取配置；`{"mode":"global"}` 切换模式 |
+| `PUT /configs` | 热重载配置文件（或 `{"path":"..."}` / `{"payload":"..."}`），监听端口不中断 |
 | `GET /proxies`、`GET /proxies/{名称}` | 节点和组 |
 | `PUT /proxies/{组名}` | `{"name":"节点名"}` 选择节点 |
 | `GET /proxies/{名称}/delay?url=&timeout=` | 测速 |
@@ -473,6 +604,10 @@ prism-core -f config.yaml -d 目录
 | `GET /connections`、`DELETE /connections`、`DELETE /connections/{id}` | 连接列表与关闭 |
 | `GET /rules` | 已加载的规则 |
 | `GET /traffic` | 每秒一行的实时速度 |
+| `GET /providers/proxies`、`GET /providers/proxies/{名称}` | 代理集合 |
+| `PUT /providers/proxies/{名称}` | 立即更新集合（内容有变化时热重载） |
+| `GET /providers/proxies/{名称}/healthcheck` | 集合内节点测速 |
+| `GET /providers/rules`、`PUT /providers/rules/{名称}` | 规则集合与更新 |
 
 ## 10. 数据目录与文件
 
@@ -486,6 +621,7 @@ prism-core -f config.yaml -d 目录
 | `runtime\geosite.dat`、`geoip.dat` | Prism / Mihomo 使用的规则数据 |
 | `runtime\rule-set\` | sing-box 使用的规则集 |
 | `runtime\wintun.dll` | Prism 内核 TUN 所需的驱动库 |
+| `runtime\proxy_providers\`、`runtime\rule_providers\` | 代理集合、规则集合的缓存（默认位置） |
 | `cores\` | 下载的 `mihomo.exe`、`sing-box.exe` |
 
 想恢复初始状态：退出 Prism 后删除整个数据目录即可。

@@ -238,6 +238,18 @@ fn find<T: Ord + Copy>(v: &[(T, T)], x: T) -> bool {
 }
 
 impl IpSet {
+    /// From a list of networks (rule-providers with `ipcidr` behavior).
+    pub fn from_nets(nets: Vec<ipnet::IpNet>) -> IpSet {
+        let (mut v4, mut v6) = (Vec::new(), Vec::new());
+        for n in nets {
+            match n {
+                ipnet::IpNet::V4(n) => v4.push((u32::from(n.network()), u32::from(n.broadcast()))),
+                ipnet::IpNet::V6(n) => v6.push((u128::from(n.network()), u128::from(n.broadcast()))),
+            }
+        }
+        IpSet { v4: merge(v4), v6: merge(v6), reverse: false }
+    }
+
     pub fn len(&self) -> usize {
         self.v4.len() + self.v6.len()
     }

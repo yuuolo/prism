@@ -23,17 +23,21 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 
 ## prism-core 功能
 
-- 入站：mixed（SOCKS5 + HTTP CONNECT + 普通 HTTP）单端口
+- 入站：mixed（SOCKS5 + HTTP CONNECT + 普通 HTTP）单端口，含 SOCKS5 UDP ASSOCIATE；TUN
 - 出站：**AnyTLS**（会话复用，新连接不再重复握手）、Shadowsocks AEAD（aes-128/256-gcm、chacha20-ietf-poly1305）、Trojan、VLESS（TCP/TLS）、SOCKS5、HTTP、DIRECT、REJECT
-- 代理组：select / url-test / fallback / load-balance，以及 GLOBAL
-- 规则：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、DOMAIN-REGEX、GEOSITE、GEOIP、IP-CIDR(6)、SRC-IP-CIDR、DST-PORT、SRC-PORT、IN-TYPE、MATCH；读取 v2ray 格式 `geosite.dat` / `geoip.dat`
+- **UDP 经代理**：Shadowsocks UDP、Trojan UDP、VLESS UDP、AnyTLS（sing-box UDP-over-TCP v2）、SOCKS5 UDP ASSOCIATE、直连（每个目标一条会话）
+- 代理组：select / url-test / fallback / load-balance，以及 GLOBAL；`use` / `filter` / `exclude-filter`
+- 规则：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、DOMAIN-REGEX、GEOSITE、GEOIP、IP-CIDR(6)、SRC-IP-CIDR、DST-PORT、SRC-PORT、IN-TYPE、NETWORK、RULE-SET、MATCH；读取 v2ray 格式 `geosite.dat` / `geoip.dat`
+- **DNS 模块**：UDP / TCP / DoT / DoH 上游，`#代理` 经代理查询，nameserver-policy（含 `geosite:`）、fake-ip + fake-ip-filter、缓存、hosts、`listen` 端口
+- **proxy-providers / rule-providers**：http / file / inline，缓存文件、定时刷新、内容变化自动热重载（domain / ipcidr / classical，yaml / text）
+- 热重载：`PUT /configs`，监听端口不中断，节点选择和 fake-ip 映射保留
 - 模式：规则 / 全局 / 直连
 - 延迟测试支持 mihomo 的 `unified-delay`（只计第二次请求），设置页「统一延迟」开关
-- Clash API：`/proxies`、`/proxies/{name}/delay`、`/group/{name}/delay`、`/connections`、`/rules`、`/configs`、`/traffic`、`/version`
+- Clash API：`/proxies`、`/proxies/{name}/delay`、`/group/{name}/delay`、`/connections`、`/rules`、`/configs`、`/traffic`、`/providers/proxies`、`/providers/rules`、`/version`
 
-- TUN 模式（Windows，需管理员权限 + wintun.dll）：wintun 虚拟网卡 + smoltcp 用户态协议栈；自动路由 0.0.0.0/1、128.0.0.0/1，内核自身连接绑定物理网卡防回环；嗅探 TLS SNI / HTTP Host 按域名分流；劫持 UDP 53 转发上游 DNS；丢弃 QUIC（UDP 443）让浏览器回落 TCP；其余 UDP 仅在规则为 DIRECT 时直连转发。命令行：`prism-core -f config.yaml --tun`
+- TUN 模式（Windows，需管理员权限 + wintun.dll）：wintun 虚拟网卡 + smoltcp 用户态协议栈；自动路由 0.0.0.0/1、128.0.0.0/1，内核自身连接绑定物理网卡防回环；嗅探 TLS SNI / HTTP Host 按域名分流；DNS 由 DNS 模块应答（未启用时转发上游）；UDP 按规则分流、可经代理。命令行：`prism-core -f config.yaml --tun`
 
-**暂不支持**（需要时切换到 mihomo / sing-box 内核）：经代理节点转发 UDP、TUN 的 IPv6 路由、DNS 模块 / fake-ip、VMess、Hysteria2、VLESS Reality/Vision、WebSocket/gRPC 传输、proxy-providers、rule-providers。
+**暂不支持**（需要时切换到 mihomo / sing-box 内核）：VMess、Hysteria2、VLESS Reality/Vision、WebSocket/gRPC 传输、`PROCESS-NAME` 与 `AND/OR/NOT` 规则、`mrs` 格式规则集、DNS fallback、QUIC/DoH3 上游、TUN 的 IPv6 路由。
 
 > prism-core 的 TUN 模式尚未在真实网卡上做过端到端测试（mihomo / sing-box 的 TUN 配置已通过 `mihomo -t` / `sing-box check` 校验）。
 

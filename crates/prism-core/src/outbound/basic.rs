@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::tls::Tls;
 use super::Outbound;
-use crate::common::{invalid, other, tcp_connect, Address, BoxedStream};
+use crate::common::{invalid, other, tcp_connect, udp_pump, Address, BoxedStream, UdpPipe};
 use crate::config::ProxyConfig;
 
 pub struct Direct;
@@ -27,6 +27,32 @@ impl Outbound for Direct {
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
         let s = tcp_connect(&target.host(), target.port()).await?;
         Ok(Box::new(s))
+    }
+    async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
+        let addr = *crate::net::resolve(&target.host(), target.port())
+            .await?
+            .iter()
+            .min_by_key(|a| a.is_ipv6())
+            .ok_or_else(|| other("no address"))?;
+        let sock = crate::net::udp_socket(addr).await?;
+        sock.connect(addr).await?;
+        Ok(udp_pump(move |mut out, inc| async move {
+            let mut buf = vec![0u8; 65535];
+            loop {
+                tokio::select! {
+                    p = out.recv() => match p {
+                        Some(p) => { sock.send(&p).await?; }
+                        None => return Ok(()),
+                    },
+                    r = sock.recv(&mut buf) => {
+                        let n = r?;
+                        if inc.send(buf[..n].to_vec()).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }))
     }
 }
 
@@ -88,7 +114,66 @@ impl Outbound for Socks5 {
     fn api_type(&self) -> &'static str {
         "Socks5"
     }
+    fn udp(&self) -> bool {
+        true
+    }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
+        self.request(1, target).await.map(|(s, _)| s)
+    }
+    async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
+        // UDP ASSOCIATE; the relay address comes back in the reply.
+        let unspecified = Address::Ip("0.0.0.0:0".parse().unwrap());
+        let (mut ctrl, bound) = self.request(3, &unspecified).await?;
+        let relay = match bound {
+            Address::Ip(sa) if !sa.ip().is_unspecified() => sa,
+            other_addr => {
+                let ip = crate::net::resolve(&self.server, other_addr.port()).await?[0].ip();
+                std::net::SocketAddr::new(ip, other_addr.port())
+            }
+        };
+        let sock = crate::net::udp_socket(relay).await?;
+        sock.connect(relay).await?;
+        let target = target.clone();
+        Ok(udp_pump(move |mut out, inc| async move {
+            let mut buf = vec![0u8; 65535];
+            let mut ctl = [0u8; 64];
+            loop {
+                tokio::select! {
+                    p = out.recv() => match p {
+                        Some(p) => {
+                            let mut pkt = vec![0, 0, 0];
+                            target.write_socks(&mut pkt);
+                            pkt.extend_from_slice(&p);
+                            sock.send(&pkt).await?;
+                        }
+                        None => return Ok(()),
+                    },
+                    r = sock.recv(&mut buf) => {
+                        let n = r?;
+                        let mut cur = &buf[3.min(n)..n];
+                        if Address::read_socks(&mut cur).await.is_err() {
+                            continue;
+                        }
+                        if inc.send(cur.to_vec()).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    // The association lives as long as the TCP connection.
+                    r = ctrl.read(&mut ctl) => {
+                        if matches!(r, Ok(0) | Err(_)) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }))
+    }
+}
+
+impl Socks5 {
+    /// Handshake + request (`cmd` 1 = CONNECT, 3 = UDP ASSOCIATE); returns
+    /// the stream and the bound address from the reply.
+    async fn request(&self, cmd: u8, target: &Address) -> io::Result<(BoxedStream, Address)> {
         let mut s = dial(&self.server, self.port, &self.tls).await?;
         let method = if self.auth.is_some() { 2u8 } else { 0u8 };
         s.write_all(&[5, 1, method]).await?;
@@ -108,16 +193,16 @@ impl Outbound for Socks5 {
                 return Err(other("socks5: authentication failed"));
             }
         }
-        let mut req = vec![5, 1, 0];
+        let mut req = vec![5, cmd, 0];
         target.write_socks(&mut req);
         s.write_all(&req).await?;
         let mut head = [0u8; 3];
         s.read_exact(&mut head).await?;
         if head[1] != 0 {
-            return Err(other(format!("socks5: connect failed (code {})", head[1])));
+            return Err(other(format!("socks5: request failed (code {})", head[1])));
         }
-        Address::read_socks(&mut s).await?; // bound address
-        Ok(s)
+        let bound = Address::read_socks(&mut s).await?;
+        Ok((s, bound))
     }
 }
 

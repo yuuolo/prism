@@ -81,7 +81,9 @@ export default function Connections() {
                     <td className="ellipsis" title={host}>
                       {host}
                     </td>
-                    <td>{m.type}</td>
+                    <td>
+                      {m.type} · {m.network?.toUpperCase()}
+                    </td>
                     <td className="ellipsis" title={`${c.rule} ${c.rulePayload}`}>
                       {c.rule}
                       {c.rulePayload && !c.rule.includes("(") ? ` (${c.rulePayload})` : ""}

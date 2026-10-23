@@ -126,6 +126,14 @@ pub struct GroupConfig {
     pub interval: u64,
     /// url-test switch threshold in milliseconds.
     pub tolerance: u64,
+    /// proxy-providers whose nodes are appended to `proxies` (Clash `use`).
+    #[serde(default)]
+    pub use_providers: Vec<String>,
+    /// Regex on node names from providers (Clash `filter` / `exclude-filter`).
+    #[serde(default)]
+    pub filter: Option<String>,
+    #[serde(default)]
+    pub exclude_filter: Option<String>,
 }
 
 pub const DEFAULT_TEST_URL: &str = "https://www.gstatic.com/generate_204";
@@ -139,6 +147,9 @@ impl GroupConfig {
             url: DEFAULT_TEST_URL.into(),
             interval: 300,
             tolerance: 50,
+            use_providers: Vec::new(),
+            filter: None,
+            exclude_filter: None,
         }
     }
 }
@@ -263,12 +274,72 @@ impl Default for General {
     }
 }
 
+/// Clash `dns:` section.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DnsConfig {
+    pub enable: bool,
+    pub listen: Option<String>,
+    pub ipv6: bool,
+    /// normal / fake-ip / redir-host
+    pub enhanced_mode: String,
+    pub fake_ip_range: String,
+    pub fake_ip_filter: Vec<String>,
+    pub default_nameserver: Vec<String>,
+    pub nameserver: Vec<String>,
+    pub proxy_server_nameserver: Vec<String>,
+    /// (domain patterns, servers), in order.
+    pub nameserver_policy: Vec<(String, Vec<String>)>,
+}
+
+/// One entry of `proxy-providers:`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProxyProviderConfig {
+    pub name: String,
+    /// http / file / inline
+    pub kind: String,
+    pub url: Option<String>,
+    pub path: Option<String>,
+    /// Refresh interval in seconds (http).
+    pub interval: u64,
+    pub filter: Option<String>,
+    pub exclude_filter: Option<String>,
+    pub health_check: bool,
+    pub health_check_url: Option<String>,
+    pub health_check_interval: u64,
+    /// Outbound used to download (default DIRECT).
+    pub proxy: Option<String>,
+    /// `inline` providers carry their nodes directly.
+    pub inline: Vec<ProxyConfig>,
+}
+
+/// One entry of `rule-providers:`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RuleProviderConfig {
+    pub name: String,
+    /// http / file / inline
+    pub kind: String,
+    /// domain / ipcidr / classical
+    pub behavior: String,
+    /// yaml / text / mrs
+    pub format: String,
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub interval: u64,
+    pub proxy: Option<String>,
+    pub inline: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Profile {
     pub general: General,
     pub proxies: Vec<ProxyConfig>,
     pub groups: Vec<GroupConfig>,
     pub rules: Vec<RuleConfig>,
+    pub dns: DnsConfig,
+    /// Static `hosts:` entries (name, ip).
+    pub hosts: Vec<(String, String)>,
+    pub proxy_providers: Vec<ProxyProviderConfig>,
+    pub rule_providers: Vec<RuleProviderConfig>,
     /// Things that were skipped while parsing (unknown proxy types, ...).
     pub warnings: Vec<String>,
 }
@@ -319,7 +390,8 @@ impl Profile {
                 }
                 ok
             });
-            if g.proxies.is_empty() {
+            // Groups filled from providers are completed when the core loads them.
+            if g.proxies.is_empty() && g.use_providers.is_empty() {
                 g.proxies.push("DIRECT".into());
             }
         }

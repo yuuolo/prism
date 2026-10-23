@@ -8,9 +8,38 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::common::{invalid, Address};
-use crate::tunnel::{Metadata, Tunnel};
+use crate::hub::Hub;
+use crate::tunnel::{Metadata, Network, Tunnel, UdpNat, UdpPacket};
 
-pub async fn serve(listener: TcpListener, tunnel: Arc<Tunnel>) {
+/// SOCKS5 UDP relay on the mixed port: `RSV(2) FRAG(1) ADDR PORT DATA`.
+/// Fragmented datagrams are dropped.
+pub async fn serve_udp(sock: tokio::net::UdpSocket, hub: Arc<Hub>) {
+    let sock = Arc::new(sock);
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel::<UdpPacket>(1024);
+    let out = sock.clone();
+    tokio::spawn(async move {
+        while let Some(p) = reply_rx.recv().await {
+            let mut pkt = vec![0, 0, 0];
+            p.dst.write_socks(&mut pkt);
+            pkt.extend_from_slice(&p.data);
+            let _ = out.send_to(&pkt, p.src).await;
+        }
+    });
+    let nat = UdpNat::new("Socks5", reply_tx);
+    let mut buf = vec![0u8; 65535];
+    loop {
+        let Ok((n, src)) = sock.recv_from(&mut buf).await else { continue };
+        if n < 4 || buf[2] != 0 {
+            continue;
+        }
+        let mut cur = &buf[3..n];
+        let Ok(dst) = Address::read_socks(&mut cur).await else { continue };
+        let data = cur.to_vec();
+        nat.send(&hub.core().tunnel, UdpPacket { src, dst, data });
+    }
+}
+
+pub async fn serve(listener: TcpListener, hub: Arc<Hub>) {
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(x) => x,
@@ -20,7 +49,7 @@ pub async fn serve(listener: TcpListener, tunnel: Arc<Tunnel>) {
             }
         };
         let _ = stream.set_nodelay(true);
-        let tunnel = tunnel.clone();
+        let tunnel = hub.core().tunnel.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(stream, peer, tunnel).await {
                 tracing::debug!("inbound {peer}: {e}");
@@ -54,12 +83,21 @@ async fn socks5(mut s: TcpStream, peer: SocketAddr, tunnel: Arc<Tunnel>) -> io::
     let mut req = [0u8; 3];
     s.read_exact(&mut req).await?;
     let dst = Address::read_socks(&mut s).await?;
+    if req[1] == 3 {
+        // UDP ASSOCIATE: datagrams go to the UDP socket on the same port
+        // (see serve_udp); the association lasts while this connection is open.
+        let mut reply = vec![5, 0, 0];
+        Address::Ip(s.local_addr()?).write_socks(&mut reply);
+        s.write_all(&reply).await?;
+        let mut sink = [0u8; 256];
+        while s.read(&mut sink).await? > 0 {}
+        return Ok(());
+    }
     if req[1] != 1 {
-        // Only CONNECT; UDP ASSOCIATE / BIND are not implemented yet.
         s.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
         return Err(invalid(format!("socks5: unsupported command {}", req[1])));
     }
-    let mut meta = Metadata { inbound: "Socks5", src: peer, dst, dst_ip: None };
+    let mut meta = Metadata { network: Network::Tcp, inbound: "Socks5", src: peer, dst, dst_ip: None };
     match tunnel.dial(&mut meta).await {
         Ok(d) => {
             s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
@@ -106,7 +144,7 @@ async fn http(mut s: TcpStream, peer: SocketAddr, tunnel: Arc<Tunnel>) -> io::Re
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let dst = Address::parse_authority(&uri).ok_or_else(|| invalid("http: bad CONNECT target"))?;
-        let mut meta = Metadata { inbound: "HTTPS", src: peer, dst, dst_ip: None };
+        let mut meta = Metadata { network: Network::Tcp, inbound: "HTTPS", src: peer, dst, dst_ip: None };
         match tunnel.dial(&mut meta).await {
             Ok(d) => {
                 s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await?;
@@ -153,7 +191,7 @@ async fn http(mut s: TcpStream, peer: SocketAddr, tunnel: Arc<Tunnel>) -> io::Re
     let mut initial = out.into_bytes();
     initial.extend_from_slice(&rest);
 
-    let mut meta = Metadata { inbound: "HTTP", src: peer, dst, dst_ip: None };
+    let mut meta = Metadata { network: Network::Tcp, inbound: "HTTP", src: peer, dst, dst_ip: None };
     match tunnel.dial(&mut meta).await {
         Ok(d) => tunnel.relay(s, d, meta, &initial).await,
         Err(e) => {

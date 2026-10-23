@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use super::tls::Tls;
 use super::Outbound;
-use crate::common::{other, pump, tcp_connect, Address, BoxedStream};
+use crate::common::{other, pump, tcp_connect, udp_over_stream, Address, BoxedStream, Framing, UdpPipe};
 use crate::config::ProxyConfig;
 
 const CMD_WASTE: u8 = 0;
@@ -41,6 +41,8 @@ const CMD_HEART_RESPONSE: u8 = 9;
 const CMD_SERVER_SETTINGS: u8 = 10;
 
 const MAX_FRAME: usize = 16 * 1024;
+/// sing-box UDP-over-TCP v2: a stream to this address carries datagrams.
+const UOT_MAGIC: &str = "sp.v2.udp-over-tcp.arpa";
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// anytls-go's default padding scheme; we only report its md5 so the server
@@ -280,6 +282,19 @@ impl Outbound for AnyTls {
     }
     fn api_type(&self) -> &'static str {
         "AnyTLS"
+    }
+    fn udp(&self) -> bool {
+        true
+    }
+    /// UDP via sing-box UDP-over-TCP v2 (what sing-box / mihomo AnyTLS
+    /// clients use): request `is_connect u8 | socks addr`, then
+    /// `u16 len | data` both ways.
+    async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
+        let mut s = self.connect(&Address::Domain(UOT_MAGIC.into(), 0)).await?;
+        let mut req = vec![1u8];
+        target.write_socks(&mut req);
+        s.write_all(&req).await?;
+        Ok(udp_over_stream(s, Framing::Length))
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
         // Prefer a pooled session; fall back to a fresh one if it turns out

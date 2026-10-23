@@ -38,11 +38,18 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let raw = std::fs::read_to_string(&args.config).with_context(|| format!("read {}", args.config.display()))?;
     let mut profile = prism_core::config::parse_any(&raw)?;
-    if let Some(c) = args.ext_ctl {
-        profile.general.external_controller = Some(c);
+    // Command-line overrides; the hub re-applies them on every reload.
+    let source = prism_core::hub::Source {
+        path: Some(args.config.clone()),
+        ext_ctl: args.ext_ctl.clone(),
+        secret: args.secret.clone(),
+        tun: args.tun,
+    };
+    if let Some(c) = &args.ext_ctl {
+        profile.general.external_controller = Some(c.clone());
     }
-    if let Some(s) = args.secret {
-        profile.general.secret = s;
+    if let Some(s) = &args.secret {
+        profile.general.secret = s.clone();
     }
     if args.tun {
         profile.general.tun.enable = true;
@@ -102,8 +109,8 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
-        let core = prism_core::build(profile, &home)?;
         if args.test {
+            let core = prism_core::build(profile, &home, &prism_core::BuildEnv::standalone()).await?;
             for w in &core.warnings {
                 println!("warning: {w}");
             }
@@ -114,6 +121,7 @@ fn main() -> Result<()> {
             );
             return Ok(());
         }
-        prism_core::run(core).await
+        let hub = prism_core::hub::Hub::new(source, home, profile).await?;
+        prism_core::run(hub).await
     })
 }

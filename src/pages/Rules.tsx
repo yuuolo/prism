@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type RuleItem } from "../api";
 import { useApp } from "../state";
+import { RuleProviders } from "./Providers";
 
 export default function Rules() {
   const { snap } = useApp();
@@ -8,13 +9,16 @@ export default function Rules() {
   const [filter, setFilter] = useState("");
   const running = !!snap?.running;
 
-  useEffect(() => {
-    if (!running) return;
+  const load = useCallback(() => {
     api
       .core<{ rules: RuleItem[] }>("GET", "/rules")
       .then((r) => setRules(r.rules ?? []))
       .catch(() => setRules([]));
-  }, [running, snap?.settings.active_profile, snap?.settings.core]);
+  }, []);
+
+  useEffect(() => {
+    if (running) load();
+  }, [running, load, snap?.settings.active_profile, snap?.settings.core]);
 
   const f = filter.trim().toLowerCase();
   const shown = f ? rules.filter((r) => `${r.type} ${r.payload} ${r.proxy}`.toLowerCase().includes(f)) : rules;
@@ -26,6 +30,7 @@ export default function Rules() {
         <span className="tag">{rules.length} 条</span>
         <input className="input" placeholder="过滤" value={filter} onChange={(e) => setFilter(e.target.value)} />
       </div>
+      {running && <RuleProviders onChange={load} />}
       {!running ? (
         <div className="empty">内核未运行</div>
       ) : (
