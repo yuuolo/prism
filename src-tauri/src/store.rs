@@ -26,6 +26,8 @@ pub struct Settings {
     pub allow_lan: bool,
     pub log_level: String,
     pub system_proxy: bool,
+    /// Look for a new Prism release on startup.
+    pub auto_update_check: bool,
     pub tun: bool,
     /// Latency tests time a warm second request (mihomo unified-delay).
     pub unified_delay: bool,
@@ -36,6 +38,8 @@ pub struct Settings {
     pub test_url: String,
     /// profile id -> group -> selected member, re-applied after (re)starts.
     pub selections: HashMap<String, HashMap<String, String>>,
+    /// Per-application routing (应用分流), applied before the profile's rules.
+    pub app_rules: Vec<AppRule>,
 }
 
 impl Default for Settings {
@@ -50,6 +54,7 @@ impl Default for Settings {
             allow_lan: false,
             log_level: "info".into(),
             system_proxy: false,
+            auto_update_check: true,
             tun: false,
             unified_delay: true,
             proxy_bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*;<local>".into(),
@@ -58,8 +63,22 @@ impl Default for Settings {
             singbox_path: None,
             test_url: config::DEFAULT_TEST_URL.into(),
             selections: HashMap::new(),
+            app_rules: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppRule {
+    pub id: String,
+    pub enabled: bool,
+    /// Match the full path instead of the file name.
+    pub by_path: bool,
+    /// File name (`chrome.exe`) or full path.
+    pub value: String,
+    /// Proxy / group name, DIRECT or REJECT.
+    pub target: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

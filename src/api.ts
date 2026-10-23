@@ -12,6 +12,7 @@ export interface Settings {
   allow_lan: boolean;
   log_level: string;
   system_proxy: boolean;
+  auto_update_check: boolean;
   tun: boolean;
   unified_delay: boolean;
   proxy_bypass: string;
@@ -20,6 +21,7 @@ export interface Settings {
   singbox_path: string | null;
   test_url: string;
   selections: Record<string, Record<string, string>>;
+  app_rules: AppRule[];
 }
 
 export interface Usage {
@@ -39,6 +41,26 @@ export interface ProfileMeta {
   usage: Usage | null;
 }
 
+export interface AppRule {
+  id: string;
+  enabled: boolean;
+  /** Match the full path instead of the file name. */
+  by_path: boolean;
+  value: string;
+  target: string;
+}
+
+export interface ProcessInfo {
+  pid: number;
+  name: string;
+  path: string;
+}
+
+export interface Outbounds {
+  groups: string[];
+  proxies: string[];
+}
+
 export interface Snapshot {
   settings: Settings;
   profiles: ProfileMeta[];
@@ -47,6 +69,15 @@ export interface Snapshot {
   elevated: boolean;
   core_paths: Record<CoreKind, { path: string; exists: boolean }>;
   data_dir: string;
+  /** Prism app version. */
+  version: string;
+}
+
+export interface UpdateInfo {
+  current: string;
+  version: string;
+  notes: string | null;
+  date: string | null;
 }
 
 export interface DelayRecord {
@@ -76,6 +107,7 @@ export interface Connection {
     destinationPort: string;
     host: string;
     process?: string;
+    processPath?: string;
   };
   upload: number;
   download: number;
@@ -115,6 +147,11 @@ export const api = {
   setMode: (mode: Mode) => invoke<void>("set_mode", { mode }),
   setSystemProxy: (enable: boolean) => invoke<void>("set_system_proxy", { enable }),
   setTun: (enable: boolean) => invoke<void>("set_tun", { enable }),
+  listProcesses: () => invoke<ProcessInfo[]>("list_processes"),
+  profileOutbounds: () => invoke<Outbounds>("profile_outbounds"),
+  setAppRules: (rules: AppRule[]) => invoke<void>("set_app_rules", { rules }),
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  installUpdate: () => invoke<void>("install_update"),
   restartAsAdmin: () => invoke<void>("restart_as_admin"),
   logs: () => invoke<string[]>("get_logs"),
   clearLogs: () => invoke<void>("clear_logs"),

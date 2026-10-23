@@ -1,6 +1,6 @@
 # Prism 使用手册（Windows）
 
-适用版本：v0.1.1 之后的开发版（UDP、DNS 模块、providers）
+适用版本：v0.1.1 之后的开发版（UDP、DNS 模块、providers、应用分流、软件更新）
 
 - [1. 安装与首次使用](#1-安装与首次使用)
 - [2. 界面说明](#2-界面说明)
@@ -60,17 +60,28 @@
 - **删除**：内核运行时不能删除正在使用的订阅，请先停止内核或切换到别的订阅。
 
 ### 连接
-- 实时列出经过内核的连接：主机、入站类型和 TCP / UDP、命中的规则、链路（如 `节点选择 → 自动选择 → 东京`）、速度和流量。
-- 可按主机 / 规则 / 节点过滤，**暂停** 刷新，单独 **关闭** 某个连接或 **全部关闭**。
+- 实时列出经过内核的连接：主机、发起连接的**程序**（鼠标悬停显示完整路径）、入站类型和 TCP / UDP、命中的规则、链路（如 `节点选择 → 自动选择 → 东京`）、速度和流量。
+- 可按主机 / 程序 / 规则 / 节点过滤，**暂停** 刷新，单独 **关闭** 某个连接或 **全部关闭**。
+- 某条连接后面的 **分流** 按钮：直接为这个程序添加应用分流规则（见下面的「应用分流」）。
 
 ### 规则
 - 显示内核实际加载的规则（不受支持而被跳过的规则不会出现在这里，原因见日志）。
 - 订阅含 `rule-providers` 时，顶部的 **规则集合** 卡片列出每个规则集的类型、条数和更新时间，HTTP 类型可单独 **更新**。
 
+### 应用分流
+指定某个程序的连接走固定出口，不受订阅规则影响。
+- 点 **添加应用**，从正在运行的程序列表中选择（可搜索），或手动输入程序名 / 完整路径。
+- **匹配方式**：按程序名（如 `Telegram.exe`，不区分大小写，所有同名程序都匹配；只写 `Telegram` 也会自动补上 `.exe`），或按完整路径（只匹配该位置的程序）。
+- **出口**：DIRECT（直连）、REJECT（拒绝），或当前订阅中的任一代理组 / 节点。
+- 每条规则可单独启用 / 停用、修改出口、编辑或删除；保存后运行中的内核会自动重新加载。
+- 规则只在**规则模式**下生效，排在订阅规则之前；全局 / 直连模式不受影响。
+- 三种内核都支持（Prism / Mihomo 生成 `PROCESS-NAME` / `PROCESS-PATH` 规则，sing-box 生成 `process_name` / `process_path`）。所选出口在当前订阅中不存在时，该条规则会被跳过并在日志中提示。
+- 系统代理模式下只对使用系统代理的程序有效；游戏、命令行等不走系统代理的程序，请开启 TUN 模式。
+
 ### 日志
 - 内核的输出和 Prism 自身的提示（以 `[prism]` 开头，紫色显示），警告为黄色，错误为红色。
-- 每条经过代理的连接会记录一行，例如：
-  `[TCP] 127.0.0.1:51234 --> www.google.com:443 match DomainSuffix(google.com) using 节点选择[东京]`
+- 每条经过代理的连接会记录一行（括号中是发起连接的程序），例如：
+  `[TCP] 127.0.0.1:51234(chrome.exe) --> www.google.com:443 match DomainSuffix(google.com) using 节点选择[东京]`
 
 ### 设置
 | 项目 | 说明 |
@@ -86,8 +97,16 @@
 | 更新 GeoSite / GeoIP | 重新下载 `geosite.dat` / `geoip.dat`；使用 sing-box 内核时同时刷新规则集 |
 | 查看生成的内核配置 | 查看 Prism 根据订阅为当前内核生成的实际配置文件 |
 | 打开数据目录 | 在资源管理器中打开数据目录（见第 10 节） |
+| 软件更新 | 当前版本、**检查更新**、**启动时自动检查**开关，以及新版本的说明和 **下载并安装**（见下） |
 
 修改端口、密钥、局域网、日志级别或统一延迟后点 **保存**，运行中的内核会自动重启。
+
+### 软件更新
+- Prism 启动约 5 秒后会到 GitHub Releases 检查新版本（可在设置页关闭）；发现新版本时侧边栏会出现 **发现新版本** 提示，日志中也有记录。
+- 在设置页 **软件更新** 卡片点 **下载并安装**：下载时显示进度；下载完成后会**校验发布签名**，只有用本项目私钥签名、且签名版本与公告版本一致的安装包才会被安装，被篡改的安装包会被拒绝。
+- 安装前 Prism 会先停止内核并暂时关闭系统代理，然后运行安装程序（只显示进度条），装完自动重启 Prism，系统代理等设置保持不变。
+- 内核运行中时，检查和下载会经过本机代理（GitHub 直连较慢时更快）。
+- 自动更新从包含更新功能的版本开始生效；更早安装的 v0.1.0 / v0.1.1 需要手动下载安装一次新版本。
 
 ### 托盘菜单
 单击托盘图标显示主界面；右键菜单可切换 **系统代理**、**TUN 模式**、**规则 / 全局 / 直连模式**，以及 **退出**。
@@ -103,9 +122,10 @@
 | TUN 模式 | ✅（未经实网测试） | ✅ | ✅ |
 | DNS 模块 / fake-ip | ✅ | ✅ | ✅ |
 | proxy-providers / rule-providers | ✅（规则集仅 yaml / text 格式） | ✅ | — |
+| 应用分流（按程序选择出口） | ✅ | ✅ | ✅ |
 
 - 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS(TCP) 节点：**Prism 内核**即可，体积小、启动快，TCP 和 UDP 都可经代理。
-- 订阅含 VMess、Hysteria2、Reality、WebSocket / gRPC 节点，或用到 `PROCESS-NAME`、`AND/OR` 等规则、`.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
+- 订阅含 VMess、Hysteria2、Reality、WebSocket / gRPC 节点，或用到 `AND/OR` 等组合规则、`.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
 - 同一份订阅三个内核通用，Prism 会自动转换格式（见第 5、8 节）。Prism 内核遇到不支持的节点或规则会跳过，并在日志中给出警告。
 
 ## 4. 系统代理与 TUN 模式
@@ -219,6 +239,7 @@ rules:
 | `external-controller` | Clash API 监听地址，如 `127.0.0.1:9090` |
 | `secret` | Clash API 密钥 |
 | `unified-delay` | 测速只计第二次请求 |
+| `find-process-mode` | 何时识别连接所属程序：`always`（每条连接，「连接」页显示程序）、`strict`（默认，只在用到进程规则时）、`off`。在 Prism 中运行时固定为 `always` |
 | `tun.enable` | 启用 TUN（需管理员权限） |
 | `tun.auto-route` | 自动添加路由，默认 `true` |
 | `dns` | DNS 模块，见 6.6 |
@@ -333,6 +354,9 @@ MATCH,目标
 | `SRC-PORT` | 来源端口 | `SRC-PORT,50000-60000,DIRECT` |
 | `IN-TYPE` | 入站类型：`HTTP`（普通 HTTP 代理）、`HTTPS`（CONNECT）、`SOCKS5`、`TUN` | `IN-TYPE,TUN,PROXY` |
 | `NETWORK` | `tcp` 或 `udp` | `NETWORK,udp,DIRECT` |
+| `PROCESS-NAME` | 发起连接的程序名（不区分大小写，可省略 `.exe`） | `PROCESS-NAME,Telegram.exe,PROXY` |
+| `PROCESS-PATH` | 程序完整路径（不区分大小写，`/` 与 `\` 等同） | `PROCESS-PATH,D:\Games\Steam\steam.exe,DIRECT` |
+| `PROCESS-NAME-REGEX` / `PROCESS-PATH-REGEX` | 程序名 / 路径匹配正则 | `PROCESS-NAME-REGEX,^(chrome\|msedge)\.exe$,PROXY` |
 | `RULE-SET` | 规则集合（rule-providers，见 6.8）中的任一条 | `RULE-SET,reject,REJECT`、`RULE-SET,telegram,PROXY,no-resolve` |
 | `MATCH`（或 `FINAL`） | 匹配所有，放在最后 | `MATCH,PROXY` |
 
@@ -340,7 +364,9 @@ MATCH,目标
 
 **GEOSITE / GEOIP 数据**：Prism 内核读取 v2ray 格式的 `geosite.dat`、`geoip.dat`（MetaCubeX/meta-rules-dat），首次使用时自动下载，设置页可手动更新。数据文件缺失时这两类规则会被整体跳过；数据文件中不存在的分类，对应规则也会被忽略。
 
-**Prism 内核不支持的规则**（会被跳过并在日志中警告，Mihomo 内核可用）：`PROCESS-NAME`、`PROCESS-PATH`、`AND` / `OR` / `NOT`、`SRC-GEOIP` 等。
+进程规则通过系统的 TCP / UDP 连接表找出连接所属的程序：系统代理模式下识别本机通过代理端口连接的程序，TUN 模式下识别所有本机程序；局域网其他设备的连接没有程序信息。
+
+**Prism 内核不支持的规则**（会被跳过并在日志中警告，Mihomo 内核可用）：`AND` / `OR` / `NOT`、`SRC-GEOIP` 等。
 
 ### 6.6 dns（DNS 模块）与 hosts
 
@@ -651,6 +677,12 @@ prism-core -f config.yaml -d 目录
 
 **TUN 打不开**
 确认以管理员身份运行，并关闭其他客户端的 TUN 模式。Prism 内核需要 `wintun.dll`，首次使用会自动下载；下载失败时可手动从 [wintun.net](https://www.wintun.net/) 下载，把 `wintun/bin/amd64/wintun.dll` 放到数据目录的 `runtime\` 下。
+
+**应用分流不生效**
+确认处于**规则模式**；在「连接」页看该程序的连接是否出现、「程序」列是否识别正确。没有出现说明该程序没走系统代理，请开启 TUN 模式。按程序名匹配时，名字需与「程序」列一致（如 `Telegram.exe`）。
+
+**检查更新失败**
+多半是无法访问 GitHub。先启动内核（检查会自动经过代理）再点 **检查更新**。
 
 **内核下载失败**
 GitHub 在部分网络下访问较慢。先用 Prism 内核连上代理，再到设置页下载 Mihomo / sing-box，下载会自动经过代理。

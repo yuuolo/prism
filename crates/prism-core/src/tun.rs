@@ -186,16 +186,11 @@ mod imp {
             }
         }
         let domain = sniff::domain(&buf[..n]);
-        let mut meta = Metadata {
-            network: Network::Tcp,
-            inbound: "Tun",
-            src,
-            dst: match domain {
-                Some(d) => Address::Domain(d, dst.port()),
-                None => Address::Ip(dst),
-            },
-            dst_ip: Some(dst.ip()),
+        let target = match domain {
+            Some(d) => Address::Domain(d, dst.port()),
+            None => Address::Ip(dst),
         };
+        let mut meta = Metadata::new(Network::Tcp, "Tun", src, target, Some(dst.ip()));
         if let Ok(d) = tunnel.dial(&mut meta).await {
             tunnel.relay(s, d, meta, &buf[..n]).await;
         }

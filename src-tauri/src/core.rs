@@ -85,6 +85,24 @@ pub struct RuntimeConfig {
     pub warnings: Vec<String>,
 }
 
+fn app_routes(s: &Settings) -> Vec<config::AppRoute> {
+    s.app_rules
+        .iter()
+        .filter(|r| r.enabled)
+        .map(|r| config::AppRoute { by_path: r.by_path, value: r.value.clone(), target: r.target.clone() })
+        .collect()
+}
+
+fn app_warnings(w: Vec<String>) -> Vec<String> {
+    w.into_iter().map(|w| format!("应用分流: {w}")).collect()
+}
+
+/// Groups and nodes of the active profile, as exits for app rules.
+pub fn profile_outbounds(store: &Store, s: &Settings) -> Result<(Vec<String>, Vec<String>)> {
+    let p = config::parse_any(&active_profile(store, s)?)?;
+    Ok((p.groups.into_iter().map(|g| g.name).collect(), p.proxies.into_iter().map(|x| x.name).collect()))
+}
+
 /// Converts the active profile into the selected core's config format and
 /// writes it to the runtime dir.
 pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig> {
@@ -97,18 +115,21 @@ pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig
                 _ => clash::emit(&config::parse_any(&raw)?),
             };
             clash::apply_overrides(&mut doc, &overrides(s));
+            let warnings = app_warnings(clash::add_app_rules(&mut doc, &app_routes(s)));
             let path = dir.join("config.yaml");
             std::fs::write(&path, serde_yaml::to_string(&doc)?)?;
-            Ok(RuntimeConfig { path, warnings: Vec::new() })
+            Ok(RuntimeConfig { path, warnings })
         }
         CoreKind::Singbox => {
             let mut doc = singbox_config(store, s)?;
+            let mut warnings = app_warnings(singbox::add_app_rules(&mut doc, &app_routes(s)));
             // sing-box exits if a remote rule-set can't be fetched at startup,
             // so it only ever gets the files the app downloaded.
-            let warnings = singbox::localize_rule_sets(&mut doc, &store.rule_set_dir())
-                .into_iter()
-                .map(|t| format!("规则集 {t} 未能下载，使用它的规则已跳过（可在设置页「更新 GeoSite / GeoIP」重试）"))
-                .collect();
+            warnings.extend(
+                singbox::localize_rule_sets(&mut doc, &store.rule_set_dir())
+                    .into_iter()
+                    .map(|t| format!("规则集 {t} 未能下载，使用它的规则已跳过（可在设置页「更新 GeoSite / GeoIP」重试）")),
+            );
             let path = dir.join("config.json");
             std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
             Ok(RuntimeConfig { path, warnings })

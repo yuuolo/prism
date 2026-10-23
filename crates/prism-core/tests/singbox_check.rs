@@ -1,7 +1,46 @@
-//! Opt-in: validates generated sing-box configs with a real sing-box binary.
-//!   SINGBOX=path/to/sing-box.exe cargo test -p prism-core --test singbox_check
+//! Opt-in: validates generated configs with real core binaries.
+//!   SINGBOX=path/to/sing-box.exe MIHOMO=path/to/mihomo.exe cargo test -p prism-core --test singbox_check
 
-use prism_core::config::{self, clash::Overrides, singbox, Mode};
+use prism_core::config::{self, clash, clash::Overrides, singbox, AppRoute, Mode};
+
+fn app_routes() -> Vec<AppRoute> {
+    vec![
+        AppRoute { by_path: false, value: "chrome".into(), target: "PROXY".into() },
+        AppRoute { by_path: true, value: "C:\\Program Files\\Steam\\steam.exe".into(), target: "DIRECT".into() },
+        AppRoute { by_path: false, value: "ads.exe".into(), target: "REJECT".into() },
+    ]
+}
+
+/// The YAML the GUI writes for mihomo (overrides + app rules) loads in mihomo.
+#[test]
+fn generated_mihomo_config_passes_check() {
+    let Ok(bin) = std::env::var("MIHOMO") else {
+        eprintln!("MIHOMO not set, skipping");
+        return;
+    };
+    let o = Overrides {
+        mixed_port: 17892,
+        controller: "127.0.0.1:19099".into(),
+        secret: "s".into(),
+        mode: Mode::Rule,
+        allow_lan: false,
+        log_level: "info".into(),
+        tun: false,
+        unified_delay: true,
+    };
+    let dir = std::env::temp_dir().join(format!("prism-mhcheck-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Drop GEOSITE/GEOIP rules so mihomo doesn't download geodata for a check.
+    let raw: String = CLASH.lines().filter(|l| !l.contains("GEO")).collect::<Vec<_>>().join("\n");
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+    clash::apply_overrides(&mut doc, &o);
+    assert!(clash::add_app_rules(&mut doc, &app_routes()).is_empty());
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&doc).unwrap()).unwrap();
+    let out = std::process::Command::new(&bin).args(["-t", "-f"]).arg(&path).arg("-d").arg(&dir).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && text.contains("test is successful"), "mihomo -t failed:\n{text}");
+}
 
 const CLASH: &str = r#"
 mixed-port: 7890
@@ -53,7 +92,11 @@ fn generated_singbox_config_passes_check() {
     ] {
         o.tun = tun;
         let p = config::parse_any(&raw).unwrap();
-        let cfg = singbox::emit(&p, &o);
+        let mut cfg = singbox::emit(&p, &o);
+        // App rules point at groups that exist in the CLASH profile.
+        if name.starts_with("clash") {
+            assert!(singbox::add_app_rules(&mut cfg, &app_routes()).is_empty());
+        }
         let path = dir.join(format!("{name}.json"));
         std::fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
         let out = std::process::Command::new(&bin).args(["check", "-c"]).arg(&path).output().unwrap();

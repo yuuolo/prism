@@ -97,7 +97,7 @@ async fn socks5(mut s: TcpStream, peer: SocketAddr, tunnel: Arc<Tunnel>) -> io::
         s.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
         return Err(invalid(format!("socks5: unsupported command {}", req[1])));
     }
-    let mut meta = Metadata { network: Network::Tcp, inbound: "Socks5", src: peer, dst, dst_ip: None };
+    let mut meta = Metadata::new(Network::Tcp, "Socks5", peer, dst, None);
     match tunnel.dial(&mut meta).await {
         Ok(d) => {
             s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
@@ -144,7 +144,7 @@ async fn http(mut s: TcpStream, peer: SocketAddr, tunnel: Arc<Tunnel>) -> io::Re
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let dst = Address::parse_authority(&uri).ok_or_else(|| invalid("http: bad CONNECT target"))?;
-        let mut meta = Metadata { network: Network::Tcp, inbound: "HTTPS", src: peer, dst, dst_ip: None };
+        let mut meta = Metadata::new(Network::Tcp, "HTTPS", peer, dst, None);
         match tunnel.dial(&mut meta).await {
             Ok(d) => {
                 s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await?;
@@ -191,7 +191,7 @@ async fn http(mut s: TcpStream, peer: SocketAddr, tunnel: Arc<Tunnel>) -> io::Re
     let mut initial = out.into_bytes();
     initial.extend_from_slice(&rest);
 
-    let mut meta = Metadata { network: Network::Tcp, inbound: "HTTP", src: peer, dst, dst_ip: None };
+    let mut meta = Metadata::new(Network::Tcp, "HTTP", peer, dst, None);
     match tunnel.dial(&mut meta).await {
         Ok(d) => tunnel.relay(s, d, meta, &initial).await,
         Err(e) => {

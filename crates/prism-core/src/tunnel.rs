@@ -42,6 +42,54 @@ pub struct Metadata {
     pub dst: Address,
     /// Resolved destination IP (only when an IP rule needed it).
     pub dst_ip: Option<IpAddr>,
+    /// Program that opened the connection (looked up on demand).
+    pub process: Option<Arc<crate::process::ProcessInfo>>,
+    pub process_checked: bool,
+}
+
+impl Metadata {
+    pub fn new(network: Network, inbound: &'static str, src: SocketAddr, dst: Address, dst_ip: Option<IpAddr>) -> Self {
+        Metadata { network, inbound, src, dst, dst_ip, process: None, process_checked: false }
+    }
+
+    /// Finds the owning process once (blocking table lookup off the runtime).
+    pub async fn lookup_process(&mut self) {
+        if self.process_checked {
+            return;
+        }
+        self.process_checked = true;
+        let (network, src) = (self.network, self.src);
+        self.process = tokio::task::spawn_blocking(move || crate::process::find(network, src)).await.ok().flatten();
+    }
+
+    /// `src` with the process name, mihomo style: `127.0.0.1:5000(chrome.exe)`.
+    pub fn source(&self) -> String {
+        match &self.process {
+            Some(p) => format!("{}({})", self.src, p.name),
+            None => self.src.to_string(),
+        }
+    }
+}
+
+/// When to look up the process of a connection (`find-process-mode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FindProcess {
+    /// Every connection (shown in /connections).
+    Always,
+    /// Only when a PROCESS-* rule is evaluated.
+    #[default]
+    Strict,
+    Off,
+}
+
+impl FindProcess {
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "always" => FindProcess::Always,
+            "off" => FindProcess::Off,
+            _ => FindProcess::Strict,
+        }
+    }
 }
 
 pub struct Conn {
@@ -107,6 +155,7 @@ pub struct Tunnel {
     pub mode: RwLock<Mode>,
     pub stats: Arc<Stats>,
     pub dns: Option<Arc<crate::dns::Resolver>>,
+    pub find_process: FindProcess,
 }
 
 impl Tunnel {
@@ -130,6 +179,11 @@ impl Tunnel {
     /// Picks the outbound name for a connection: (target, rule, payload).
     async fn target(&self, meta: &mut Metadata) -> (String, String, String) {
         self.restore_fake_ip(meta);
+        match self.find_process {
+            FindProcess::Always => meta.lookup_process().await,
+            FindProcess::Off => meta.process_checked = true,
+            FindProcess::Strict => {}
+        }
         match self.mode() {
             Mode::Direct => ("DIRECT".to_string(), "Direct".to_string(), String::new()),
             Mode::Global => ("GLOBAL".to_string(), "Global".to_string(), String::new()),
@@ -148,15 +202,15 @@ impl Tunnel {
         let pipe = match res {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
-                tracing::warn!("[UDP] {} --> {} match {rule} using {shown} failed: {e}", meta.src, meta.dst);
+                tracing::warn!("[UDP] {} --> {} match {rule} using {shown} failed: {e}", meta.source(), meta.dst);
                 return Err(e);
             }
             Err(_) => {
-                tracing::warn!("[UDP] {} --> {} match {rule} using {shown} failed: timeout", meta.src, meta.dst);
+                tracing::warn!("[UDP] {} --> {} match {rule} using {shown} failed: timeout", meta.source(), meta.dst);
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "dial timeout"));
             }
         };
-        tracing::info!("[UDP] {} --> {} match {rule} using {shown}", meta.src, meta.dst);
+        tracing::info!("[UDP] {} --> {} match {rule} using {shown}", meta.source(), meta.dst);
         let mut chains = chain;
         chains.reverse();
         Ok(DialedUdp { pipe, chains, rule, rule_payload: payload })
@@ -186,15 +240,15 @@ impl Tunnel {
         let stream = match res {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
-                tracing::warn!("[TCP] {} --> {} match {rule} using {shown} failed: {e}", meta.src, meta.dst);
+                tracing::warn!("[TCP] {} --> {} match {rule} using {shown} failed: {e}", meta.source(), meta.dst);
                 return Err(e);
             }
             Err(_) => {
-                tracing::warn!("[TCP] {} --> {} match {rule} using {shown} failed: timeout", meta.src, meta.dst);
+                tracing::warn!("[TCP] {} --> {} match {rule} using {shown} failed: timeout", meta.source(), meta.dst);
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "dial timeout"));
             }
         };
-        tracing::info!("[TCP] {} --> {} match {rule} using {shown}", meta.src, meta.dst);
+        tracing::info!("[TCP] {} --> {} match {rule} using {shown}", meta.source(), meta.dst);
         let mut chains = chain;
         chains.reverse(); // leaf first, like mihomo
         Ok(Dialed { stream, chains, rule, rule_payload: payload })
@@ -302,7 +356,7 @@ impl UdpNat {
     }
 
     async fn run_session(&self, tunnel: Arc<Tunnel>, src: SocketAddr, dst: Address, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
-        let mut meta = Metadata { network: Network::Udp, inbound: self.inbound, src, dst: dst.clone(), dst_ip: dst.ip() };
+        let mut meta = Metadata::new(Network::Udp, self.inbound, src, dst.clone(), dst.ip());
         let Ok(dialed) = tunnel.dial_udp(&mut meta).await else { return };
         let conn = tunnel.register(meta, dialed.chains, dialed.rule, dialed.rule_payload);
         let UdpPipe { tx: out, rx: mut inc } = dialed.pipe;

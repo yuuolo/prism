@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, errText, type Snapshot } from "./api";
+import { api, errText, type Snapshot, type UpdateInfo } from "./api";
 
 interface Toast {
   id: number;
@@ -14,6 +14,9 @@ interface Ctx {
   toast: (text: string, kind?: "ok" | "err") => void;
   /** Runs an action, toasting its error; returns false on failure. */
   run: (fn: () => Promise<unknown>, ok?: string) => Promise<boolean>;
+  /** A newer Prism release, once a check found one. */
+  update: UpdateInfo | null;
+  setUpdate: (u: UpdateInfo | null) => void;
 }
 
 const AppCtx = createContext<Ctx>(null as unknown as Ctx);
@@ -22,6 +25,7 @@ export const useApp = () => useContext(AppCtx);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const seq = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -65,14 +69,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     refresh();
     const t = setInterval(refresh, 3000);
     const un = listen("core-changed", () => refresh());
+    const unUpdate = listen<UpdateInfo>("update-available", (e) => setUpdate(e.payload));
     return () => {
       clearInterval(t);
       un.then((f) => f());
+      unUpdate.then((f) => f());
     };
   }, [refresh]);
 
   return (
-    <AppCtx.Provider value={{ snap, refresh, toast, run }}>
+    <AppCtx.Provider value={{ snap, refresh, toast, run, update, setUpdate }}>
       {children}
       <div className="toasts">
         {toasts.map((t) => (

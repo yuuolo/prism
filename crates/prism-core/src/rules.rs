@@ -29,8 +29,22 @@ enum Cond {
     SrcPort(Vec<(u16, u16)>),
     InType(String),
     Network(Network),
+    ProcessName(String),
+    ProcessPath(String),
+    ProcessNameRegex(Regex),
+    ProcessPathRegex(Regex),
     RuleSet(Arc<RuleSet>),
     Match,
+}
+
+/// `chrome` matches `chrome.exe` too.
+fn process_name_eq(name: &str, want: &str) -> bool {
+    name.eq_ignore_ascii_case(want)
+        || (name.len() == want.len() + 4 && name[..want.len()].eq_ignore_ascii_case(want) && name[want.len()..].eq_ignore_ascii_case(".exe"))
+}
+
+fn normalize_path(p: &str) -> String {
+    p.replace('/', "\\").to_ascii_lowercase()
 }
 
 impl Cond {
@@ -38,6 +52,14 @@ impl Cond {
         match self {
             Cond::GeoIp(_) | Cond::Private | Cond::Cidr(_) => true,
             Cond::RuleSet(rs) => rs.needs_ip,
+            _ => false,
+        }
+    }
+
+    fn needs_process(&self) -> bool {
+        match self {
+            Cond::ProcessName(_) | Cond::ProcessPath(_) | Cond::ProcessNameRegex(_) | Cond::ProcessPathRegex(_) => true,
+            Cond::RuleSet(rs) => rs.needs_process,
             _ => false,
         }
     }
@@ -59,6 +81,10 @@ impl Cond {
             Cond::SrcPort(v) => in_ports(v, meta.src.port()),
             Cond::InType(t) => meta.inbound.eq_ignore_ascii_case(t),
             Cond::Network(n) => meta.network == *n,
+            Cond::ProcessName(n) => meta.process.as_ref().is_some_and(|p| process_name_eq(&p.name, n)),
+            Cond::ProcessPath(path) => meta.process.as_ref().is_some_and(|p| normalize_path(&p.path) == *path),
+            Cond::ProcessNameRegex(r) => meta.process.as_ref().is_some_and(|p| r.is_match(&p.name)),
+            Cond::ProcessPathRegex(r) => meta.process.as_ref().is_some_and(|p| r.is_match(&p.path)),
             Cond::RuleSet(rs) => match &rs.matcher {
                 SetMatcher::Domain(m) => host.is_some_and(|h| m.matches(h)),
                 SetMatcher::IpCidr(set) => ip.is_some_and(|ip| set.contains(ip)),
@@ -88,6 +114,10 @@ fn simple_cond(kind: &str, p: &str) -> Option<Option<Cond>> {
             "udp" => Some(Cond::Network(Network::Udp)),
             _ => None,
         },
+        "PROCESS-NAME" => Some(Cond::ProcessName(p.to_string())),
+        "PROCESS-PATH" => Some(Cond::ProcessPath(normalize_path(p))),
+        "PROCESS-NAME-REGEX" => Regex::new(p).ok().map(Cond::ProcessNameRegex),
+        "PROCESS-PATH-REGEX" => Regex::new(p).ok().map(Cond::ProcessPathRegex),
         "MATCH" => Some(Cond::Match),
         _ => return None,
     })
@@ -103,6 +133,7 @@ enum SetMatcher {
 pub struct RuleSet {
     matcher: SetMatcher,
     needs_ip: bool,
+    needs_process: bool,
     pub len: usize,
 }
 
@@ -150,7 +181,11 @@ impl RuleSet {
             SetMatcher::Classical(c) => c.iter().any(Cond::needs_ip),
             SetMatcher::Domain(_) => false,
         };
-        RuleSet { matcher, needs_ip, len }
+        let needs_process = match &matcher {
+            SetMatcher::Classical(c) => c.iter().any(Cond::needs_process),
+            _ => false,
+        };
+        RuleSet { matcher, needs_ip, needs_process, len }
     }
 }
 
@@ -176,6 +211,8 @@ impl Rule {
             "IP-CIDR" | "IP-CIDR6" => "IPCIDR".to_string(),
             "SRC-IP-CIDR" => "SrcIPCIDR".to_string(),
             "RULE-SET" => "RuleSet".to_string(),
+            "PROCESS-NAME" => "ProcessName".to_string(),
+            "PROCESS-PATH" => "ProcessPath".to_string(),
             k => k
                 .split('-')
                 .map(|w| {
@@ -277,6 +314,9 @@ impl Router {
     /// back to DIRECT like mihomo). May resolve the destination domain.
     pub async fn route(&self, meta: &mut Metadata) -> Option<&Rule> {
         for rule in &self.rules {
+            if rule.cond.needs_process() {
+                meta.lookup_process().await;
+            }
             if rule.needs_ip() && meta.dst_ip.is_none() && !rule.no_resolve {
                 if let Address::Domain(d, p) = &meta.dst {
                     let lookup = crate::net::resolve(d, *p);
@@ -299,13 +339,39 @@ mod tests {
     use super::*;
 
     fn meta(dst: &str) -> Metadata {
-        Metadata {
-            network: crate::tunnel::Network::Tcp,
-            inbound: "HTTP",
-            src: "127.0.0.1:50000".parse().unwrap(),
-            dst: Address::parse_authority(dst).unwrap(),
-            dst_ip: None,
-        }
+        Metadata::new(crate::tunnel::Network::Tcp, "HTTP", "127.0.0.1:50000".parse().unwrap(), Address::parse_authority(dst).unwrap(), None)
+    }
+
+    #[tokio::test]
+    async fn process_rules() {
+        let cfgs: Vec<RuleConfig> = [
+            "PROCESS-NAME,Chrome,BROWSER",
+            "PROCESS-PATH,C:/Tools/Game/game.exe,GAME",
+            "PROCESS-NAME-REGEX,^tele.*\\.exe$,TG",
+            "MATCH,M",
+        ]
+        .iter()
+        .map(|l| RuleConfig::parse(l).unwrap())
+        .collect();
+        let (r, w) = Router::build(&cfgs, Path::new("."), &HashMap::new());
+        assert!(w.is_empty(), "{w:?}");
+        let with = |name: &str, path: &str| {
+            let mut m = meta("example.com:443");
+            m.process = Some(Arc::new(crate::process::ProcessInfo { pid: 1, name: name.into(), path: path.into() }));
+            m.process_checked = true;
+            m
+        };
+        let route = |mut m: Metadata| {
+            let r = &r;
+            async move { r.route(&mut m).await.unwrap().target.clone() }
+        };
+        assert_eq!(route(with("chrome.exe", "C:\\x\\chrome.exe")).await, "BROWSER");
+        assert_eq!(route(with("game.exe", "c:\\tools\\game\\GAME.EXE")).await, "GAME");
+        assert_eq!(route(with("telegram.exe", "C:\\t\\telegram.exe")).await, "TG");
+        assert_eq!(route(with("other.exe", "C:\\other.exe")).await, "M");
+        let mut unknown = meta("example.com:443");
+        unknown.process_checked = true;
+        assert_eq!(route(unknown).await, "M");
     }
 
     #[tokio::test]
@@ -346,9 +412,9 @@ mod tests {
         sets.insert("dom".to_string(), Arc::new(RuleSet::new("dom", "domain", &dom, &mut w)));
         let ips = ["91.108.4.0/22", "2001:b28:f23d::/48"].map(String::from);
         sets.insert("tg".to_string(), Arc::new(RuleSet::new("tg", "ipcidr", &ips, &mut w)));
-        let cls = ["DOMAIN-KEYWORD,ads", "DST-PORT,6881-6889", "PROCESS-NAME,x.exe"].map(String::from);
+        let cls = ["DOMAIN-KEYWORD,ads", "DST-PORT,6881-6889", "GEOSITE,cn"].map(String::from);
         sets.insert("cls".to_string(), Arc::new(RuleSet::new("cls", "classical", &cls, &mut w)));
-        assert_eq!(w.len(), 2, "{w:?}"); // bad*pattern, PROCESS-NAME
+        assert_eq!(w.len(), 2, "{w:?}"); // bad*pattern, GEOSITE inside a rule-set
         let cfgs: Vec<RuleConfig> = [
             "RULE-SET,dom,G",
             "RULE-SET,tg,T,no-resolve",

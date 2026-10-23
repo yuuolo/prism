@@ -18,6 +18,7 @@ pub mod hub;
 pub mod inbound;
 pub mod net;
 pub mod outbound;
+pub mod process;
 pub mod provider;
 pub mod rules;
 pub mod sniff;
@@ -299,6 +300,7 @@ pub async fn build(mut profile: Profile, home: &Path, env: &BuildEnv) -> Result<
         mode: RwLock::new(profile.general.mode),
         stats: env.stats.clone(),
         dns: resolver.clone(),
+        find_process: tunnel::FindProcess::parse(&profile.general.find_process_mode),
     });
     Ok(Core {
         general: profile.general,

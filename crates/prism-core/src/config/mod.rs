@@ -256,6 +256,9 @@ pub struct General {
     pub tun: TunConfig,
     #[serde(default)]
     pub unified_delay: bool,
+    /// always / strict / off (Clash `find-process-mode`).
+    #[serde(default)]
+    pub find_process_mode: String,
 }
 
 impl Default for General {
@@ -270,7 +273,41 @@ impl Default for General {
             secret: String::new(),
             tun: TunConfig::default(),
             unified_delay: false,
+            find_process_mode: "strict".into(),
         }
+    }
+}
+
+/// A per-application rule added by the GUI: connections from the program
+/// (matched by file name or full path) go to `target`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRoute {
+    pub by_path: bool,
+    pub value: String,
+    /// Proxy / group name, DIRECT or REJECT.
+    pub target: String,
+}
+
+impl AppRoute {
+    /// Program name as the cores expect it: `chrome` -> `chrome.exe`.
+    pub fn process_name(&self) -> String {
+        let v = self.value.trim();
+        if self.by_path || v.contains('.') {
+            v.to_string()
+        } else {
+            format!("{v}.exe")
+        }
+    }
+
+    fn valid(&self) -> Result<(), String> {
+        let v = self.value.trim();
+        if v.is_empty() {
+            return Err("empty program".into());
+        }
+        if v.contains(',') || self.target.contains(',') {
+            return Err(format!("{v}: commas are not allowed"));
+        }
+        Ok(())
     }
 }
 

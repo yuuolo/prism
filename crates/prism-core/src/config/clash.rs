@@ -121,6 +121,9 @@ pub fn parse(v: &Value) -> Result<Profile> {
     g.external_controller = s(root, "external-controller").filter(|x| !x.is_empty());
     g.secret = s(root, "secret").unwrap_or_default();
     g.unified_delay = b(root, "unified-delay");
+    if let Some(m) = s(root, "find-process-mode") {
+        g.find_process_mode = m;
+    }
     if let Some(t) = sub(root, "tun") {
         g.tun.enable = b(t, "enable");
         g.tun.auto_route = !matches!(t.get("auto-route"), Some(Value::Bool(false)));
@@ -386,6 +389,41 @@ pub fn emit(p: &Profile) -> Value {
     Value::Mapping(root)
 }
 
+/// Puts per-application rules in front of the profile's rules. Rules whose
+/// target doesn't exist in the profile are skipped (mihomo would refuse
+/// the whole config); returns warnings for those.
+pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Some(root) = v.as_mapping_mut() else { return warnings };
+    let mut names: std::collections::HashSet<String> = ["DIRECT", "REJECT", "GLOBAL"].iter().map(|s| s.to_string()).collect();
+    for key in ["proxies", "proxy-groups"] {
+        if let Some(Value::Sequence(seq)) = root.get(key) {
+            names.extend(seq.iter().filter_map(|x| x.as_mapping().and_then(|m| s(m, "name"))));
+        }
+    }
+    let mut lines = Vec::new();
+    for r in routes {
+        if let Err(e) = r.valid() {
+            warnings.push(format!("app rule skipped: {e}"));
+            continue;
+        }
+        if !names.contains(&r.target) {
+            warnings.push(format!("app rule {} skipped: {} is not in this profile", r.value, r.target));
+            continue;
+        }
+        let kind = if r.by_path { "PROCESS-PATH" } else { "PROCESS-NAME" };
+        lines.push(Value::String(format!("{kind},{},{}", r.process_name(), r.target)));
+    }
+    if !lines.is_empty() {
+        let rules = root.entry(Value::String("rules".into())).or_insert_with(|| Value::Sequence(vec![]));
+        if let Value::Sequence(seq) = rules {
+            lines.append(seq);
+            *seq = lines;
+        }
+    }
+    warnings
+}
+
 /// Runtime settings the GUI forces onto every generated config.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Overrides {
@@ -443,6 +481,8 @@ pub fn apply_overrides(v: &mut Value, o: &Overrides) {
     put(root, "allow-lan", o.allow_lan);
     put(root, "log-level", o.log_level.clone());
     put(root, "unified-delay", o.unified_delay);
+    // Lets the connections page show which program made each connection.
+    put(root, "find-process-mode", "always");
 }
 
 #[cfg(test)]
@@ -481,6 +521,23 @@ rules:
   - GEOIP,private,DIRECT,no-resolve
   - MATCH,PROXY
 "#;
+
+    #[test]
+    fn app_rules_prepended() {
+        let mut v: Value = serde_yaml::from_str(SBM).unwrap();
+        let routes = [
+            AppRoute { by_path: false, value: "telegram".into(), target: "PROXY".into() },
+            AppRoute { by_path: true, value: "D:\\Steam\\steam.exe".into(), target: "DIRECT".into() },
+            AppRoute { by_path: false, value: "x.exe".into(), target: "NOPE".into() },
+            AppRoute { by_path: false, value: "a,b".into(), target: "DIRECT".into() },
+        ];
+        let w = add_app_rules(&mut v, &routes);
+        assert_eq!(w.len(), 2, "{w:?}");
+        let p = parse(&v).unwrap();
+        assert_eq!(p.rules[0].to_line(), "PROCESS-NAME,telegram.exe,PROXY");
+        assert_eq!(p.rules[1].to_line(), "PROCESS-PATH,D:\\Steam\\steam.exe,DIRECT");
+        assert_eq!(p.rules[2].to_line(), "GEOSITE,cn,DIRECT");
+    }
 
     #[test]
     fn parses_sbm_subscription() {

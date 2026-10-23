@@ -377,6 +377,71 @@ fn clash_api(o: &Overrides) -> Value {
     })
 }
 
+/// Puts per-application rules (`process_name` / `process_path`) in front of
+/// the routing rules, after the sniff / hijack-dns / clash_mode rules so the
+/// global and direct modes still win. Returns warnings for skipped rules.
+pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Some(root) = v.as_object_mut() else { return warnings };
+    let outbounds = root.entry("outbounds").or_insert_with(|| json!([]));
+    let tags: Vec<(String, String)> = outbounds
+        .as_array()
+        .map(|a| a.iter().filter_map(|o| Some((st(o, "tag")?, st(o, "type").unwrap_or_default()))).collect())
+        .unwrap_or_default();
+    let mut direct = tags.iter().find(|(_, t)| t == "direct").map(|(tag, _)| tag.clone());
+    let mut rules = Vec::new();
+    for r in routes {
+        if let Err(e) = r.valid() {
+            warnings.push(format!("app rule skipped: {e}"));
+            continue;
+        }
+        let mut rule = if r.by_path {
+            json!({ "process_path": [r.process_name()] })
+        } else {
+            json!({ "process_name": [r.process_name()] })
+        };
+        match r.target.as_str() {
+            "REJECT" => rule["action"] = json!("reject"),
+            "DIRECT" => {
+                let tag = direct.get_or_insert_with(|| {
+                    if let Some(a) = outbounds.as_array_mut() {
+                        a.push(json!({ "type": "direct", "tag": "DIRECT" }));
+                    }
+                    "DIRECT".to_string()
+                });
+                rule["outbound"] = json!(tag);
+            }
+            t if tags.iter().any(|(tag, _)| tag == t) => rule["outbound"] = json!(t),
+            t => {
+                warnings.push(format!("app rule {} skipped: {t} is not in this profile", r.value));
+                continue;
+            }
+        }
+        rules.push(rule);
+    }
+    if rules.is_empty() {
+        return warnings;
+    }
+    let route = root.entry("route").or_insert_with(|| json!({}));
+    if let Some(r) = route.as_object_mut() {
+        r.insert("find_process".into(), json!(true));
+        let list = r.entry("rules").or_insert_with(|| json!([]));
+        if let Some(list) = list.as_array_mut() {
+            let lead = list
+                .iter()
+                .take_while(|x| {
+                    x.get("clash_mode").is_some()
+                        || matches!(x.get("action").and_then(|a| a.as_str()), Some("sniff" | "hijack-dns" | "resolve"))
+                })
+                .count();
+            for (i, rule) in rules.into_iter().enumerate() {
+                list.insert(lead + i, rule);
+            }
+        }
+    }
+    warnings
+}
+
 /// Patches a native sing-box profile: replaces inbounds (TUN needs admin
 /// rights, the GUI uses system proxy) and forces the Clash API settings.
 pub fn apply_overrides(v: &mut Value, o: &Overrides) {
@@ -600,6 +665,27 @@ mod tests {
         assert_eq!(back.proxies[0].sni.as_deref(), Some("jp.example.com"));
         assert!(back.rules.iter().any(|r| r.kind == "GEOSITE" && r.payload == "cn" && r.target == "DIRECT"));
         assert_eq!(back.rules.last().unwrap().kind, "MATCH");
+    }
+
+    #[test]
+    fn app_rules_go_after_mode_rules() {
+        let p = parse_any("anytls://pw@jp.example.com:443/?sni=jp.example.com#jp").unwrap();
+        let mut sb = emit(&p, &overrides());
+        let routes = [
+            AppRoute { by_path: false, value: "chrome".into(), target: "jp".into() },
+            AppRoute { by_path: true, value: "C:\\Games\\x.exe".into(), target: "DIRECT".into() },
+            AppRoute { by_path: false, value: "ads.exe".into(), target: "REJECT".into() },
+            AppRoute { by_path: false, value: "a.exe".into(), target: "missing".into() },
+        ];
+        let w = add_app_rules(&mut sb, &routes);
+        assert_eq!(w.len(), 1, "{w:?}");
+        let rules = sb["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[2]["clash_mode"], "Global");
+        assert_eq!(rules[3], json!({ "process_name": ["chrome.exe"], "outbound": "jp" }));
+        assert_eq!(rules[4], json!({ "process_path": ["C:\\Games\\x.exe"], "outbound": "DIRECT" }));
+        assert_eq!(rules[5], json!({ "process_name": ["ads.exe"], "action": "reject" }));
+        assert_eq!(sb["route"]["find_process"], true);
     }
 
     #[test]

@@ -3,6 +3,7 @@ mod download;
 mod elevate;
 mod store;
 mod sysproxy;
+mod updater;
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -21,6 +22,8 @@ pub struct AppState {
     store: Store,
     settings: Mutex<Settings>,
     core: CoreManager,
+    /// Release found by the last update check.
+    update: Mutex<Option<tauri_plugin_updater::Update>>,
 }
 
 type Res<T> = Result<T, String>;
@@ -55,10 +58,11 @@ struct Snapshot {
     elevated: bool,
     core_paths: Value,
     data_dir: String,
+    version: String,
 }
 
 #[tauri::command]
-async fn get_state(st: State<'_, AppState>) -> Res<Snapshot> {
+async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
     let s = st.settings();
     let (on, server) = sysproxy::get();
     let path = |k| core::core_binary(&st.store, &s, k);
@@ -75,6 +79,7 @@ async fn get_state(st: State<'_, AppState>) -> Res<Snapshot> {
         elevated: elevate::is_elevated(),
         core_paths: paths,
         data_dir: st.store.dir.display().to_string(),
+        version: app.package_info().version.to_string(),
     })
 }
 
@@ -101,6 +106,7 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
         s.system_proxy = keep.system_proxy;
         s.mode = keep.mode;
         s.active_profile = keep.active_profile;
+        s.app_rules = keep.app_rules;
     })?;
     let restart = old.core != new.core
         || old.mixed_port != new.mixed_port
@@ -403,6 +409,68 @@ fn restart_as_admin(app: AppHandle) -> Res<()> {
     Ok(())
 }
 
+/// Logs to the app log (and stderr, visible in dev).
+fn note(app: &AppHandle, st: &AppState, msg: String) {
+    eprintln!("[prism] {msg}");
+    st.core.push_log(app, format!("[prism] {msg}"));
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle, st: State<'_, AppState>) -> Res<Option<updater::UpdateInfo>> {
+    let found = updater::find(&app, st.proxy_port().await).await.map_err(|err| format!("检查更新失败: {err:#}"))?;
+    let info = found.as_ref().map(updater::info);
+    *st.update.lock().unwrap() = found;
+    Ok(info)
+}
+
+/// Downloads + verifies the release, stops the core (the installer replaces
+/// prism-core.exe) and runs the installer, which restarts Prism.
+#[tauri::command]
+async fn install_update(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
+    let pending = st.update.lock().unwrap().clone();
+    let update = match pending {
+        Some(u) => u,
+        None => updater::find(&app, st.proxy_port().await).await.map_err(e)?.ok_or("已是最新版本")?,
+    };
+    note(&app, &st, format!("正在下载 v{} ...", update.version));
+    let bytes = updater::download(&app, &update).await.map_err(e)?;
+    note(&app, &st, format!("v{} 下载完成，签名校验通过，开始安装", update.version));
+    let was_running = st.core.running().await.is_some();
+    st.core.stop().await;
+    if st.settings().system_proxy {
+        // The setting stays on, so the new version turns it back on.
+        let _ = sysproxy::set(false, "", "");
+    }
+    if let Err(err) = updater::install(&update, &bytes) {
+        if was_running {
+            let _ = start(&app, &st).await;
+        }
+        return Err(e(err));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_processes() -> Res<Vec<prism_core::process::ProcessInfo>> {
+    tauri::async_runtime::spawn_blocking(prism_core::process::list).await.map_err(e)
+}
+
+#[tauri::command]
+fn profile_outbounds(st: State<'_, AppState>) -> Res<Value> {
+    let (groups, proxies) = core::profile_outbounds(&st.store, &st.settings()).map_err(e)?;
+    Ok(json!({ "groups": groups, "proxies": proxies }))
+}
+
+/// Saves the app rules and restarts a running core so they take effect.
+#[tauri::command]
+async fn set_app_rules(app: AppHandle, st: State<'_, AppState>, rules: Vec<store::AppRule>) -> Res<()> {
+    st.update(|s| s.app_rules = rules)?;
+    if st.core.running().await.is_some() {
+        start(&app, &st).await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn get_logs(st: State<'_, AppState>) -> Vec<String> {
     st.core.logs.lock().unwrap().iter().cloned().collect()
@@ -510,11 +578,12 @@ fn on_menu(app: &AppHandle, id: &str) {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             let store = Store::new(dir)?;
             let settings = store.settings();
-            app.manage(AppState { store, settings: Mutex::new(settings), core: CoreManager::default() });
+            app.manage(AppState { store, settings: Mutex::new(settings), core: CoreManager::default(), update: Mutex::new(None) });
 
             let menu = build_tray_menu(app.handle())?;
             TrayIconBuilder::with_id("main")
@@ -542,6 +611,19 @@ pub fn run() {
                         }
                         Ok(()) => {}
                         Err(err) => st.core.push_log(&handle, format!("[prism] 自动启动失败: {err}")),
+                    }
+                }
+                if s.auto_update_check {
+                    // Give the core a moment so the check can use its proxy.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    match updater::find(&handle, st.proxy_port().await).await {
+                        Ok(Some(u)) => {
+                            note(&handle, &st, format!("发现新版本 v{}（当前 v{}）", u.version, u.current_version));
+                            let _ = handle.emit("update-available", updater::info(&u));
+                            *st.update.lock().unwrap() = Some(u);
+                        }
+                        Ok(None) => note(&handle, &st, "已是最新版本".into()),
+                        Err(err) => note(&handle, &st, format!("检查更新失败: {err:#}")),
                     }
                 }
             });
@@ -574,6 +656,11 @@ pub fn run() {
             set_tun,
             restart_as_admin,
             get_logs,
+            list_processes,
+            profile_outbounds,
+            set_app_rules,
+            check_update,
+            install_update,
             clear_logs,
             download_core,
             update_geodata,

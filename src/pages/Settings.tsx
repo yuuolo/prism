@@ -1,6 +1,91 @@
 import { useEffect, useState } from "react";
-import { api, CORE_NAMES, type CoreKind, type Settings } from "../api";
+import { listen } from "@tauri-apps/api/event";
+import { api, CORE_NAMES, errText, fmtBytes, type CoreKind, type Settings } from "../api";
 import { useApp } from "../state";
+
+/** 软件更新: check GitHub releases and install signed updates. */
+function UpdateCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+  const { snap, toast, update, setUpdate } = useApp();
+  const [state, setState] = useState<"idle" | "checking" | "latest" | "installing">("idle");
+  const [progress, setProgress] = useState<{ downloaded: number; total: number | null } | null>(null);
+
+  useEffect(() => {
+    const un = listen<{ downloaded: number; total: number | null }>("update-progress", (e) => setProgress(e.payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  const check = async () => {
+    setState("checking");
+    try {
+      const u = await api.checkUpdate();
+      setUpdate(u);
+      setState(u ? "idle" : "latest");
+    } catch (e) {
+      toast(errText(e), "err");
+      setState("idle");
+    }
+  };
+
+  const install = async () => {
+    setState("installing");
+    setProgress(null);
+    try {
+      // On success Prism exits and the installer starts the new version.
+      await api.installUpdate();
+    } catch (e) {
+      toast(errText(e), "err");
+      setState("idle");
+    }
+  };
+
+  const pct = progress?.total ? Math.min(100, (progress.downloaded / progress.total) * 100) : null;
+  return (
+    <div className="card span-2">
+      <h3>软件更新</h3>
+      <div className="row wrap">
+        <span>
+          当前版本 <b>v{snap?.version}</b>
+        </span>
+        <button className="btn" disabled={state === "checking" || state === "installing"} onClick={check}>
+          {state === "checking" ? "检查中…" : "检查更新"}
+        </button>
+        {state === "latest" && !update && <span className="small muted">已是最新版本</span>}
+        <span className="spacer" />
+        <span className="small muted">启动时自动检查</span>
+        <button className={`switch ${form.auto_update_check ? "on" : ""}`} onClick={() => set("auto_update_check", !form.auto_update_check)} />
+      </div>
+      {update && (
+        <div className="update-box">
+          <div className="row">
+            <b>新版本 v{update.version}</b>
+            {update.date && <span className="small muted">{update.date.slice(0, 10)}</span>}
+            <span className="spacer" />
+            <button className="btn primary" disabled={state === "installing"} onClick={install}>
+              {state === "installing" ? "安装中…" : "下载并安装"}
+            </button>
+          </div>
+          {update.notes && <pre className="update-notes">{update.notes}</pre>}
+          {state === "installing" && (
+            <>
+              <div className="bar">
+                <div style={{ width: `${pct ?? 5}%` }} />
+              </div>
+              <div className="small muted">
+                {progress ? `已下载 ${fmtBytes(progress.downloaded)}${progress.total ? ` / ${fmtBytes(progress.total)}` : ""}` : "开始下载…"}
+                {pct === 100 && " · 校验签名并启动安装程序，Prism 将自动重启"}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      <div className="small muted" style={{ marginTop: 10 }}>
+        更新包来自 GitHub Releases，安装前会校验发布签名；内核运行中时经代理下载。安装时会先停止内核。
+      </div>
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const { snap, run } = useApp();
@@ -155,6 +240,8 @@ export default function SettingsPage() {
             <span className="small muted mono">{snap.data_dir}</span>
           </div>
         </div>
+
+        <UpdateCard form={form} set={set} />
       </div>
 
       {preview !== null && (
