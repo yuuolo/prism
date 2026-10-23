@@ -40,6 +40,7 @@ fn generated_singbox_config_passes_check() {
         allow_lan: false,
         log_level: "info".into(),
         tun: false,
+        unified_delay: false,
     };
     let dir = std::env::temp_dir().join(format!("prism-sbcheck-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

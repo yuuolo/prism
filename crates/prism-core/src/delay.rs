@@ -74,25 +74,75 @@ async fn request(reg: &Registry, name: &str, url: &str) -> std::io::Result<u128>
         Some(q) => format!("{}?{q}", u.path()),
         None => u.path().to_string(),
     };
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: prism\r\nConnection: close\r\n\r\n");
+    let req = |conn: &str| format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: prism\r\nConnection: {conn}\r\n\r\n");
 
     let start = Instant::now();
     let (out, _) = reg.resolve(name, &target)?;
     let stream = out.connect(&target).await?;
-    let mut buf = [0u8; 12];
     if https {
-        let mut s = Tls::new(&host, false, &["http/1.1".to_string()])?.wrap(stream).await?;
-        s.write_all(req.as_bytes()).await?;
-        s.flush().await?;
-        s.read_exact(&mut buf).await?;
+        let s = Tls::new(&host, false, &["http/1.1".to_string()])?.wrap(stream).await?;
+        exchange(s, start, reg.unified_delay, &req("keep-alive"), &req("close")).await
     } else {
-        let mut s = stream;
-        s.write_all(req.as_bytes()).await?;
-        s.flush().await?;
-        s.read_exact(&mut buf).await?;
+        exchange(stream, start, reg.unified_delay, &req("keep-alive"), &req("close")).await
     }
+}
+
+/// Sends the test request. With `unified` (mihomo's unified-delay), a first
+/// request warms the connection and only the second, keep-alive request is
+/// timed, so handshakes (proxy and TLS) don't count.
+async fn exchange<S>(mut s: S, start: Instant, unified: bool, warm: &str, timed: &str) -> std::io::Result<u128>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut start = start;
+    if unified {
+        s.write_all(warm.as_bytes()).await?;
+        s.flush().await?;
+        let (status, len) = read_head(&mut s).await?;
+        // The body must be skippable to reuse the connection.
+        let body = match (status, len) {
+            (204 | 304, _) => Some(0),
+            (_, Some(n)) if n <= 64 * 1024 => Some(n),
+            _ => None,
+        };
+        match body {
+            Some(n) => {
+                let mut skip = vec![0u8; n];
+                s.read_exact(&mut skip).await?;
+                start = Instant::now();
+            }
+            None => return Ok(start.elapsed().as_millis()),
+        }
+    }
+    s.write_all(timed.as_bytes()).await?;
+    s.flush().await?;
+    let mut buf = [0u8; 12];
+    s.read_exact(&mut buf).await?;
     if !buf.starts_with(b"HTTP/") {
         return Err(other("unexpected response"));
     }
     Ok(start.elapsed().as_millis())
+}
+
+/// Reads a response head; returns (status, Content-Length).
+async fn read_head<S: tokio::io::AsyncRead + Unpin>(s: &mut S) -> std::io::Result<(u16, Option<usize>)> {
+    let mut head = Vec::with_capacity(512);
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() > 16 * 1024 {
+            return Err(other("response head too long"));
+        }
+        head.push(s.read_u8().await?);
+    }
+    let text = String::from_utf8_lossy(&head);
+    let mut lines = text.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    if !status_line.starts_with("HTTP/") {
+        return Err(other("unexpected response"));
+    }
+    let status = status_line.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let len = lines
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse().ok());
+    Ok((status, len))
 }

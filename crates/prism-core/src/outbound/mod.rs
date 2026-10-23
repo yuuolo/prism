@@ -40,6 +40,8 @@ pub struct Registry {
     pub map: HashMap<String, Arc<dyn Outbound>>,
     pub order: Vec<String>,
     pub delays: Arc<DelayStore>,
+    /// mihomo's unified-delay: URL tests time only a warm second request.
+    pub unified_delay: bool,
 }
 
 impl Registry {

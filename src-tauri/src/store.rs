@@ -27,6 +27,8 @@ pub struct Settings {
     pub log_level: String,
     pub system_proxy: bool,
     pub tun: bool,
+    /// Latency tests time a warm second request (mihomo unified-delay).
+    pub unified_delay: bool,
     pub proxy_bypass: String,
     pub active_profile: Option<String>,
     pub mihomo_path: Option<String>,
@@ -49,6 +51,7 @@ impl Default for Settings {
             log_level: "info".into(),
             system_proxy: false,
             tun: false,
+            unified_delay: true,
             proxy_bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*;<local>".into(),
             active_profile: None,
             mihomo_path: None,
@@ -95,7 +98,7 @@ fn write_json<T: Serialize>(p: &Path, v: &T) -> Result<()> {
 
 impl Store {
     pub fn new(dir: PathBuf) -> Result<Self> {
-        for d in ["profiles", "runtime", "cores"] {
+        for d in ["profiles", "runtime", "runtime/rule-set", "cores"] {
             std::fs::create_dir_all(dir.join(d))?;
         }
         Ok(Store { dir })
@@ -103,6 +106,11 @@ impl Store {
 
     pub fn runtime_dir(&self) -> PathBuf {
         self.dir.join("runtime")
+    }
+
+    /// sing-box rule-set files (.srs), downloaded by the app.
+    pub fn rule_set_dir(&self) -> PathBuf {
+        self.dir.join("runtime").join("rule-set")
     }
 
     pub fn cores_dir(&self) -> PathBuf {

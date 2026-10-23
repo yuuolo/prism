@@ -139,6 +139,46 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// jsdelivr mirror of a raw.githubusercontent.com URL (usually reachable
+/// when GitHub is not).
+pub fn mirror(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://raw.githubusercontent.com/")?;
+    let mut parts = rest.splitn(4, '/');
+    let (owner, repo, branch, path) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    Some(format!("https://fastly.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"))
+}
+
+/// Downloads a sing-box rule-set to `dest`: through the running proxy if
+/// any, then the jsdelivr mirror, then the original URL.
+pub async fn rule_set(url: &str, dest: &Path, proxy_port: Option<u16>) -> Result<()> {
+    let mut tries: Vec<(String, Option<u16>)> = Vec::new();
+    if proxy_port.is_some() {
+        tries.push((url.to_string(), proxy_port));
+    }
+    if let Some(m) = mirror(url) {
+        tries.push((m, None));
+    }
+    tries.push((url.to_string(), None));
+    let binary = dest.extension().is_some_and(|e| e == "srs");
+    let mut last = anyhow!("no source");
+    for (u, port) in tries {
+        let c = client(port)?;
+        match tokio::time::timeout(Duration::from_secs(60), fetch(&c, &u)).await {
+            // Reject HTML error pages and the like.
+            Ok(Ok(data)) if (binary && data.starts_with(b"SRS")) || (!binary && serde_json::from_slice::<serde_json::Value>(&data).is_ok()) => {
+                let tmp = dest.with_extension("download");
+                std::fs::write(&tmp, data)?;
+                std::fs::rename(&tmp, dest)?;
+                return Ok(());
+            }
+            Ok(Ok(_)) => last = anyhow!("{u}: not a rule-set file"),
+            Ok(Err(e)) => last = e,
+            Err(_) => last = anyhow!("{u}: timeout"),
+        }
+    }
+    Err(last)
+}
+
 /// Version string printed by a core binary (`-v` / `version`).
 pub async fn core_version(kind: CoreKind, bin: &Path) -> Option<String> {
     if !bin.exists() {
@@ -159,6 +199,27 @@ pub async fn core_version(kind: CoreKind, bin: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirrors_raw_github() {
+        assert_eq!(
+            mirror("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs").as_deref(),
+            Some("https://fastly.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-cn.srs")
+        );
+        assert_eq!(mirror("https://example.com/a.srs"), None);
+    }
+
+    #[test]
+    #[ignore = "network"]
+    fn downloads_real_rule_set() {
+        let dir = std::env::temp_dir().join(format!("prism-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("geosite-private.srs");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(rule_set("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-private.srs", &dest, None))
+            .unwrap();
+        assert!(std::fs::read(&dest).unwrap().starts_with(b"SRS"));
+    }
 
     #[test]
     fn asset_names() {

@@ -5,6 +5,7 @@ mod store;
 mod sysproxy;
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use prism_core::config::Mode;
 use serde::{Deserialize, Serialize};
@@ -106,7 +107,8 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
         || old.controller_port != new.controller_port
         || old.allow_lan != new.allow_lan
         || old.log_level != new.log_level
-        || old.secret != new.secret;
+        || old.secret != new.secret
+        || old.unified_delay != new.unified_delay;
     if restart && st.core.running().await.is_some() {
         start(&app, &st).await?;
     }
@@ -246,6 +248,10 @@ async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
             st.core.push_log(app, format!("[prism] geodata 下载失败（GEOSITE/GEOIP 规则将被跳过）: {err:#}"));
         }
     }
+    if s.core == CoreKind::Singbox {
+        // Errors (e.g. no profile yet) surface from core.start below.
+        let _ = ensure_rule_sets(app, st, false).await;
+    }
     st.core.start(app, &st.store, &s).await.map_err(e)?;
     // Re-apply the user's node choices for this profile.
     if let Some(sel) = s.active_profile.as_ref().and_then(|id| s.selections.get(id)) {
@@ -257,6 +263,49 @@ async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
     let _ = app.emit("core-changed", ());
     refresh_tray(app);
     Ok(())
+}
+
+const RULE_SET_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Downloads the sing-box rule-sets the active profile needs. Missing files
+/// are fetched now; stale ones are refreshed in the background (or now when
+/// `force`). Returns how many are still unavailable.
+async fn ensure_rule_sets(app: &AppHandle, st: &AppState, force: bool) -> Res<usize> {
+    let sets = core::singbox_rule_sets(&st.store, &st.settings()).map_err(e)?;
+    let dir = st.store.rule_set_dir();
+    let port = st.proxy_port().await;
+    let mut now = Vec::new();
+    for r in sets {
+        let path = dir.join(&r.file);
+        let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        match age {
+            None => now.push((r, path)),
+            Some(_) if force => now.push((r, path)),
+            Some(a) if a > RULE_SET_MAX_AGE => {
+                tauri::async_runtime::spawn(async move {
+                    let _ = download::rule_set(&r.url, &path, port).await;
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    if now.is_empty() {
+        return Ok(0);
+    }
+    let tags: Vec<&str> = now.iter().map(|(r, _)| r.tag.as_str()).collect();
+    st.core.push_log(app, format!("[prism] 正在下载规则集: {}", tags.join(", ")));
+    let results = futures::future::join_all(now.iter().map(|(r, path)| download::rule_set(&r.url, path, port))).await;
+    let mut failed = 0;
+    for ((r, path), res) in now.iter().zip(results) {
+        if let Err(err) = res {
+            // A stale copy still works; only a missing file is a failure.
+            if !path.exists() {
+                failed += 1;
+            }
+            st.core.push_log(app, format!("[prism] 规则集 {} 下载失败: {err:#}", r.tag));
+        }
+    }
+    Ok(failed)
 }
 
 fn encode(s: &str) -> String {
@@ -371,15 +420,22 @@ async fn download_core(st: State<'_, AppState>, kind: CoreKind) -> Res<String> {
 }
 
 #[tauri::command]
-async fn update_geodata(st: State<'_, AppState>) -> Res<()> {
+async fn update_geodata(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
     let port = st.proxy_port().await;
-    download::geodata(&st.store.runtime_dir(), port).await.map_err(e)
+    download::geodata(&st.store.runtime_dir(), port).await.map_err(e)?;
+    if st.settings().core == CoreKind::Singbox && st.settings().active_profile.is_some() {
+        let failed = ensure_rule_sets(&app, &st, true).await?;
+        if failed > 0 {
+            return Err(format!("{failed} 个 sing-box 规则集下载失败，详见日志"));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn preview_config(st: State<'_, AppState>) -> Res<String> {
-    let path = core::write_runtime_config(&st.store, &st.settings()).map_err(e)?;
-    std::fs::read_to_string(path).map_err(e)
+    let cfg = core::write_runtime_config(&st.store, &st.settings()).map_err(e)?;
+    std::fs::read_to_string(cfg.path).map_err(e)
 }
 
 #[tauri::command]

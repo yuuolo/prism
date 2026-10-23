@@ -53,38 +53,65 @@ fn overrides(s: &Settings) -> clash::Overrides {
         allow_lan: s.allow_lan,
         log_level: s.log_level.clone(),
         tun: s.tun,
+        unified_delay: s.unified_delay,
     }
 }
 
-/// Converts the active profile into the selected core's config format and
-/// writes it to the runtime dir. Returns the config path.
-pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<PathBuf> {
+fn active_profile(store: &Store, s: &Settings) -> Result<String> {
     let id = s.active_profile.clone().ok_or_else(|| anyhow!("请先在「订阅」页导入并启用一个订阅"))?;
-    let raw = store.read_content(&id)?;
-    let raw = raw.trim_start_matches('\u{feff}');
+    Ok(store.read_content(&id)?.trim_start_matches('\u{feff}').to_string())
+}
+
+/// sing-box config for the active profile, before rule-sets are localized.
+fn singbox_config(store: &Store, s: &Settings) -> Result<Value> {
+    let raw = active_profile(store, s)?;
     let o = overrides(s);
+    let mut doc: Value = match config::detect(&raw) {
+        Format::SingBox => serde_json::from_str(&raw)?,
+        _ => singbox::emit(&config::parse_any(&raw)?, &o),
+    };
+    singbox::apply_overrides(&mut doc, &o);
+    Ok(doc)
+}
+
+/// Remote rule-sets the sing-box config uses (the app downloads them).
+pub fn singbox_rule_sets(store: &Store, s: &Settings) -> Result<Vec<singbox::RemoteRuleSet>> {
+    Ok(singbox::remote_rule_sets(&singbox_config(store, s)?))
+}
+
+pub struct RuntimeConfig {
+    pub path: PathBuf,
+    /// Things the user should know about (e.g. skipped rule-sets).
+    pub warnings: Vec<String>,
+}
+
+/// Converts the active profile into the selected core's config format and
+/// writes it to the runtime dir.
+pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig> {
     let dir = store.runtime_dir();
-    let format = config::detect(raw);
     match s.core {
         CoreKind::Prism | CoreKind::Mihomo => {
-            let mut doc: serde_yaml::Value = match format {
-                Format::Clash => serde_yaml::from_str(raw)?,
-                _ => clash::emit(&config::parse_any(raw)?),
+            let raw = active_profile(store, s)?;
+            let mut doc: serde_yaml::Value = match config::detect(&raw) {
+                Format::Clash => serde_yaml::from_str(&raw)?,
+                _ => clash::emit(&config::parse_any(&raw)?),
             };
-            clash::apply_overrides(&mut doc, &o);
+            clash::apply_overrides(&mut doc, &overrides(s));
             let path = dir.join("config.yaml");
             std::fs::write(&path, serde_yaml::to_string(&doc)?)?;
-            Ok(path)
+            Ok(RuntimeConfig { path, warnings: Vec::new() })
         }
         CoreKind::Singbox => {
-            let mut doc: Value = match format {
-                Format::SingBox => serde_json::from_str(raw)?,
-                _ => singbox::emit(&config::parse_any(raw)?, &o),
-            };
-            singbox::apply_overrides(&mut doc, &o);
+            let mut doc = singbox_config(store, s)?;
+            // sing-box exits if a remote rule-set can't be fetched at startup,
+            // so it only ever gets the files the app downloaded.
+            let warnings = singbox::localize_rule_sets(&mut doc, &store.rule_set_dir())
+                .into_iter()
+                .map(|t| format!("规则集 {t} 未能下载，使用它的规则已跳过（可在设置页「更新 GeoSite / GeoIP」重试）"))
+                .collect();
             let path = dir.join("config.json");
             std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
-            Ok(path)
+            Ok(RuntimeConfig { path, warnings })
         }
     }
 }
@@ -114,7 +141,10 @@ impl CoreManager {
                 _ => format!("找不到内核 {}，请在「设置」页下载或指定路径", bin.display()),
             });
         }
-        let cfg = write_runtime_config(store, s)?;
+        let RuntimeConfig { path: cfg, warnings } = write_runtime_config(store, s)?;
+        for w in warnings {
+            self.push_log(app, format!("[prism] {w}"));
+        }
         let dir = store.runtime_dir();
         let mut cmd = Command::new(&bin);
         match s.core {

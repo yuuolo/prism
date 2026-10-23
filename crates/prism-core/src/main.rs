@@ -25,6 +25,10 @@ struct Args {
     /// Enable TUN mode (Windows, needs administrator rights and wintun.dll)
     #[arg(long)]
     tun: bool,
+    /// With `--convert singbox`: use rule-set files from this directory
+    /// (`<tag>.srs`) instead of downloading them at startup
+    #[arg(long, value_name = "DIR")]
+    rule_set_dir: Option<PathBuf>,
     /// Print the config converted to `clash` or `singbox` format and exit
     #[arg(long, value_name = "FORMAT")]
     convert: Option<String>,
@@ -54,6 +58,7 @@ fn main() -> Result<()> {
             allow_lan: g.allow_lan,
             log_level: g.log_level.clone(),
             tun: g.tun.enable,
+            unified_delay: g.unified_delay,
         };
         let out = match fmt {
             "clash" => {
@@ -61,7 +66,15 @@ fn main() -> Result<()> {
                 prism_core::config::clash::apply_overrides(&mut doc, &o);
                 serde_yaml::to_string(&doc)?
             }
-            "singbox" => serde_json::to_string_pretty(&prism_core::config::singbox::emit(&profile, &o))?,
+            "singbox" => {
+                let mut doc = prism_core::config::singbox::emit(&profile, &o);
+                if let Some(dir) = &args.rule_set_dir {
+                    for tag in prism_core::config::singbox::localize_rule_sets(&mut doc, dir) {
+                        eprintln!("warning: {tag} not found in {}, its rules were dropped", dir.display());
+                    }
+                }
+                serde_json::to_string_pretty(&doc)?
+            }
             other => anyhow::bail!("unknown format {other} (expected clash or singbox)"),
         };
         print!("{out}");

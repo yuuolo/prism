@@ -123,6 +123,13 @@ export default function SettingsPage() {
             <label>测速地址</label>
             <input className="input" value={form.test_url} onChange={(e) => set("test_url", e.target.value)} />
           </div>
+          <div className="field">
+            <label>统一延迟</label>
+            <div className="row">
+              <button className={`switch ${form.unified_delay ? "on" : ""}`} onClick={() => set("unified_delay", !form.unified_delay)} />
+              <span className="small muted">只计第二次请求，排除握手耗时（Prism / mihomo 内核）</span>
+            </div>
+          </div>
         </div>
 
         <div className="card span-2">

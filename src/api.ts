@@ -13,6 +13,7 @@ export interface Settings {
   log_level: string;
   system_proxy: boolean;
   tun: boolean;
+  unified_delay: boolean;
   proxy_bypass: string;
   active_profile: string | null;
   mihomo_path: string | null;

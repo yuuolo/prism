@@ -81,7 +81,7 @@ pub fn build(mut profile: Profile, home: &Path) -> Result<Core> {
     map.insert("GLOBAL".into(), global);
     order.insert(0, "GLOBAL".into());
 
-    let reg = Arc::new(Registry { map, order, delays: Default::default() });
+    let reg = Arc::new(Registry { map, order, delays: Default::default(), unified_delay: profile.general.unified_delay });
     let _ = cell.set(reg.clone());
     for g in groups {
         g.spawn_health_loop();

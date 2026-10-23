@@ -117,8 +117,105 @@ pub fn emit_outbound(p: &ProxyConfig) -> Value {
     Value::Object(o)
 }
 
-fn rule_set_entry(tag: &str, url: String, detour: &str) -> Value {
-    json!({ "type": "remote", "tag": tag, "format": "binary", "url": url, "download_detour": detour })
+/// Remote entry without a download detour: `download_detour` is deprecated
+/// in sing-box 1.14 (removed in 1.16) and its replacement `http_client`
+/// doesn't exist before 1.14. The GUI turns these into local rule-sets
+/// (see [`localize_rule_sets`]), so sing-box never downloads at startup.
+fn rule_set_entry(tag: &str, url: String) -> Value {
+    json!({ "type": "remote", "tag": tag, "format": "binary", "url": url })
+}
+
+/// A remote rule-set referenced by a sing-box config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteRuleSet {
+    pub tag: String,
+    pub url: String,
+    /// File name to store it under (`<tag>.srs` / `<tag>.json`).
+    pub file: String,
+}
+
+fn rule_set_file(tag: &str, entry: &Value) -> String {
+    let source = entry.get("format").and_then(|f| f.as_str()) == Some("source")
+        || entry.get("url").and_then(|u| u.as_str()).is_some_and(|u| u.ends_with(".json"));
+    let safe: String = tag.chars().map(|c| if c.is_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    format!("{safe}.{}", if source { "json" } else { "srs" })
+}
+
+/// Lists the remote rule-sets (single-tag entries) in a sing-box config.
+pub fn remote_rule_sets(v: &Value) -> Vec<RemoteRuleSet> {
+    let sets = v.pointer("/route/rule_set").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    sets.iter()
+        .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("remote"))
+        .filter_map(|e| {
+            let tag = e.get("tag")?.as_str()?.to_string();
+            let url = e.get("url")?.as_str()?.to_string();
+            Some(RemoteRuleSet { file: rule_set_file(&tag, e), tag, url })
+        })
+        .collect()
+}
+
+/// Rule fields that only qualify how a rule matches or acts; a rule left
+/// with nothing but these after removing `rule_set` would match everything.
+const NON_MATCH_FIELDS: [&str; 13] = [
+    "type", "rule_set", "rule_set_ip_cidr_match_source", "rule_set_ip_cidr_accept_empty", "rule_set_ipcidr_match_source",
+    "action", "outbound", "server", "invert", "strategy", "disable_cache", "rewrite_ttl", "client_subnet",
+];
+
+/// Removes references to `dropped` rule-sets. Returns false if the rule
+/// should be deleted entirely.
+fn strip_rule(rule: &mut Value, dropped: &BTreeSet<String>) -> bool {
+    let Some(obj) = rule.as_object_mut() else { return true };
+    if let Some(Value::Array(sub)) = obj.get_mut("rules") {
+        sub.retain_mut(|r| strip_rule(r, dropped));
+        return !sub.is_empty();
+    }
+    let Some(rs) = obj.get("rule_set") else { return true };
+    let tags: Vec<String> = match rs {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        _ => return true,
+    };
+    let kept: Vec<String> = tags.iter().filter(|t| !dropped.contains(*t)).cloned().collect();
+    if kept.len() == tags.len() {
+        return true;
+    }
+    if !kept.is_empty() {
+        obj.insert("rule_set".into(), json!(kept));
+        return true;
+    }
+    obj.remove("rule_set");
+    obj.keys().any(|k| !NON_MATCH_FIELDS.contains(&k.as_str()))
+}
+
+/// Points remote rule-sets at files in `dir` so sing-box starts without
+/// network access (a failed first download is fatal for sing-box). Sets with
+/// no file are removed together with the rules that use them; their tags
+/// are returned.
+pub fn localize_rule_sets(v: &mut Value, dir: &std::path::Path) -> Vec<String> {
+    let remotes = remote_rule_sets(v);
+    let mut dropped = BTreeSet::new();
+    let Some(sets) = v.pointer_mut("/route/rule_set").and_then(|s| s.as_array_mut()) else { return Vec::new() };
+    sets.retain_mut(|entry| {
+        let Some(r) = entry.get("tag").and_then(|t| t.as_str()).and_then(|t| remotes.iter().find(|r| r.tag == t)) else {
+            return true; // local, inline or multi-tag entries are left alone
+        };
+        let path = dir.join(&r.file);
+        if !path.exists() {
+            dropped.insert(r.tag.clone());
+            return false;
+        }
+        let format = if r.file.ends_with(".json") { "source" } else { "binary" };
+        *entry = json!({ "type": "local", "tag": r.tag, "format": format, "path": path.to_string_lossy() });
+        true
+    });
+    if !dropped.is_empty() {
+        for ptr in ["/route/rules", "/dns/rules"] {
+            if let Some(Value::Array(rules)) = v.pointer_mut(ptr) {
+                rules.retain_mut(|r| strip_rule(r, &dropped));
+            }
+        }
+    }
+    dropped.into_iter().collect()
 }
 
 /// Converts a profile to a complete sing-box config that exposes a mixed
@@ -229,7 +326,7 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
         "outbounds": outbounds,
         "route": {
             "rules": rules,
-            "rule_set": sets.iter().map(|(t, u)| rule_set_entry(t, u.clone(), &detour)).collect::<Vec<_>>(),
+            "rule_set": sets.iter().map(|(t, u)| rule_set_entry(t, u.clone())).collect::<Vec<_>>(),
             "final": if final_target == "REJECT" { "DIRECT".to_string() } else { final_target },
             "auto_detect_interface": true,
             "default_domain_resolver": "local",
@@ -484,6 +581,7 @@ mod tests {
             allow_lan: false,
             log_level: "info".into(),
             tun: false,
+            unified_delay: false,
         }
     }
 
@@ -502,5 +600,40 @@ mod tests {
         assert_eq!(back.proxies[0].sni.as_deref(), Some("jp.example.com"));
         assert!(back.rules.iter().any(|r| r.kind == "GEOSITE" && r.payload == "cn" && r.target == "DIRECT"));
         assert_eq!(back.rules.last().unwrap().kind, "MATCH");
+    }
+
+    #[test]
+    fn localizes_rule_sets_and_drops_missing() {
+        let raw = "anytls://pw@jp.example.com:443/?sni=jp.example.com#jp";
+        let mut o = overrides();
+        o.tun = true; // DNS rules reference geosite-cn too
+        let mut sb = emit(&parse_any(raw).unwrap(), &o);
+        assert!(!sb.to_string().contains("download_detour"));
+        let remotes = remote_rule_sets(&sb);
+        let tags: Vec<&str> = remotes.iter().map(|r| r.tag.as_str()).collect();
+        assert_eq!(tags, ["geoip-cn", "geosite-cn", "geosite-private"]);
+        assert_eq!(remotes[1].file, "geosite-cn.srs");
+
+        // A rule mixing rule_set with another condition keeps the condition.
+        sb["route"]["rules"].as_array_mut().unwrap().push(json!({ "rule_set": ["geoip-cn"], "domain_suffix": ["x.cn"], "outbound": "DIRECT" }));
+        let dir = std::env::temp_dir().join(format!("prism-rs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("geosite-cn.srs"), b"x").unwrap();
+        let dropped = localize_rule_sets(&mut sb, &dir);
+        assert_eq!(dropped, ["geoip-cn", "geosite-private"]);
+
+        let sets = sb["route"]["rule_set"].as_array().unwrap();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0]["type"], "local");
+        assert!(sets[0]["path"].as_str().unwrap().ends_with("geosite-cn.srs"));
+        let text = sb.to_string();
+        assert!(!text.contains("geoip-cn") && !text.contains("geosite-private"));
+        // geosite-cn rules survive (route + DNS), the dropped ones are gone,
+        // and the mixed rule lost only its rule_set.
+        assert!(sb["dns"]["rules"].as_array().unwrap().iter().any(|r| r["rule_set"] == json!("geosite-cn")));
+        let rules = sb["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|r| r["rule_set"] == json!(["geosite-cn"])));
+        assert!(rules.iter().any(|r| r["domain_suffix"] == json!(["x.cn"]) && r.get("rule_set").is_none()));
+        assert!(rules.iter().all(|r| r.as_object().unwrap().keys().any(|k| k != "outbound")));
     }
 }

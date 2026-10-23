@@ -243,6 +243,8 @@ pub struct General {
     pub secret: String,
     #[serde(default)]
     pub tun: TunConfig,
+    #[serde(default)]
+    pub unified_delay: bool,
 }
 
 impl Default for General {
@@ -256,6 +258,7 @@ impl Default for General {
             external_controller: Some("127.0.0.1:9090".into()),
             secret: String::new(),
             tun: TunConfig::default(),
+            unified_delay: false,
         }
     }
 }
@@ -356,6 +359,11 @@ pub fn detect(raw: &str) -> Format {
         if m.contains_key("proxies") || m.contains_key("proxy-groups") || m.contains_key("proxy-providers") {
             return Format::Clash;
         }
+    }
+    // Broken YAML that is clearly a Clash config: report the YAML error
+    // instead of "no nodes found".
+    if t.lines().any(|l| l.starts_with("proxies:") || l.starts_with("proxy-groups:")) {
+        return Format::Clash;
     }
     Format::Uri
 }

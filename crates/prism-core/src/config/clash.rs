@@ -116,6 +116,7 @@ pub fn parse(v: &Value) -> Result<Profile> {
     }
     g.external_controller = s(root, "external-controller").filter(|x| !x.is_empty());
     g.secret = s(root, "secret").unwrap_or_default();
+    g.unified_delay = b(root, "unified-delay");
     if let Some(t) = sub(root, "tun") {
         g.tun.enable = b(t, "enable");
         g.tun.auto_route = !matches!(t.get("auto-route"), Some(Value::Bool(false)));
@@ -294,6 +295,8 @@ pub struct Overrides {
     pub log_level: String,
     #[serde(default)]
     pub tun: bool,
+    #[serde(default)]
+    pub unified_delay: bool,
 }
 
 fn seq(items: &[&str]) -> Value {
@@ -337,6 +340,7 @@ pub fn apply_overrides(v: &mut Value, o: &Overrides) {
     put(root, "mode", o.mode.as_str());
     put(root, "allow-lan", o.allow_lan);
     put(root, "log-level", o.log_level.clone());
+    put(root, "unified-delay", o.unified_delay);
 }
 
 #[cfg(test)]
