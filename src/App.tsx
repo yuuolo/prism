@@ -9,6 +9,7 @@ import Rules from "./pages/Rules";
 import Logs from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
 import Apps from "./pages/Apps";
+import ImportDialog from "./ImportDialog";
 
 const PAGES = [
   { key: "home", label: "概览", icon: "◎", el: Home },
@@ -59,6 +60,7 @@ function Shell() {
       <main className="main">
         <Page go={setPage} />
       </main>
+      <ImportDialog go={setPage} />
     </div>
   );
 }

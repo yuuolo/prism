@@ -87,6 +87,56 @@ function UpdateCard({ form, set }: { form: Settings; set: <K extends keyof Setti
   );
 }
 
+/** 开机自启 / 静默启动 and which program opens clash:// links. */
+function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+  const { snap, run } = useApp();
+  if (!snap) return null;
+  const handler = snap.clash_handler;
+  return (
+    <div className="card span-2">
+      <h3>启动与链接</h3>
+      <div className="field">
+        <label>开机自启</label>
+        <div className="row">
+          <button
+            className={`switch ${snap.autostart ? "on" : ""}`}
+            onClick={() => run(() => api.setAutostart(!snap.autostart), snap.autostart ? "已关闭开机自启" : "已开启开机自启")}
+          />
+          <span className="small muted">登录 Windows 时启动 Prism（立即生效）</span>
+        </div>
+      </div>
+      <div className="field">
+        <label>静默启动</label>
+        <div className="row">
+          <button className={`switch ${form.silent_start ? "on" : ""}`} onClick={() => set("silent_start", !form.silent_start)} />
+          <span className="small muted">开机自启时只在托盘运行，不弹出主界面</span>
+        </div>
+      </div>
+      <div className="field">
+        <label>接管 clash:// 链接</label>
+        <div className="row">
+          <button
+            className={`switch ${snap.clash_links ? "on" : ""}`}
+            onClick={() =>
+              run(() => api.setClashLinks(!snap.clash_links), snap.clash_links ? "clash:// 链接已还给原来的程序" : "clash:// 链接将由 Prism 打开")
+            }
+          />
+          <span className="small muted">
+            {snap.clash_links
+              ? "机场面板的「一键导入 Clash」会打开 Prism；关闭后还给原来的程序"
+              : handler
+                ? `当前由 ${handler} 打开；开启后由 Prism 打开，关闭时还原`
+                : "开启后机场面板的「一键导入 Clash」会打开 Prism"}
+          </span>
+        </div>
+      </div>
+      <div className="small muted" style={{ marginTop: 8 }}>
+        prism:// 链接始终由 Prism 打开（安装版）。通过链接导入订阅前都会先弹窗确认。
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { snap, run } = useApp();
   const [form, setForm] = useState<Settings | null>(null);
@@ -240,6 +290,8 @@ export default function SettingsPage() {
             <span className="small muted mono">{snap.data_dir}</span>
           </div>
         </div>
+
+        <StartupCard form={form} set={set} />
 
         <UpdateCard form={form} set={set} />
       </div>

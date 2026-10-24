@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtAgo, fmtBytes, type ProfileMeta } from "../api";
+import { api, fmtAgo, fmtBytes, fmtInterval, type ProfileMeta } from "../api";
 import { useApp } from "../state";
 
 const FORMAT_NAMES = { clash: "Clash", singbox: "sing-box", uri: "分享链接" };
@@ -8,7 +8,10 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
   const { run } = useApp();
   const [name, setName] = useState(profile?.name ?? "");
   const [content, setContent] = useState<string | null>(profile ? null : "");
+  const [every, setEvery] = useState(String(profile?.interval ?? 1440));
   const [saving, setSaving] = useState(false);
+  const minutes = Number(every);
+  const badInterval = !/^\d+$/.test(every.trim());
 
   useEffect(() => {
     if (profile) api.readProfile(profile.id).then(setContent);
@@ -19,6 +22,7 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
     const ok = await run(async () => {
       if (profile) {
         if (name !== profile.name) await api.renameProfile(profile.id, name);
+        if (profile.url && minutes !== profile.interval) await api.setProfileInterval(profile.id, minutes);
         await api.saveProfileContent(profile.id, content ?? "");
       } else {
         await api.importProfile({ content: content ?? "", name });
@@ -33,6 +37,17 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>{profile ? "编辑订阅" : "新建本地配置"}</h2>
         <input className="input" placeholder="名称" value={name} onChange={(e) => setName(e.target.value)} />
+        {profile?.url && (
+          <div className="row">
+            <span className="small" style={{ whiteSpace: "nowrap" }}>
+              自动更新间隔
+            </span>
+            <input className="input" style={{ width: 110 }} value={every} onChange={(e) => setEvery(e.target.value)} />
+            <span className="small muted">
+              {badInterval ? "请输入分钟数" : minutes ? `分钟（每 ${fmtInterval(minutes)}更新一次）` : "分钟（0 = 不自动更新）"}
+            </span>
+          </div>
+        )}
         <textarea
           className="input"
           rows={20}
@@ -47,7 +62,7 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
           <button className="btn" onClick={onClose}>
             取消
           </button>
-          <button className="btn primary" disabled={saving || !content?.trim()} onClick={save}>
+          <button className="btn primary" disabled={saving || !content?.trim() || (!!profile?.url && badInterval)} onClick={save}>
             {saving ? "保存中…" : "保存"}
           </button>
         </div>
@@ -138,6 +153,12 @@ export default function Profiles() {
                 <span>{FORMAT_NAMES[p.format]}</span>
                 <span>·</span>
                 <span>{fmtAgo(p.updated_at)}更新</span>
+                {p.url && (
+                  <>
+                    <span>·</span>
+                    <span title="可在「编辑」中修改">{p.interval ? `每 ${fmtInterval(p.interval)}` : "不自动更新"}</span>
+                  </>
+                )}
               </div>
               {u && u.total > 0 && (
                 <>

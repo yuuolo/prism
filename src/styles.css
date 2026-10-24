@@ -858,3 +858,12 @@ td.ellipsis {
   color: var(--muted);
   user-select: text;
 }
+
+.import-modal {
+  width: min(560px, 100%);
+}
+
+.import-url {
+  word-break: break-all;
+  user-select: text;
+}

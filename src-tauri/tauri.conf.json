@@ -17,7 +17,8 @@
         "width": 1120,
         "height": 740,
         "minWidth": 900,
-        "minHeight": 600
+        "minHeight": 600,
+        "visible": false
       }
     ],
     "security": {
@@ -28,7 +29,12 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
   },
   "plugins": {
     "updater": {

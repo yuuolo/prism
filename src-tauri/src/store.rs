@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use prism_core::config::{self, Mode};
@@ -28,6 +29,8 @@ pub struct Settings {
     pub system_proxy: bool,
     /// Look for a new Prism release on startup.
     pub auto_update_check: bool,
+    /// When started with Windows, stay in the tray instead of opening the window.
+    pub silent_start: bool,
     pub tun: bool,
     /// Latency tests time a warm second request (mihomo unified-delay).
     pub unified_delay: bool,
@@ -55,6 +58,7 @@ impl Default for Settings {
             log_level: "info".into(),
             system_proxy: false,
             auto_update_check: true,
+            silent_start: true,
             tun: false,
             unified_delay: true,
             proxy_bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*;<local>".into(),
@@ -98,10 +102,23 @@ pub struct ProfileMeta {
     pub nodes: usize,
     pub updated_at: i64,
     pub usage: Option<Usage>,
+    /// Minutes between automatic updates of a remote profile; 0 = never.
+    #[serde(default = "default_interval")]
+    pub interval: u32,
+}
+
+/// Automatic update interval when the provider doesn't suggest one.
+pub const DEFAULT_INTERVAL: u32 = 24 * 60;
+
+fn default_interval() -> u32 {
+    DEFAULT_INTERVAL
 }
 
 pub struct Store {
     pub dir: PathBuf,
+    /// Serialises read-modify-write of profiles.json (the scheduler and the
+    /// UI can update profiles at the same time).
+    lock: Mutex<()>,
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
@@ -120,7 +137,7 @@ impl Store {
         for d in ["profiles", "runtime", "runtime/rule-set", "cores"] {
             std::fs::create_dir_all(dir.join(d))?;
         }
-        Ok(Store { dir })
+        Ok(Store { dir, lock: Mutex::new(()) })
     }
 
     pub fn runtime_dir(&self) -> PathBuf {
@@ -166,13 +183,24 @@ impl Store {
         std::fs::read_to_string(self.content_path(id)).with_context(|| format!("profile {id} not found"))
     }
 
-    /// Validates and stores profile content. `id` = None creates a new profile.
-    pub fn put(&self, id: Option<&str>, name: &str, url: Option<String>, content: &str, usage: Option<Usage>) -> Result<ProfileMeta> {
+    /// Validates and stores profile content. `id` = None creates a new
+    /// profile. `interval` = None keeps the profile's update interval.
+    pub fn put(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        url: Option<String>,
+        content: &str,
+        usage: Option<Usage>,
+        interval: Option<u32>,
+    ) -> Result<ProfileMeta> {
         let parsed = config::parse_any(content).context("无法解析订阅内容")?;
         if parsed.proxies.is_empty() {
             bail!("订阅中没有可用节点");
         }
+        let _guard = self.lock.lock().unwrap();
         let mut list = self.profiles();
+        let old = id.and_then(|id| list.iter().find(|p| p.id == id)).map(|p| p.interval);
         let meta = ProfileMeta {
             id: id.map(String::from).unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()[..12].to_string()),
             name: name.to_string(),
@@ -181,6 +209,7 @@ impl Store {
             nodes: parsed.proxies.len(),
             updated_at: chrono::Utc::now().timestamp(),
             usage,
+            interval: interval.or(old).unwrap_or(DEFAULT_INTERVAL),
         };
         std::fs::write(self.content_path(&meta.id), content)?;
         match list.iter_mut().find(|p| p.id == meta.id) {
@@ -192,14 +221,22 @@ impl Store {
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<()> {
+        self.edit(id, |p| p.name = name.to_string())
+    }
+
+    pub fn set_interval(&self, id: &str, minutes: u32) -> Result<()> {
+        self.edit(id, |p| p.interval = minutes)
+    }
+
+    fn edit(&self, id: &str, f: impl FnOnce(&mut ProfileMeta)) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let mut list = self.profiles();
-        if let Some(p) = list.iter_mut().find(|p| p.id == id) {
-            p.name = name.to_string();
-        }
+        f(list.iter_mut().find(|p| p.id == id).context("订阅不存在")?);
         self.save_profiles(&list)
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let mut list = self.profiles();
         list.retain(|p| p.id != id);
         let _ = std::fs::remove_file(self.content_path(id));

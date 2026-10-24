@@ -25,6 +25,9 @@ pub fn is_elevated() -> bool {
     }
 }
 
+/// Passed with our pid to the elevated instance, which waits for us to exit.
+pub const WAIT_ARG: &str = "--wait-pid";
+
 /// Starts this executable again with a UAC prompt. Returns false if the
 /// user declined.
 #[cfg(windows)]
@@ -36,10 +39,26 @@ pub fn relaunch_as_admin() -> bool {
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let verb = wide("runas");
     let file = wide(&exe.to_string_lossy());
+    let params = wide(&format!("{WAIT_ARG} {}", std::process::id()));
     let r = unsafe {
-        ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+        ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), params.as_ptr(), std::ptr::null(), SW_SHOWNORMAL)
     };
     r as usize > 32
+}
+
+/// Waits up to `timeout` for process `pid` to exit.
+#[cfg(windows)]
+pub fn wait_for_exit(pid: u32, timeout: std::time::Duration) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+
+    unsafe {
+        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if !h.is_null() {
+            WaitForSingleObject(h, timeout.as_millis().min(u32::MAX as u128) as u32);
+            CloseHandle(h);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -51,3 +70,6 @@ pub fn is_elevated() -> bool {
 pub fn relaunch_as_admin() -> bool {
     false
 }
+
+#[cfg(not(windows))]
+pub fn wait_for_exit(_pid: u32, _timeout: std::time::Duration) {}

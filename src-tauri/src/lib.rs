@@ -1,10 +1,13 @@
+mod autostart;
 mod core;
 mod download;
 mod elevate;
+mod links;
 mod store;
 mod sysproxy;
 mod updater;
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -24,6 +27,8 @@ pub struct AppState {
     core: CoreManager,
     /// Release found by the last update check.
     update: Mutex<Option<tauri_plugin_updater::Update>>,
+    /// Import links waiting for the window to confirm them.
+    imports: Mutex<Vec<PendingLink>>,
 }
 
 type Res<T> = Result<T, String>;
@@ -59,6 +64,12 @@ struct Snapshot {
     core_paths: Value,
     data_dir: String,
     version: String,
+    /// Windows starts Prism at logon.
+    autostart: bool,
+    /// clash:// links open Prism.
+    clash_links: bool,
+    /// File name of the program that opens clash:// links now.
+    clash_handler: Option<String>,
 }
 
 #[tauri::command]
@@ -80,6 +91,9 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
         core_paths: paths,
         data_dir: st.store.dir.display().to_string(),
         version: app.package_info().version.to_string(),
+        autostart: autostart::enabled(),
+        clash_links: links::owned("clash"),
+        clash_handler: links::handler("clash"),
     })
 }
 
@@ -131,25 +145,56 @@ struct ImportArgs {
     name: Option<String>,
 }
 
-async fn fetch_subscription(st: &AppState, url: &str) -> Res<(String, Option<store::Usage>, Option<String>)> {
+#[derive(Default)]
+struct Subscription {
+    content: String,
+    usage: Option<store::Usage>,
+    /// From Content-Disposition.
+    name: Option<String>,
+    /// Minutes, from the provider's `profile-update-interval` header.
+    interval: Option<u32>,
+}
+
+/// File name from a Content-Disposition header, preferring the RFC 5987
+/// `filename*=UTF-8''…` form that carries non-ASCII names.
+fn disposition_name(h: &str) -> Option<String> {
+    let mut plain = None;
+    for part in h.split(';') {
+        let Some((k, v)) = part.split_once('=') else { continue };
+        let v = v.trim();
+        match k.trim().to_ascii_lowercase().as_str() {
+            "filename*" => {
+                let value = v.rsplit('\'').next().unwrap_or(v);
+                let name = percent_encoding::percent_decode_str(value).decode_utf8_lossy().trim().to_string();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+            "filename" => plain = Some(v.trim_matches('"').trim().to_string()),
+            _ => {}
+        }
+    }
+    plain.filter(|n| !n.is_empty())
+}
+
+/// `profile-update-interval` is in hours; profiles store minutes.
+fn interval_minutes(hours: &str) -> Option<u32> {
+    let h = hours.trim().parse::<f64>().ok().filter(|h| h.is_finite() && *h >= 0.0)?;
+    Some((h * 60.0).round().min(u32::MAX as f64) as u32)
+}
+
+async fn fetch_subscription(st: &AppState, url: &str) -> Res<Subscription> {
     // Try directly first; fall back to the running proxy.
     let mut last = String::new();
     for proxy in [None, st.proxy_port().await].into_iter().collect::<std::collections::BTreeSet<_>>() {
         let client = download::client(proxy).map_err(e)?;
         match client.get(url).header("User-Agent", "clash.meta").send().await {
             Ok(r) if r.status().is_success() => {
-                let usage = r
-                    .headers()
-                    .get("subscription-userinfo")
-                    .and_then(|v| v.to_str().ok())
-                    .map(store::parse_userinfo);
-                let name = r
-                    .headers()
-                    .get("content-disposition")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.split("filename=").nth(1))
-                    .map(|n| n.trim_matches('"').to_string());
-                return Ok((r.text().await.map_err(e)?, usage, name));
+                let header = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).map(String::from);
+                let usage = header("subscription-userinfo").map(|v| store::parse_userinfo(&v));
+                let name = header("content-disposition").and_then(|v| disposition_name(&v));
+                let interval = header("profile-update-interval").and_then(|v| interval_minutes(&v));
+                return Ok(Subscription { content: r.text().await.map_err(e)?, usage, name, interval });
             }
             Ok(r) => last = format!("HTTP {}", r.status()),
             Err(err) => last = e(err),
@@ -161,18 +206,18 @@ async fn fetch_subscription(st: &AppState, url: &str) -> Res<(String, Option<sto
 #[tauri::command]
 async fn import_profile(app: AppHandle, st: State<'_, AppState>, args: ImportArgs) -> Res<ProfileMeta> {
     let url = args.url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
-    let (content, usage, remote_name) = match (&url, args.content) {
+    let sub = match (&url, args.content) {
         (Some(u), _) => fetch_subscription(&st, u).await?,
-        (None, Some(c)) => (c, None, None),
+        (None, Some(c)) => Subscription { content: c, ..Default::default() },
         (None, None) => return Err("请输入订阅链接或配置内容".into()),
     };
     let name = args
         .name
         .filter(|n| !n.trim().is_empty())
-        .or(remote_name)
+        .or(sub.name)
         .or_else(|| url.as_ref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(String::from)))
         .unwrap_or_else(|| "本地配置".into());
-    let meta = st.store.put(None, &name, url, &content, usage).map_err(e)?;
+    let meta = st.store.put(None, &name, url, &sub.content, sub.usage, sub.interval).map_err(e)?;
     if st.settings().active_profile.is_none() {
         activate_profile(app, st, meta.id.clone()).await?;
     }
@@ -181,12 +226,17 @@ async fn import_profile(app: AppHandle, st: State<'_, AppState>, args: ImportArg
 
 #[tauri::command]
 async fn update_profile(app: AppHandle, st: State<'_, AppState>, id: String) -> Res<ProfileMeta> {
+    refresh_profile(&app, &st, &id).await
+}
+
+/// Downloads a remote profile again and applies it if it's in use.
+async fn refresh_profile(app: &AppHandle, st: &AppState, id: &str) -> Res<ProfileMeta> {
     let meta = st.store.profiles().into_iter().find(|p| p.id == id).ok_or("订阅不存在")?;
     let url = meta.url.clone().ok_or("本地配置无需更新")?;
-    let (content, usage, _) = fetch_subscription(&st, &url).await?;
-    let meta = st.store.put(Some(&id), &meta.name, Some(url), &content, usage).map_err(e)?;
-    if st.settings().active_profile.as_deref() == Some(id.as_str()) && st.core.running().await.is_some() {
-        start(&app, &st).await?;
+    let sub = fetch_subscription(st, &url).await?;
+    let meta = st.store.put(Some(id), &meta.name, Some(url), &sub.content, sub.usage, None).map_err(e)?;
+    if st.settings().active_profile.as_deref() == Some(id) {
+        reload_core(app, st).await?;
     }
     Ok(meta)
 }
@@ -194,11 +244,51 @@ async fn update_profile(app: AppHandle, st: State<'_, AppState>, id: String) -> 
 #[tauri::command]
 async fn save_profile_content(app: AppHandle, st: State<'_, AppState>, id: String, content: String) -> Res<ProfileMeta> {
     let meta = st.store.profiles().into_iter().find(|p| p.id == id).ok_or("订阅不存在")?;
-    let meta = st.store.put(Some(&id), &meta.name, meta.url, &content, meta.usage).map_err(e)?;
-    if st.settings().active_profile.as_deref() == Some(id.as_str()) && st.core.running().await.is_some() {
-        start(&app, &st).await?;
+    let meta = st.store.put(Some(&id), &meta.name, meta.url, &content, meta.usage, None).map_err(e)?;
+    if st.settings().active_profile.as_deref() == Some(id.as_str()) {
+        reload_core(&app, &st).await?;
     }
     Ok(meta)
+}
+
+#[tauri::command]
+fn set_profile_interval(st: State<'_, AppState>, id: String, minutes: u32) -> Res<()> {
+    st.store.set_interval(&id, minutes).map_err(e)
+}
+
+/// How often the scheduler looks for subscriptions that are due.
+const SCHEDULE_TICK: Duration = Duration::from_secs(60);
+/// Seconds before a failed automatic update is tried again.
+const RETRY_SECS: i64 = 30 * 60;
+
+/// Updates remote profiles once their update interval has passed.
+async fn subscription_scheduler(app: AppHandle) {
+    let mut failed: HashMap<String, i64> = HashMap::new();
+    loop {
+        tokio::time::sleep(SCHEDULE_TICK).await;
+        let st = app.state::<AppState>();
+        for p in st.store.profiles() {
+            if p.url.is_none() || p.interval == 0 {
+                continue;
+            }
+            let now = chrono::Utc::now().timestamp();
+            let every = i64::from(p.interval) * 60;
+            let retry_at = failed.get(&p.id).map_or(0, |t| t + RETRY_SECS.min(every));
+            if now < p.updated_at + every || now < retry_at {
+                continue;
+            }
+            match refresh_profile(&app, &st, &p.id).await {
+                Ok(m) => {
+                    failed.remove(&p.id);
+                    note(&app, &st, format!("订阅「{}」已自动更新（{} 个节点）", m.name, m.nodes));
+                }
+                Err(err) => {
+                    failed.insert(p.id.clone(), now);
+                    note(&app, &st, format!("订阅「{}」自动更新失败: {err}", p.name));
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -259,15 +349,43 @@ async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
         let _ = ensure_rule_sets(app, st, false).await;
     }
     st.core.start(app, &st.store, &s).await.map_err(e)?;
-    // Re-apply the user's node choices for this profile.
+    apply_selections(&s).await;
+    let _ = app.emit("core-changed", ());
+    refresh_tray(app);
+    Ok(())
+}
+
+/// Re-applies the user's node choices for the active profile.
+async fn apply_selections(s: &Settings) {
     if let Some(sel) = s.active_profile.as_ref().and_then(|id| s.selections.get(id)) {
         for (group, name) in sel {
             let path = format!("/proxies/{}", encode(group));
-            let _ = core::api(&s, "PUT", &path, Some(json!({ "name": name }))).await;
+            let _ = core::api(s, "PUT", &path, Some(json!({ "name": name }))).await;
         }
     }
+}
+
+/// Applies a changed active profile to a running core. Prism and mihomo
+/// reload in place, keeping listeners and open connections; sing-box has no
+/// reload API and restarts. A config the core rejects leaves it running the
+/// old one.
+async fn reload_core(app: &AppHandle, st: &AppState) -> Res<()> {
+    let s = st.settings();
+    match st.core.running().await {
+        None => return Ok(()),
+        Some(kind) if kind != s.core || kind == CoreKind::Singbox => return start(app, st).await,
+        Some(_) => {}
+    }
+    let cfg = core::write_runtime_config(&st.store, &s).map_err(e)?;
+    for w in cfg.warnings {
+        st.core.push_log(app, format!("[prism] {w}"));
+    }
+    core::api(&s, "PUT", "/configs", Some(json!({ "path": cfg.path.to_string_lossy() })))
+        .await
+        .map_err(|err| format!("内核未能加载新配置，仍在使用旧配置: {err:#}"))?;
+    apply_selections(&s).await;
+    note(app, st, "配置已热重载".into());
     let _ = app.emit("core-changed", ());
-    refresh_tray(app);
     Ok(())
 }
 
@@ -472,6 +590,49 @@ async fn set_app_rules(app: AppHandle, st: State<'_, AppState>, rules: Vec<store
 }
 
 #[tauri::command]
+fn set_autostart(enable: bool) -> Res<()> {
+    autostart::set(enable).map_err(e)
+}
+
+/// Makes clash:// links (subscription panels' "import to Clash") open Prism,
+/// or gives them back to the program that had them.
+#[tauri::command]
+fn set_clash_links(enable: bool) -> Res<()> {
+    if enable { links::take_over("clash") } else { links::release("clash") }.map_err(e)
+}
+
+/// A link waiting for the window: an import to confirm, or why the link
+/// can't be used.
+#[derive(Clone, Serialize)]
+struct PendingLink {
+    request: Option<links::ImportRequest>,
+    error: Option<String>,
+}
+
+/// Queues a `prism://` / `clash://` link and shows the window to confirm it.
+fn handle_link(app: &AppHandle, link: &str) {
+    let Some(st) = app.try_state::<AppState>() else { return };
+    let pending = match links::parse(link) {
+        Ok(r) => {
+            note(app, &st, format!("收到导入链接: {}", r.name.as_deref().unwrap_or("未命名订阅")));
+            PendingLink { request: Some(r), error: None }
+        }
+        Err(err) => {
+            note(app, &st, err.clone());
+            PendingLink { request: None, error: Some(err) }
+        }
+    };
+    st.imports.lock().unwrap().push(pending);
+    let _ = app.emit("import-request", ());
+    show_main(app);
+}
+
+#[tauri::command]
+fn take_import_requests(st: State<'_, AppState>) -> Vec<PendingLink> {
+    std::mem::take(&mut *st.imports.lock().unwrap())
+}
+
+#[tauri::command]
 fn get_logs(st: State<'_, AppState>) -> Vec<String> {
     st.core.logs.lock().unwrap().iter().cloned().collect()
 }
@@ -577,13 +738,40 @@ fn on_menu(app: &AppHandle, id: &str) {
 }
 
 pub fn run() {
+    let args: Vec<String> = std::env::args().collect();
+    // After "restart as administrator", let the old instance exit first: it
+    // holds the single-instance lock and the core's ports.
+    let wait = args.iter().position(|a| a == elevate::WAIT_ARG).and_then(|i| args.get(i + 1));
+    if let Some(pid) = wait.and_then(|p| p.parse().ok()) {
+        elevate::wait_for_exit(pid, Duration::from_secs(15));
+    }
+    let autostarted = args.iter().any(|a| a == autostart::ARG);
+    let link = links::find(args.iter().skip(1).cloned());
+
     let app = tauri::Builder::default()
+        // Must come first: a second launch hands its arguments (an import
+        // link, say) to the running Prism and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| match links::find(argv.into_iter().skip(1)) {
+            Some(link) => handle_link(app, &link),
+            None => show_main(app),
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|app| {
-            let dir = app.path().app_data_dir()?;
+        .setup(move |app| {
+            // PRISM_DATA_DIR: a separate data folder (portable use, tests).
+            let dir = match std::env::var_os("PRISM_DATA_DIR") {
+                Some(d) => std::path::PathBuf::from(d),
+                None => app.path().app_data_dir()?,
+            };
             let store = Store::new(dir)?;
             let settings = store.settings();
-            app.manage(AppState { store, settings: Mutex::new(settings), core: CoreManager::default(), update: Mutex::new(None) });
+            let hidden = autostarted && settings.silent_start && link.is_none();
+            app.manage(AppState {
+                store,
+                settings: Mutex::new(settings),
+                core: CoreManager::default(),
+                update: Mutex::new(None),
+                imports: Mutex::new(Vec::new()),
+            });
 
             let menu = build_tray_menu(app.handle())?;
             TrayIconBuilder::with_id("main")
@@ -599,12 +787,33 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // The window starts hidden (tauri.conf.json) so a start with
+            // Windows can stay in the tray.
+            if !hidden {
+                show_main(app.handle());
+            }
+            if let Some(link) = &link {
+                handle_link(app.handle(), link);
+            }
+            if !cfg!(debug_assertions) {
+                // Installed builds own prism://; dev builds leave it alone.
+                if let Err(err) = links::register("prism") {
+                    eprintln!("[prism] 注册 prism:// 链接失败: {err:#}");
+                }
+            }
+            tauri::async_runtime::spawn(subscription_scheduler(app.handle().clone()));
+
             // Auto-start the core when a profile is configured.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let st = handle.state::<AppState>();
-                let s = st.settings();
+                let mut s = st.settings();
                 if s.active_profile.is_some() {
+                    if s.tun && !elevate::is_elevated() {
+                        // Started with Windows, say: run without TUN rather than not at all.
+                        s = st.update(|x| x.tun = false).unwrap_or(s);
+                        note(&handle, &st, "TUN 模式需要管理员权限，本次未开启 TUN（重新打开 TUN 时可选择以管理员身份重启）".into());
+                    }
                     match start(&handle, &st).await {
                         Ok(()) if s.system_proxy => {
                             let _ = sysproxy::set(true, &format!("127.0.0.1:{}", s.mixed_port), &s.proxy_bypass);
@@ -659,6 +868,10 @@ pub fn run() {
             list_processes,
             profile_outbounds,
             set_app_rules,
+            set_profile_interval,
+            set_autostart,
+            set_clash_links,
+            take_import_requests,
             check_update,
             install_update,
             clear_logs,
@@ -679,4 +892,27 @@ pub fn run() {
             tauri::async_runtime::block_on(st.core.stop());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_headers() {
+        assert_eq!(disposition_name(r#"attachment; filename="sbm.yaml""#).as_deref(), Some("sbm.yaml"));
+        assert_eq!(disposition_name("attachment;filename=plain").as_deref(), Some("plain"));
+        assert_eq!(
+            disposition_name("attachment; filename=fallback.yaml; filename*=UTF-8''%E6%88%91%E7%9A%84%E6%9C%BA%E5%9C%BA").as_deref(),
+            Some("我的机场")
+        );
+        assert_eq!(disposition_name("inline"), None);
+        assert_eq!(disposition_name("attachment; filename="), None);
+
+        assert_eq!(interval_minutes("24"), Some(1440));
+        assert_eq!(interval_minutes(" 0.5 "), Some(30));
+        assert_eq!(interval_minutes("0"), Some(0));
+        assert_eq!(interval_minutes("-1"), None);
+        assert_eq!(interval_minutes("soon"), None);
+    }
 }

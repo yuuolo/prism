@@ -18,6 +18,7 @@ export function installDevMock() {
     log_level: "info",
     system_proxy: true,
     auto_update_check: true,
+    silent_start: true,
     tun: false,
     unified_delay: true,
     proxy_bypass: "localhost;127.*;<local>",
@@ -32,6 +33,18 @@ export function installDevMock() {
       { id: "3", enabled: false, by_path: false, value: "updater.exe", target: "REJECT" },
     ],
   };
+  const profiles = [
+    { id: "demo", name: "sbm 订阅", url: "https://sub.example.com/api/sub?token=demo", format: "clash", nodes: 2, updated_at: Date.now() / 1000 - 7200, usage: null, interval: 1440 },
+    { id: "local", name: "本地配置", url: null, format: "uri", nodes: 3, updated_at: Date.now() / 1000 - 86400 * 3, usage: null, interval: 1440 },
+  ];
+  const sys = { autostart: false, clash_links: false };
+  // `?import` shows the confirmation dialog for a clash:// link once.
+  let pendingLinks = location.search.includes("import")
+    ? [
+        { request: { url: "https://panel.example.com/api/v1/client/subscribe?token=8f3c2a91d4&flag=clash", name: "我的机场" }, error: null },
+        { request: { url: "https://sub.example.com/api/sub?token=demo", name: null }, error: null },
+      ]
+    : [];
   const processes = [
     { pid: 1200, name: "chrome.exe", path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" },
     { pid: 3400, name: "Telegram.exe", path: "C:\\Users\\me\\AppData\\Roaming\\Telegram Desktop\\Telegram.exe" },
@@ -75,14 +88,38 @@ export function installDevMock() {
   const handlers: Record<string, Handler> = {
     get_state: () => ({
       settings,
-      profiles: [{ id: "demo", name: "sbm 订阅", url: null, format: "clash", nodes: 2, updated_at: Date.now() / 1000, usage: null }],
+      profiles,
       running: "prism",
       system_proxy: true,
       elevated: false,
       core_paths: { prism: { path: "", exists: true }, mihomo: { path: "", exists: true }, singbox: { path: "", exists: false } },
       data_dir: "%APPDATA%\\dev.prism.client",
       version: "0.1.1",
+      ...sys,
+      clash_handler: sys.clash_links ? "prism.exe" : "FlClash.exe",
     }),
+    set_autostart: (a) => {
+      sys.autostart = a.enable as boolean;
+    },
+    set_clash_links: (a) => {
+      sys.clash_links = a.enable as boolean;
+    },
+    take_import_requests: () => {
+      const l = pendingLinks;
+      pendingLinks = [];
+      return l;
+    },
+    import_profile: (a) => {
+      const args = a.args as { url: string; name?: string };
+      const p = { id: `p${profiles.length}`, name: args.name ?? "新订阅", url: args.url, format: "clash", nodes: 5, updated_at: Date.now() / 1000, usage: null, interval: 720 };
+      profiles.push(p);
+      return p;
+    },
+    update_profile: (a) => {
+      const p = profiles.find((x) => x.id === a.id)!;
+      p.updated_at = Date.now() / 1000;
+      return p;
+    },
     check_update: () => ({
       current: "0.1.1",
       version: "0.1.2",

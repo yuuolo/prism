@@ -13,6 +13,8 @@ export interface Settings {
   log_level: string;
   system_proxy: boolean;
   auto_update_check: boolean;
+  /** When started with Windows, stay in the tray. */
+  silent_start: boolean;
   tun: boolean;
   unified_delay: boolean;
   proxy_bypass: string;
@@ -39,6 +41,8 @@ export interface ProfileMeta {
   nodes: number;
   updated_at: number;
   usage: Usage | null;
+  /** Minutes between automatic updates (remote profiles); 0 = never. */
+  interval: number;
 }
 
 export interface AppRule {
@@ -71,6 +75,24 @@ export interface Snapshot {
   data_dir: string;
   /** Prism app version. */
   version: string;
+  /** Windows starts Prism at logon. */
+  autostart: boolean;
+  /** clash:// links open Prism. */
+  clash_links: boolean;
+  /** File name of the program that opens clash:// links now. */
+  clash_handler: string | null;
+}
+
+/** From a prism:// or clash:// install-config link. */
+export interface ImportRequest {
+  url: string;
+  name: string | null;
+}
+
+/** A link waiting for confirmation, or why it couldn't be used. */
+export interface PendingLink {
+  request: ImportRequest | null;
+  error: string | null;
 }
 
 export interface UpdateInfo {
@@ -150,6 +172,10 @@ export const api = {
   listProcesses: () => invoke<ProcessInfo[]>("list_processes"),
   profileOutbounds: () => invoke<Outbounds>("profile_outbounds"),
   setAppRules: (rules: AppRule[]) => invoke<void>("set_app_rules", { rules }),
+  setProfileInterval: (id: string, minutes: number) => invoke<void>("set_profile_interval", { id, minutes }),
+  setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
+  setClashLinks: (enable: boolean) => invoke<void>("set_clash_links", { enable }),
+  takeImportRequests: () => invoke<PendingLink[]>("take_import_requests"),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
   restartAsAdmin: () => invoke<void>("restart_as_admin"),
@@ -182,6 +208,13 @@ export function fmtAgo(ts: number): string {
   if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
   if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
   return `${Math.floor(s / 86400)} 天前`;
+}
+
+/** 90 -> "1.5 小时", 1440 -> "1 天". */
+export function fmtInterval(min: number): string {
+  if (min >= 1440 && min % 1440 === 0) return `${min / 1440} 天`;
+  if (min >= 60) return `${+(min / 60).toFixed(1)} 小时`;
+  return `${min} 分钟`;
 }
 
 export function lastDelay(p?: ProxyItem): number | undefined {
