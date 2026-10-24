@@ -84,11 +84,17 @@ fn generated_singbox_config_passes_check() {
     let dir = std::env::temp_dir().join(format!("prism-sbcheck-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let uri = "anytls://pw@jp.example.com:443/?sni=jp.example.com#jp\nss://YWVzLTI1Ni1nY206cHc@1.2.3.4:8388#ss";
+    // The profile's own fake-ip DNS, carried over for TUN.
+    let clash_dns = format!(
+        "{CLASH}dns:\n  enable: true\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  fake-ip-filter: ['+.lan', 'time.windows.com']\n  \
+         default-nameserver: [119.29.29.29]\n  nameserver: [223.5.5.5, 'https://doh.pub/dns-query', 'tls://dns.google#PROXY', 'dhcp://en0']\n"
+    );
     for (name, raw, tun) in [
         ("clash", CLASH, false),
         ("clash-tun", CLASH, true),
         ("uri", uri, false),
         ("uri-tun", uri, true),
+        ("clash-dns-tun", &clash_dns, true),
     ] {
         o.tun = tun;
         let p = config::parse_any(&raw).unwrap();

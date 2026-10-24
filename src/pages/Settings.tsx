@@ -87,6 +87,41 @@ function UpdateCard({ form, set }: { form: Settings; set: <K extends keyof Setti
   );
 }
 
+/** TUN 服务: lets a normal-user Prism run TUN cores. */
+function TunServiceCard() {
+  const { snap, run } = useApp();
+  const [busy, setBusy] = useState(false);
+  if (!snap) return null;
+  const st = snap.tun_service;
+  const act = async (fn: () => Promise<unknown>, ok: string) => {
+    setBusy(true);
+    await run(fn, ok);
+    setBusy(false);
+  };
+  return (
+    <div className="card span-2">
+      <h3>TUN 服务</h3>
+      <div className="row wrap">
+        <span className={`dot ${st === "running" ? "on" : ""}`} />
+        <span>{st === "running" ? "已安装，运行中" : st === "stopped" ? "已安装，未运行（请重新安装）" : "未安装"}</span>
+        {snap.elevated && <span className="tag">Prism 当前以管理员身份运行，TUN 不经过服务</span>}
+        <span className="spacer" />
+        <button className="btn" disabled={busy} onClick={() => act(api.installTunService, st === "missing" ? "TUN 服务已安装" : "TUN 服务已更新")}>
+          {busy ? "处理中…" : st === "missing" ? "安装" : "重新安装 / 更新内核"}
+        </button>
+        {st !== "missing" && (
+          <button className="btn danger" disabled={busy} onClick={() => confirm("卸载 TUN 服务？之后开启 TUN 需要以管理员身份运行 Prism。") && act(api.uninstallTunService, "TUN 服务已卸载")}>
+            卸载
+          </button>
+        )}
+      </div>
+      <div className="small muted" style={{ marginTop: 10 }}>
+        安装后，开启 TUN 时内核由系统服务（Prism TUN Service）运行，Prism 本身不需要管理员权限，开机自启也能直接使用 TUN。安装、更新和卸载各需要一次管理员授权。服务只运行安装时复制到受保护目录的内核，只接受当前 Windows 用户的 Prism 的请求。Prism 或内核更新后会提示更新服务。
+      </div>
+    </div>
+  );
+}
+
 /** 开机自启 / 静默启动 and which program opens clash:// links. */
 function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
   const { snap, run } = useApp();
@@ -292,6 +327,8 @@ export default function SettingsPage() {
         </div>
 
         <StartupCard form={form} set={set} />
+
+        <TunServiceCard />
 
         <UpdateCard form={form} set={set} />
       </div>

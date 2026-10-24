@@ -42,27 +42,56 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "err" ? 6000 : 2500);
   }, []);
 
+  /** Installs / refreshes the TUN service (UAC prompt). */
+  const installTunService = useCallback(async () => {
+    toast("请在弹出的 Windows 窗口中允许管理员授权…");
+    try {
+      await api.installTunService();
+      toast("TUN 服务已就绪");
+      return true;
+    } catch (e) {
+      toast(errText(e), "err");
+      return false;
+    }
+  }, [toast]);
+
   const run = useCallback(
     async (fn: () => Promise<unknown>, ok?: string) => {
-      try {
-        await fn();
-        if (ok) toast(ok);
-        return true;
-      } catch (e) {
-        const msg = errText(e);
-        if (msg.startsWith("NEED_ADMIN")) {
-          if (confirm("TUN 模式需要管理员权限。\n是否以管理员身份重新启动 Prism？")) {
-            api.restartAsAdmin().catch((err) => toast(errText(err), "err"));
+      // TUN errors can be fixed by (re)installing the service; then retry once.
+      const attempt = async (retried: boolean): Promise<boolean> => {
+        try {
+          await fn();
+          if (ok) toast(ok);
+          return true;
+        } catch (e) {
+          const msg = errText(e);
+          if (msg.startsWith("NEED_ADMIN") && !retried) {
+            if (
+              confirm(
+                "TUN 模式需要管理员权限。\n\n推荐安装「TUN 服务」：只需授权一次，以后开启 TUN 无需以管理员身份运行 Prism。\n\n确定：安装 TUN 服务\n取消：查看其他选择",
+              )
+            ) {
+              if (await installTunService()) return attempt(true);
+            } else if (confirm("改为以管理员身份重新启动 Prism？")) {
+              api.restartAsAdmin().catch((err) => toast(errText(err), "err"));
+            }
+          } else if (msg.startsWith("NEED_SERVICE_UPDATE") && !retried) {
+            if (confirm("TUN 服务中的内核与当前版本不一致（Prism 或内核更新过）。\n需要管理员授权一次来更新 TUN 服务，现在更新？")) {
+              if (await installTunService()) return attempt(true);
+            }
+          } else {
+            toast(msg.replace(/^NEED_\w+: /, ""), "err");
           }
-        } else {
-          toast(msg, "err");
+          return false;
         }
-        return false;
+      };
+      try {
+        return await attempt(false);
       } finally {
         refresh();
       }
     },
-    [toast, refresh],
+    [toast, refresh, installTunService],
   );
 
   useEffect(() => {

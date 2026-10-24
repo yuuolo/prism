@@ -17,6 +17,18 @@
   ${EndIf}
 !macroend
 
+; The TUN service runs as SYSTEM; removing it needs one UAC prompt. Kept on
+; updates (the app refreshes its cores when they change).
+!macro NSIS_HOOK_PREUNINSTALL
+  ${If} $UpdateMode <> 1
+    ReadRegStr $R7 HKLM "SYSTEM\CurrentControlSet\Services\PrismService" "ImagePath"
+    ${If} $R7 != ""
+    ${AndIf} ${FileExists} "$INSTDIR\prism-service.exe"
+      ExecShellWait "runas" "$INSTDIR\prism-service.exe" "uninstall" SW_HIDE
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
     !insertmacro PRISM_RELEASE_SCHEME "prism"

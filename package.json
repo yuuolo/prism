@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "core": "cargo build -p prism-core",
     "tauri": "tauri",
-    "app": "cargo build -p prism-core && tauri dev",
+    "app": "cargo build -p prism-core -p prism-service && tauri dev",
     "bundle": "node scripts/bundle.mjs"
   },
   "dependencies": {

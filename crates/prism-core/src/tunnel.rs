@@ -164,9 +164,15 @@ impl Tunnel {
     }
 
     /// A destination that is a fake-ip handed out by our DNS is replaced by
-    /// the domain it stands for.
+    /// the domain it stands for. A fake-ip that came along with a sniffed
+    /// domain (TUN) is dropped too: it is not the server's address, and IP
+    /// rules (198.18.0.0/15 is "private" in common rule sets) must not see it.
     pub fn restore_fake_ip(&self, meta: &mut Metadata) {
-        let (Some(dns), Address::Ip(sa)) = (&self.dns, &meta.dst) else { return };
+        let Some(dns) = &self.dns else { return };
+        if meta.dst_ip.is_some_and(|ip| dns.is_fake(ip)) {
+            meta.dst_ip = None;
+        }
+        let Address::Ip(sa) = &meta.dst else { return };
         if !dns.is_fake(sa.ip()) {
             return;
         }

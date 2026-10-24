@@ -39,13 +39,15 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 
 - **应用分流**：PROCESS-NAME / PROCESS-PATH（含 `-REGEX`）规则，通过 Windows TCP/UDP 连接表识别程序；客户端「应用分流」页按程序选择出口，三种内核通用
 - **软件更新**：启动时检查 GitHub Releases，下载后校验发布签名（minisign，版本绑定）再安装
+- **代理页**：全部测速、按延迟 / 名称排序、搜索节点；托盘菜单直接切换节点
+- **TUN 服务**：`prism-service`（Windows 服务）替普通权限的 Prism 运行 TUN 内核；只运行受保护目录中的内核、只接受安装用户的 Prism 请求
 - **开机自启 / 静默启动**：登录 Windows 时启动并只显示托盘；单实例运行
 - **订阅定时更新**：按订阅的间隔（默认 24 小时，或机场 `profile-update-interval`）自动更新，正在使用的订阅在 prism-core / mihomo 上热重载、不断开连接
 - **一键导入**：`clash://install-config?url=…&name=…` 与 `prism://` 链接，导入前弹窗确认；`clash://` 可选接管，关闭时还原给原来的客户端
 
 **暂不支持**（需要时切换到 mihomo / sing-box 内核）：VMess、Hysteria2、VLESS Reality/Vision、WebSocket/gRPC 传输、`AND/OR/NOT` 规则、`mrs` 格式规则集、DNS fallback、QUIC/DoH3 上游、TUN 的 IPv6 路由。
 
-> prism-core 的 TUN 模式尚未在真实网卡上做过端到端测试（mihomo / sing-box 的 TUN 配置已通过 `mihomo -t` / `sing-box check` 校验）。
+> prism-core 的 TUN 已在真实网卡上使用：路由接管、DNS 劫持 + fake-ip、直连 TCP、经代理的 UDP 均正常；经代理的 TCP 曾因 fake-ip 被 IP 规则误判为直连，已修复（`crates/prism-core/tests/fake_ip_rules.rs`）。
 
 ## 开发
 
@@ -95,6 +97,7 @@ crates/prism-core/     自研内核（库 + prism-core 可执行文件）
   src/outbound/        anytls、shadowsocks、trojan、vless、socks5/http、代理组
   src/rules.rs geo.rs  规则匹配、geosite/geoip.dat 解码
   src/api.rs           Clash 兼容 REST API
+crates/prism-service/  TUN 服务（Windows 服务，替普通权限的 Prism 运行 TUN 内核）
 src-tauri/             Tauri 后端：内核进程、订阅、系统代理、下载、托盘
 src/                   React 界面
 ```

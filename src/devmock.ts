@@ -37,7 +37,7 @@ export function installDevMock() {
     { id: "demo", name: "sbm 订阅", url: "https://sub.example.com/api/sub?token=demo", format: "clash", nodes: 2, updated_at: Date.now() / 1000 - 7200, usage: null, interval: 1440 },
     { id: "local", name: "本地配置", url: null, format: "uri", nodes: 3, updated_at: Date.now() / 1000 - 86400 * 3, usage: null, interval: 1440 },
   ];
-  const sys = { autostart: false, clash_links: false };
+  const sys = { autostart: false, clash_links: false, tun_service: "missing" as "missing" | "stopped" | "running" };
   // `?import` shows the confirmation dialog for a clash:// link once.
   let pendingLinks = location.search.includes("import")
     ? [
@@ -72,7 +72,23 @@ export function installDevMock() {
     rule,
     rulePayload: payload,
   });
+  const nodeNames = ["香港 01", "香港 02", "日本 东京", "日本 大阪", "新加坡", "美国 洛杉矶", "台湾", "韩国 首尔"];
+  const node = (name: string, delay?: number) => ({
+    name,
+    type: "AnyTLS",
+    udp: true,
+    history: delay === undefined ? [] : [{ time: new Date().toISOString(), delay }],
+  });
+  const proxies: Record<string, Record<string, unknown>> = {
+    GLOBAL: { name: "GLOBAL", type: "Selector", now: "节点选择", all: ["节点选择", "自动选择", "流媒体"], history: [] },
+    节点选择: { name: "节点选择", type: "Selector", now: "日本 东京", all: ["自动选择", ...nodeNames, "DIRECT"], history: [] },
+    自动选择: { name: "自动选择", type: "URLTest", now: "香港 01", all: nodeNames, history: [] },
+    流媒体: { name: "流媒体", type: "Selector", now: "新加坡", all: ["节点选择", "新加坡", "美国 洛杉矶", "台湾"], history: [] },
+    DIRECT: { name: "DIRECT", type: "Direct", history: [] },
+    ...Object.fromEntries(nodeNames.map((n, i) => [n, node(n, i === 4 ? 0 : i < 3 ? 80 + i * 70 : undefined)])),
+  };
   const api: Record<string, unknown> = {
+    "/proxies": { proxies },
     "/version": { version: "prism-preview" },
     "/connections": {
       uploadTotal: 3_000_000,
@@ -98,6 +114,13 @@ export function installDevMock() {
       ...sys,
       clash_handler: sys.clash_links ? "prism.exe" : "FlClash.exe",
     }),
+    install_tun_service: async () => {
+      await new Promise((r) => setTimeout(r, 800));
+      sys.tun_service = "running";
+    },
+    uninstall_tun_service: () => {
+      sys.tun_service = "missing";
+    },
     set_autostart: (a) => {
       sys.autostart = a.enable as boolean;
     },
@@ -136,7 +159,19 @@ export function installDevMock() {
       settings.app_rules = a.rules as typeof settings.app_rules;
     },
     get_logs: () => [],
-    core_api: (a) => {
+    update_tray: () => null,
+    select_proxy: (a) => {
+      proxies[a.group as string].now = a.name;
+    },
+    core_api: async (a) => {
+      const delay = /^\/proxies\/([^/]+)\/delay/.exec(String(a.path));
+      if (delay) {
+        const n = decodeURIComponent(delay[1]);
+        await new Promise((r) => setTimeout(r, 150 + Math.random() * 400));
+        const d = n === "台湾" ? 0 : Math.round(40 + Math.random() * 500);
+        proxies[n].history = [{ time: new Date().toISOString(), delay: d }];
+        return { delay: d };
+      }
       const r = api[String(a.path)];
       if (r === undefined) throw `preview: no sample data for ${a.path}`;
       return r;

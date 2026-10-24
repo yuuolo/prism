@@ -81,6 +81,8 @@ export interface Snapshot {
   clash_links: boolean;
   /** File name of the program that opens clash:// links now. */
   clash_handler: string | null;
+  /** TUN service (runs TUN cores without admin rights for Prism). */
+  tun_service: "missing" | "stopped" | "running";
 }
 
 /** From a prism:// or clash:// install-config link. */
@@ -176,6 +178,9 @@ export const api = {
   setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
   setClashLinks: (enable: boolean) => invoke<void>("set_clash_links", { enable }),
   takeImportRequests: () => invoke<PendingLink[]>("take_import_requests"),
+  updateTray: () => invoke<void>("update_tray"),
+  installTunService: () => invoke<void>("install_tun_service"),
+  uninstallTunService: () => invoke<void>("uninstall_tun_service"),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
   restartAsAdmin: () => invoke<void>("restart_as_admin"),

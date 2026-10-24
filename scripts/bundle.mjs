@@ -1,6 +1,6 @@
 // Builds a signed release installer plus the updater manifest:
-//  1. compiles prism-core and places it as a Tauri sidecar
-//     (binaries/prism-core-<target-triple>.exe),
+//  1. compiles prism-core and prism-service (the TUN service) and places
+//     them as Tauri sidecars (binaries/<name>-<target-triple>.exe),
 //  2. runs `tauri build`, signing the installer with the updater key
 //     (TAURI_SIGNING_PRIVATE_KEY, or the file in PRISM_SIGNING_KEY,
 //     default ~/.tauri/prism-updater.key),
@@ -32,13 +32,16 @@ if (!process.env.TAURI_SIGNING_PRIVATE_KEY) {
 }
 process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ??= "";
 
-run("cargo build --release -p prism-core");
+const sidecars = ["prism-core", "prism-service"];
+run(`cargo build --release ${sidecars.map((s) => `-p ${s}`).join(" ")}`);
 mkdirSync("src-tauri/binaries", { recursive: true });
-copyFileSync(join(target, "release", `prism-core${ext}`), `src-tauri/binaries/prism-core-${triple}${ext}`);
+for (const s of sidecars) {
+  copyFileSync(join(target, "release", `${s}${ext}`), `src-tauri/binaries/${s}-${triple}${ext}`);
+}
 
 // Tauri copies sidecars next to the main executable (without the triple),
-// which is exactly where the app looks for prism-core.
-const extra = JSON.stringify({ bundle: { externalBin: ["binaries/prism-core"] } });
+// which is exactly where the app looks for them.
+const extra = JSON.stringify({ bundle: { externalBin: sidecars.map((s) => `binaries/${s}`) } });
 run(`npx tauri build --config ${JSON.stringify(extra)}`);
 
 const dir = join(target, "release", "bundle", "nsis");

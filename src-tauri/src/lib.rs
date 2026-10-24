@@ -5,6 +5,7 @@ mod elevate;
 mod links;
 mod store;
 mod sysproxy;
+mod tunsvc;
 mod updater;
 
 use std::collections::HashMap;
@@ -14,7 +15,7 @@ use std::time::Duration;
 use prism_core::config::Mode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
@@ -29,6 +30,8 @@ pub struct AppState {
     update: Mutex<Option<tauri_plugin_updater::Update>>,
     /// Import links waiting for the window to confirm them.
     imports: Mutex<Vec<PendingLink>>,
+    /// One tray menu rebuild at a time, so an older one can't land last.
+    tray_lock: tokio::sync::Mutex<()>,
 }
 
 type Res<T> = Result<T, String>;
@@ -70,6 +73,8 @@ struct Snapshot {
     clash_links: bool,
     /// File name of the program that opens clash:// links now.
     clash_handler: Option<String>,
+    /// TUN service: missing / stopped / running.
+    tun_service: tunsvc::State,
 }
 
 #[tauri::command]
@@ -94,6 +99,7 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
         autostart: autostart::enabled(),
         clash_links: links::owned("clash"),
         clash_handler: links::handler("clash"),
+        tun_service: tunsvc::state(),
     })
 }
 
@@ -324,12 +330,18 @@ async fn activate_profile(app: AppHandle, st: State<'_, AppState>, id: String) -
     Ok(())
 }
 
-/// Error prefix the UI recognises to offer "restart as administrator".
+/// Error prefix the UI recognises to offer the TUN service or "restart as
+/// administrator".
 const NEED_ADMIN: &str = "NEED_ADMIN: TUN 模式需要管理员权限";
+
+/// TUN can run: Prism is elevated or the TUN service is up.
+fn tun_allowed() -> bool {
+    elevate::is_elevated() || tunsvc::state() == tunsvc::State::Running
+}
 
 async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
     let s = st.settings();
-    if s.tun && !elevate::is_elevated() {
+    if s.tun && !tun_allowed() {
         return Err(NEED_ADMIN.into());
     }
     if s.tun && s.core == CoreKind::Prism && !st.store.runtime_dir().join("wintun.dll").exists() {
@@ -386,6 +398,7 @@ async fn reload_core(app: &AppHandle, st: &AppState) -> Res<()> {
     apply_selections(&s).await;
     note(app, st, "配置已热重载".into());
     let _ = app.emit("core-changed", ());
+    refresh_tray(app);
     Ok(())
 }
 
@@ -459,7 +472,7 @@ async fn core_api(st: State<'_, AppState>, method: String, path: String, body: O
 }
 
 #[tauri::command]
-async fn select_proxy(st: State<'_, AppState>, group: String, name: String) -> Res<()> {
+async fn select_proxy(app: AppHandle, st: State<'_, AppState>, group: String, name: String) -> Res<()> {
     let s = st.settings();
     core::api(&s, "PUT", &format!("/proxies/{}", encode(&group)), Some(json!({ "name": name.clone() })))
         .await
@@ -471,6 +484,7 @@ async fn select_proxy(st: State<'_, AppState>, group: String, name: String) -> R
             s.selections.entry(id).or_default().insert(group, name);
         })?;
     }
+    refresh_tray(&app);
     Ok(())
 }
 
@@ -504,7 +518,7 @@ async fn set_system_proxy(app: AppHandle, st: State<'_, AppState>, enable: bool)
 
 #[tauri::command]
 async fn set_tun(app: AppHandle, st: State<'_, AppState>, enable: bool) -> Res<()> {
-    if enable && !elevate::is_elevated() {
+    if enable && !tun_allowed() {
         return Err(NEED_ADMIN.into());
     }
     st.update(|s| s.tun = enable)?;
@@ -586,6 +600,36 @@ async fn set_app_rules(app: AppHandle, st: State<'_, AppState>, rules: Vec<store
     if st.core.running().await.is_some() {
         start(&app, &st).await?;
     }
+    Ok(())
+}
+
+/// Installs the TUN service, or refreshes its copies of the cores. Shows a
+/// UAC prompt. A running TUN core is restarted inside the service.
+#[tauri::command]
+async fn install_tun_service(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
+    tunsvc::install(&st.store, &st.settings()).await.map_err(e)?;
+    note(&app, &st, "TUN 服务已安装 / 更新".into());
+    if st.settings().tun && st.core.running().await.is_some() {
+        start(&app, &st).await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn uninstall_tun_service(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
+    let was_running = st.core.running().await.is_some();
+    if was_running && core::use_service(&st.settings()) {
+        st.core.stop().await;
+    }
+    tunsvc::uninstall().await.map_err(e)?;
+    note(&app, &st, "TUN 服务已卸载".into());
+    if st.settings().tun && !tun_allowed() {
+        st.update(|s| s.tun = false)?;
+    }
+    if was_running && st.core.running().await.is_none() {
+        start(&app, &st).await?;
+    }
+    let _ = app.emit("core-changed", ());
     Ok(())
 }
 
@@ -683,26 +727,125 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let st = app.state::<AppState>();
-    let s = st.settings();
-    let show = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
-    let sys = CheckMenuItem::with_id(app, "sysproxy", "系统代理", true, s.system_proxy, None::<&str>)?;
-    let tun = CheckMenuItem::with_id(app, "tun", "TUN 模式", true, s.tun, None::<&str>)?;
-    let rule = CheckMenuItem::with_id(app, "mode_rule", "规则模式", true, s.mode == Mode::Rule, None::<&str>)?;
-    let global = CheckMenuItem::with_id(app, "mode_global", "全局模式", true, s.mode == Mode::Global, None::<&str>)?;
-    let direct = CheckMenuItem::with_id(app, "mode_direct", "直连模式", true, s.mode == Mode::Direct, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    Menu::with_items(
-        app,
-        &[&show, &PredefinedMenuItem::separator(app)?, &sys, &tun, &rule, &global, &direct, &PredefinedMenuItem::separator(app)?, &quit],
-    )
+/// A selectable group in the tray: its members with their last delay
+/// (0 = timed out).
+struct TrayGroup {
+    name: String,
+    now: String,
+    members: Vec<(String, Option<u64>)>,
 }
 
-fn refresh_tray(app: &AppHandle) {
-    if let (Some(tray), Ok(menu)) = (app.tray_by_id("main"), build_tray_menu(app)) {
-        let _ = tray.set_menu(Some(menu));
+/// At most this many groups get a tray submenu.
+const TRAY_GROUPS: usize = 8;
+/// Separates group and node in a tray item id: `sel<SEP>group<SEP>node`.
+const SEL_SEP: char = '\u{1}';
+
+/// The running core's `select` groups, in the order the 代理 page shows them.
+async fn tray_groups(s: &Settings) -> Vec<TrayGroup> {
+    match core::api(s, "GET", "/proxies", None).await {
+        Ok(v) => parse_tray_groups(&v, s.mode == Mode::Global),
+        Err(_) => Vec::new(),
     }
+}
+
+/// Selectable groups from a `GET /proxies` response; `GLOBAL` leads in
+/// global mode.
+fn parse_tray_groups(v: &Value, global: bool) -> Vec<TrayGroup> {
+    let px = &v["proxies"];
+    let strings = |v: &Value| -> Vec<String> {
+        v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+    };
+    let mut order = strings(&px["GLOBAL"]["all"]);
+    if global {
+        order.insert(0, "GLOBAL".into());
+    }
+    order
+        .into_iter()
+        .filter(|n| px[n]["type"] == "Selector" && px[n]["hidden"] != true)
+        .take(TRAY_GROUPS)
+        .map(|n| TrayGroup {
+            now: px[&n]["now"].as_str().unwrap_or_default().to_string(),
+            members: strings(&px[&n]["all"])
+                .into_iter()
+                .map(|m| {
+                    let d = px[&m]["history"].as_array().and_then(|h| h.last()).and_then(|r| r["delay"].as_u64());
+                    (m, d)
+                })
+                .collect(),
+            name: n,
+        })
+        .collect()
+}
+
+fn sel_id(group: &str, node: &str) -> String {
+    format!("sel{SEL_SEP}{group}{SEL_SEP}{node}")
+}
+
+/// (group, node) from a tray item id made by [`sel_id`].
+fn parse_sel_id(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix("sel")?.strip_prefix(SEL_SEP)?.split_once(SEL_SEP)
+}
+
+/// Menu labels treat `&` as a mnemonic marker.
+fn menu_text(s: &str) -> String {
+    s.replace('&', "&&")
+}
+
+fn build_tray_menu(app: &AppHandle, groups: &[TrayGroup]) -> tauri::Result<Menu<tauri::Wry>> {
+    let st = app.state::<AppState>();
+    let s = st.settings();
+    let menu = Menu::new(app)?;
+    menu.append(&MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "sysproxy", "系统代理", true, s.system_proxy, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "tun", "TUN 模式", true, s.tun, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "mode_rule", "规则模式", true, s.mode == Mode::Rule, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "mode_global", "全局模式", true, s.mode == Mode::Global, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "mode_direct", "直连模式", true, s.mode == Mode::Direct, None::<&str>)?)?;
+    if !groups.is_empty() {
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        for g in groups {
+            let sub = Submenu::new(app, menu_text(&format!("{}：{}", g.name, g.now)), true)?;
+            for (m, d) in &g.members {
+                let delay = match d {
+                    Some(0) => "\t超时".to_string(),
+                    Some(ms) => format!("\t{ms} ms"),
+                    None => String::new(),
+                };
+                sub.append(&CheckMenuItem::with_id(app, sel_id(&g.name, m), format!("{}{delay}", menu_text(m)), true, *m == g.now, None::<&str>)?)?;
+            }
+            menu.append(&sub)?;
+        }
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?)?;
+    Ok(menu)
+}
+
+/// After delay tests, so the tray shows the new delays.
+#[tauri::command]
+fn update_tray(app: AppHandle) {
+    refresh_tray(&app);
+}
+
+/// Rebuilds the tray menu, including the running core's groups.
+fn refresh_tray(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let st = app.state::<AppState>();
+        let _guard = st.tray_lock.lock().await;
+        let groups = match st.core.running().await {
+            Some(_) => tray_groups(&st.settings()).await,
+            None => Vec::new(),
+        };
+        match (app.tray_by_id("main"), build_tray_menu(&app, &groups)) {
+            (Some(tray), Ok(menu)) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            (_, Err(err)) => eprintln!("[prism] 托盘菜单生成失败: {err}"),
+            _ => {}
+        }
+    });
 }
 
 fn on_menu(app: &AppHandle, id: &str) {
@@ -727,7 +870,10 @@ fn on_menu(app: &AppHandle, id: &str) {
                 app.exit(0);
                 Ok(())
             }
-            _ => Ok(()),
+            _ => match parse_sel_id(&id) {
+                Some((group, node)) => select_proxy(app.clone(), st.clone(), group.into(), node.into()).await,
+                None => Ok(()),
+            },
         };
         if let Err(err) = r {
             st.core.push_log(&app, format!("[prism] {err}"));
@@ -771,9 +917,10 @@ pub fn run() {
                 core: CoreManager::default(),
                 update: Mutex::new(None),
                 imports: Mutex::new(Vec::new()),
+                tray_lock: Default::default(),
             });
 
-            let menu = build_tray_menu(app.handle())?;
+            let menu = build_tray_menu(app.handle(), &[])?;
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Prism")
@@ -809,12 +956,19 @@ pub fn run() {
                 let st = handle.state::<AppState>();
                 let mut s = st.settings();
                 if s.active_profile.is_some() {
-                    if s.tun && !elevate::is_elevated() {
+                    if s.tun && !tun_allowed() {
                         // Started with Windows, say: run without TUN rather than not at all.
                         s = st.update(|x| x.tun = false).unwrap_or(s);
-                        note(&handle, &st, "TUN 模式需要管理员权限，本次未开启 TUN（重新打开 TUN 时可选择以管理员身份重启）".into());
+                        note(&handle, &st, "TUN 模式需要管理员权限，本次未开启 TUN（可安装 TUN 服务，或以管理员身份重启）".into());
                     }
-                    match start(&handle, &st).await {
+                    let mut r = start(&handle, &st).await;
+                    if matches!(&r, Err(err) if err.starts_with("NEED_SERVICE_UPDATE")) {
+                        // No UAC prompt at logon: run without TUN this time.
+                        s = st.update(|x| x.tun = false).unwrap_or(s);
+                        note(&handle, &st, "TUN 服务中的内核需要更新，本次未开启 TUN（在设置页更新 TUN 服务后重新打开）".into());
+                        r = start(&handle, &st).await;
+                    }
+                    match r {
                         Ok(()) if s.system_proxy => {
                             let _ = sysproxy::set(true, &format!("127.0.0.1:{}", s.mixed_port), &s.proxy_bypass);
                         }
@@ -872,6 +1026,9 @@ pub fn run() {
             set_autostart,
             set_clash_links,
             take_import_requests,
+            update_tray,
+            install_tun_service,
+            uninstall_tun_service,
             check_update,
             install_update,
             clear_logs,
@@ -914,5 +1071,36 @@ mod tests {
         assert_eq!(interval_minutes("0"), Some(0));
         assert_eq!(interval_minutes("-1"), None);
         assert_eq!(interval_minutes("soon"), None);
+    }
+
+    #[test]
+    fn tray_groups_follow_the_proxies_page() {
+        let v = json!({ "proxies": {
+            "GLOBAL": { "type": "Selector", "now": "节点选择", "all": ["节点选择", "自动选择", "隐藏组", "流媒体"] },
+            "节点选择": { "type": "Selector", "now": "东京", "all": ["自动选择", "东京", "A&B", "DIRECT"] },
+            "自动选择": { "type": "URLTest", "now": "东京", "all": ["东京", "A&B"] },
+            "隐藏组": { "type": "Selector", "hidden": true, "now": "东京", "all": ["东京"] },
+            "流媒体": { "type": "Selector", "now": "A&B", "all": ["A&B"] },
+            "东京": { "type": "AnyTLS", "history": [{ "delay": 0 }, { "delay": 120 }] },
+            "A&B": { "type": "Shadowsocks", "history": [{ "delay": 0 }] },
+            "DIRECT": { "type": "Direct", "history": [] },
+        }});
+        let names = |g: &[TrayGroup]| g.iter().map(|g| g.name.clone()).collect::<Vec<_>>();
+        // URL-test and hidden groups can't be picked from the tray.
+        let rule = parse_tray_groups(&v, false);
+        assert_eq!(names(&rule), ["节点选择", "流媒体"]);
+        assert_eq!(rule[0].now, "东京");
+        assert_eq!(
+            rule[0].members,
+            [("自动选择".to_string(), None), ("东京".into(), Some(120)), ("A&B".into(), Some(0)), ("DIRECT".into(), None)]
+        );
+        assert_eq!(names(&parse_tray_groups(&v, true)), ["GLOBAL", "节点选择", "流媒体"]);
+        assert!(parse_tray_groups(&json!({}), false).is_empty());
+
+        let id = sel_id("节点选择", "A&B 01");
+        assert_eq!(parse_sel_id(&id), Some(("节点选择", "A&B 01")));
+        assert_eq!(parse_sel_id("sysproxy"), None);
+        assert_eq!(parse_sel_id("selx"), None);
+        assert_eq!(menu_text("A&B"), "A&&B");
     }
 }

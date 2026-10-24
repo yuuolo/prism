@@ -29,6 +29,8 @@ percent-encoding = "2"
 sha2 = "0.10"
 futures = "0.3"
 prism-core = { path = "../crates/prism-core" }
+prism-service = { path = "../crates/prism-service" }
+base64 = "0.22"
 tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]

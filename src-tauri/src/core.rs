@@ -21,7 +21,16 @@ const MAX_LOGS: usize = 2000;
 #[derive(Default)]
 pub struct CoreManager {
     child: tokio::sync::Mutex<Option<(CoreKind, Child)>>,
+    /// Set while the core runs inside the TUN service instead.
+    service: tokio::sync::Mutex<Option<CoreKind>>,
+    /// Copies the service's core output into `logs`.
+    service_logs: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub logs: Arc<Mutex<VecDeque<String>>>,
+}
+
+/// TUN without administrator rights goes through the TUN service.
+pub fn use_service(s: &Settings) -> bool {
+    s.tun && !crate::elevate::is_elevated() && crate::tunsvc::state() == crate::tunsvc::State::Running
 }
 
 pub fn core_binary(store: &Store, s: &Settings, kind: CoreKind) -> PathBuf {
@@ -143,6 +152,12 @@ impl CoreManager {
     }
 
     pub async fn running(&self) -> Option<CoreKind> {
+        if let Some(kind) = *self.service.lock().await {
+            return match crate::tunsvc::status().await {
+                Ok(st) if st.running && st.core.as_deref() == Some(crate::tunsvc::kind_name(kind)) => Some(kind),
+                _ => None,
+            };
+        }
         let mut g = self.child.lock().await;
         if let Some((kind, child)) = g.as_mut() {
             match child.try_wait() {
@@ -166,6 +181,48 @@ impl CoreManager {
         for w in warnings {
             self.push_log(app, format!("[prism] {w}"));
         }
+        if use_service(s) {
+            let since = crate::tunsvc::logs(0).await.ok().and_then(|l| l.last().map(|x| x.0)).unwrap_or(0);
+            crate::tunsvc::start(store, s, std::fs::read_to_string(&cfg)?).await?;
+            *self.service.lock().await = Some(s.core);
+            self.push_log(app, format!("[prism] 通过 TUN 服务启动 {:?} 内核（无需以管理员身份运行 Prism）", s.core));
+            self.forward_service_logs(app, since);
+        } else {
+            self.spawn_local(app, store, s, &bin, &cfg).await?;
+        }
+
+        // Wait for the API to come up (or the process to die).
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if self.running().await.is_none() {
+                bail!("内核启动后立即退出，请查看「日志」页");
+            }
+            if api(s, "GET", "/version", None).await.is_ok() {
+                return Ok(());
+            }
+        }
+        bail!("内核 API 无响应（端口 {} 是否被占用？）", s.controller_port)
+    }
+
+    fn forward_service_logs(&self, app: &AppHandle, mut since: u64) {
+        let (logs, app) = (self.logs.clone(), app.clone());
+        let task = tauri::async_runtime::spawn(async move {
+            loop {
+                if let Ok(lines) = crate::tunsvc::logs(since).await {
+                    for (n, line) in lines {
+                        since = n;
+                        push_log(&logs, &app, line);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+        if let Some(old) = self.service_logs.lock().unwrap().replace(task) {
+            old.abort();
+        }
+    }
+
+    async fn spawn_local(&self, app: &AppHandle, store: &Store, s: &Settings, bin: &std::path::Path, cfg: &std::path::Path) -> Result<()> {
         let dir = store.runtime_dir();
         let mut cmd = Command::new(&bin);
         match s.core {
@@ -196,23 +253,18 @@ impl CoreManager {
             });
         }
         *self.child.lock().await = Some((s.core, child));
-
-        // Wait for the API to come up (or the process to die).
-        for _ in 0..50 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            if self.running().await.is_none() {
-                bail!("内核启动后立即退出，请查看「日志」页");
-            }
-            if api(s, "GET", "/version", None).await.is_ok() {
-                return Ok(());
-            }
-        }
-        bail!("内核 API 无响应（端口 {} 是否被占用？）", s.controller_port)
+        Ok(())
     }
 
     pub async fn stop(&self) {
         if let Some((_, mut child)) = self.child.lock().await.take() {
             let _ = child.kill().await;
+        }
+        if self.service.lock().await.take().is_some() {
+            let _ = crate::tunsvc::stop().await;
+        }
+        if let Some(task) = self.service_logs.lock().unwrap().take() {
+            task.abort();
         }
     }
 }

@@ -52,8 +52,18 @@ fn raw<S: std::os::fd::AsRawFd>(s: &S) -> i32 {
     s.as_raw_fd()
 }
 
+/// The interface to pin a socket for `peer` to (0 = none). Loopback never
+/// goes through the TUN, and a pinned socket can't reach it at all.
+fn pin_index(peer: &SocketAddr) -> u32 {
+    if peer.ip().is_loopback() {
+        0
+    } else {
+        bind_interface()
+    }
+}
+
 async fn connect_addr(addr: SocketAddr) -> io::Result<TcpStream> {
-    let index = bind_interface();
+    let index = pin_index(&addr);
     let s = if index == 0 {
         TcpStream::connect(addr).await?
     } else {
@@ -113,7 +123,7 @@ pub async fn tcp_connect(host: &str, port: u16) -> io::Result<TcpStream> {
 pub async fn udp_socket(peer: SocketAddr) -> io::Result<UdpSocket> {
     let bind: SocketAddr = if peer.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
     let s = UdpSocket::bind(bind).await?;
-    let index = bind_interface();
+    let index = pin_index(&peer);
     if index != 0 {
         pin(raw(&s), peer.is_ipv6(), index)?;
     }

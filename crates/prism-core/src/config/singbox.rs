@@ -302,13 +302,19 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
         }
         rules.push(rule);
     }
-    let dns = if o.tun {
+    let group_names: Vec<String> = p.groups.iter().map(|g| g.name.clone()).collect();
+    let dns = if o.tun && p.dns.enable && !p.dns.nameserver.is_empty() {
+        profile_dns(&p.dns, &group_names)
+    } else if o.tun {
         // System DNS would loop through the TUN: resolve explicitly, foreign
-        // names through the proxy (same layout as the sbm subscription).
+        // names through the proxy (same layout as the sbm subscription). A
+        // profile that ends in DIRECT still needs a proxy for them: direct
+        // DoH to 1.1.1.1 doesn't work everywhere.
         sets.insert(("geosite-cn".into(), GEOSITE_URL.replace("{}", "cn")));
+        let via = if detour == "DIRECT" { group_names.first().cloned().unwrap_or(detour) } else { detour };
         let mut remote = json!({ "type": "https", "tag": "remote", "server": "1.1.1.1" });
-        if detour != "DIRECT" {
-            remote["detour"] = json!(detour);
+        if via != "DIRECT" {
+            remote["detour"] = json!(via);
         }
         json!({
             "servers": [remote, { "type": "https", "tag": "local", "server": "223.5.5.5" }],
@@ -332,6 +338,92 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
             "default_domain_resolver": "local",
         },
         "experimental": clash_api(o),
+    })
+}
+
+/// A Clash nameserver (`223.5.5.5`, `tcp://…`, `tls://…`,
+/// `https://host/path#PROXY`) as a sing-box DNS server. None for kinds
+/// sing-box can't take (dhcp://, system, …).
+fn dns_server(spec: &str, tag: &str, groups: &[String]) -> Option<Value> {
+    let (main, detour) = match spec.trim().split_once('#') {
+        Some((m, d)) => (m, d.split('&').next().filter(|d| !d.is_empty())),
+        None => (spec.trim(), None),
+    };
+    let (scheme, rest) = main.split_once("://").unwrap_or(("udp", main));
+    let ty = match scheme {
+        "udp" | "tcp" | "tls" | "https" | "quic" | "h3" => scheme,
+        _ => return None,
+    };
+    let (hostport, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, format!("/{p}")),
+        None => (rest, String::new()),
+    };
+    let (host, port) = match hostport.parse::<std::net::SocketAddr>() {
+        Ok(sa) => (sa.ip().to_string(), Some(sa.port())),
+        Err(_) => match hostport.rsplit_once(':') {
+            Some((h, p)) if !h.contains(':') => (h.trim_matches(['[', ']']).to_string(), p.parse::<u16>().ok()),
+            _ => (hostport.trim_matches(['[', ']']).to_string(), None),
+        },
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let mut s = json!({ "type": ty, "tag": tag, "server": host });
+    if let Some(p) = port {
+        s["server_port"] = json!(p);
+    }
+    if ty == "https" && !path.is_empty() && path != "/dns-query" {
+        s["path"] = json!(path);
+    }
+    if host.parse::<std::net::IpAddr>().is_err() {
+        s["domain_resolver"] = json!("local");
+    }
+    if let Some(d) = detour {
+        if d != "DIRECT" && groups.iter().any(|g| g == d) {
+            s["detour"] = json!(d);
+        }
+    }
+    Some(s)
+}
+
+/// The profile's own `dns:` for TUN: its nameservers (with `#proxy`
+/// detours) and, in fake-ip mode, fake addresses for A/AAAA queries - so
+/// proxied connections carry the domain instead of a possibly poisoned IP.
+fn profile_dns(d: &DnsConfig, groups: &[String]) -> Value {
+    // Plain resolver for DoH/DoT host names and for direct connections.
+    let boot = d
+        .default_nameserver
+        .iter()
+        .find_map(|s| s.trim().trim_start_matches("udp://").parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "223.5.5.5".into());
+    let mut servers = vec![json!({ "type": "udp", "tag": "local", "server": boot })];
+    let main: Vec<Value> = d.nameserver.iter().enumerate().filter_map(|(i, s)| dns_server(s, &format!("dns-{i}"), groups)).collect();
+    let final_tag = main.first().and_then(|s| s["tag"].as_str()).unwrap_or("local").to_string();
+    servers.extend(main);
+    let mut rules = Vec::new();
+    if d.enhanced_mode == "fake-ip" {
+        let range = if d.fake_ip_range.is_empty() { "198.18.0.1/16" } else { d.fake_ip_range.as_str() };
+        let range = range.parse::<ipnet::Ipv4Net>().map(|n| n.trunc().to_string()).unwrap_or_else(|_| "198.18.0.0/15".into());
+        servers.push(json!({ "type": "fakeip", "tag": "fakeip", "inet4_range": range }));
+        let (mut suffix, mut exact) = (Vec::new(), Vec::new());
+        for f in &d.fake_ip_filter {
+            if let Some(s) = f.strip_prefix("+.").or_else(|| f.strip_prefix("*.")) {
+                suffix.push(s.to_string());
+            } else if !f.contains(['*', ':', '+']) {
+                exact.push(f.clone());
+            }
+        }
+        if !suffix.is_empty() || !exact.is_empty() {
+            rules.push(json!({ "domain_suffix": suffix, "domain": exact, "server": final_tag }));
+        }
+        rules.push(json!({ "query_type": ["A", "AAAA"], "server": "fakeip" }));
+    }
+    json!({
+        "servers": servers,
+        "rules": rules,
+        "final": final_tag,
+        "strategy": if d.ipv6 { "prefer_ipv4" } else { "ipv4_only" },
     })
 }
 
@@ -636,6 +728,38 @@ pub fn parse(v: &Value) -> Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tun_dns_follows_the_profile() {
+        let mut o = overrides();
+        o.tun = true;
+        let base = "proxies:\n  - {name: n, type: ss, server: 1.2.3.4, port: 1, cipher: aes-128-gcm, password: x}\n\
+                    proxy-groups:\n  - {name: PROXY, type: select, proxies: [n]}\nrules:\n  - DOMAIN-SUFFIX,x.com,PROXY\n  - MATCH,DIRECT\n";
+
+        // Profile DNS: its servers, fake-ip, filter, detours.
+        let dns = "dns:\n  enable: true\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  fake-ip-filter: ['+.lan', 'time.windows.com', 'geosite:cn']\n  \
+                   default-nameserver: [119.29.29.29]\n  nameserver: [223.5.5.5, 'https://doh.pub/q#PROXY', 'tls://1.1.1.1:853#Nope', 'dhcp://en0']\n";
+        let sb = emit(&parse_any(&format!("{base}{dns}")).unwrap(), &o);
+        let d = &sb["dns"];
+        let servers = d["servers"].as_array().unwrap();
+        let by_tag = |t: &str| servers.iter().find(|s| s["tag"] == t).cloned().unwrap_or(Value::Null);
+        assert_eq!(by_tag("local"), json!({"type": "udp", "tag": "local", "server": "119.29.29.29"}));
+        assert_eq!(by_tag("dns-0"), json!({"type": "udp", "tag": "dns-0", "server": "223.5.5.5"}));
+        assert_eq!(by_tag("dns-1"), json!({"type": "https", "tag": "dns-1", "server": "doh.pub", "path": "/q", "domain_resolver": "local", "detour": "PROXY"}));
+        // Unknown group: no detour; dhcp:// dropped.
+        assert_eq!(by_tag("dns-2"), json!({"type": "tls", "tag": "dns-2", "server": "1.1.1.1", "server_port": 853}));
+        assert!(by_tag("dns-3").is_null());
+        assert_eq!(by_tag("fakeip"), json!({"type": "fakeip", "tag": "fakeip", "inet4_range": "198.18.0.0/16"}));
+        assert_eq!(d["final"], "dns-0");
+        assert_eq!(d["rules"][0], json!({"domain_suffix": ["lan"], "domain": ["time.windows.com"], "server": "dns-0"}));
+        assert_eq!(d["rules"][1], json!({"query_type": ["A", "AAAA"], "server": "fakeip"}));
+        assert_eq!(d["strategy"], "ipv4_only");
+
+        // No profile DNS, final DIRECT: foreign names still resolve via a proxy group.
+        let sb = emit(&parse_any(base).unwrap(), &o);
+        let remote = sb["dns"]["servers"].as_array().unwrap().iter().find(|s| s["tag"] == "remote").cloned().unwrap();
+        assert_eq!(remote["detour"], "PROXY");
+    }
 
     fn overrides() -> Overrides {
         Overrides {

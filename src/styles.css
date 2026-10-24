@@ -867,3 +867,11 @@ td.ellipsis {
   word-break: break-all;
   user-select: text;
 }
+
+.proxy-tools {
+  margin-bottom: 14px;
+}
+
+.proxy-tools .seg button {
+  padding: 6px 12px;
+}
