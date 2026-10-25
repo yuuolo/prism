@@ -1,6 +1,6 @@
 # Prism 使用手册（Windows）
 
-适用版本：v0.1.4 之后的开发版（新增 Reality / Vision / Hysteria2、TLS 指纹、覆写、解锁检测、WebDAV 备份、主题与英文界面、快捷键、流量统计）
+适用版本：v0.1.5（新增 Reality / Vision / Hysteria2、TLS 指纹、覆写、解锁检测、WebDAV 备份、主题与英文界面、快捷键、流量统计）
 
 - [1. 安装与首次使用](#1-安装与首次使用)
 - [2. 界面说明](#2-界面说明)
