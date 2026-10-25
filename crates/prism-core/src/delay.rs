@@ -80,7 +80,7 @@ async fn request(reg: &Registry, name: &str, url: &str) -> std::io::Result<u128>
     let (out, _) = reg.resolve(name, &target)?;
     let stream = out.connect(&target).await?;
     if https {
-        let s = Tls::new(&host, false, &["http/1.1".to_string()])?.wrap(stream).await?;
+        let s = Tls::new(&host, false, &["http/1.1".to_string()], None)?.wrap(stream).await?;
         exchange(s, start, reg.unified_delay, &req("keep-alive"), &req("close")).await
     } else {
         exchange(stream, start, reg.unified_delay, &req("keep-alive"), &req("close")).await

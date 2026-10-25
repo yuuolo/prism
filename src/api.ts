@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { t } from "./i18n";
 
 export type CoreKind = "prism" | "mihomo" | "singbox";
 export type Mode = "rule" | "global" | "direct";
@@ -15,6 +16,12 @@ export interface Settings {
   auto_update_check: boolean;
   /** When started with Windows, stay in the tray. */
   silent_start: boolean;
+  theme: "system" | "light" | "dark";
+  lang: "zh" | "en";
+  /** Global hotkeys: action -> accelerator ("Ctrl+Alt+P"). */
+  hotkeys: Record<string, string>;
+  /** password is "saved" when one is stored (never sent to the UI). */
+  webdav: { url: string; username: string; password: string };
   tun: boolean;
   unified_delay: boolean;
   proxy_bypass: string;
@@ -95,6 +102,34 @@ export interface ImportRequest {
 export interface PendingLink {
   request: ImportRequest | null;
   error: string | null;
+}
+
+export interface RemoteBackup {
+  name: string;
+  modified: string;
+  size: number;
+}
+
+export interface UnlockCheck {
+  service: string;
+  verdict: "yes" | "partial" | "no" | "unknown";
+  region: string | null;
+  note: string | null;
+}
+
+/** 覆写: global Merge (YAML) and Script (JS) applied to every profile. */
+export interface Patches {
+  merge_enabled: boolean;
+  merge: string;
+  script_enabled: boolean;
+  script: string;
+}
+
+export interface TrafficDay {
+  /** Local date, YYYY-MM-DD. */
+  date: string;
+  upload: number;
+  download: number;
 }
 
 export interface UpdateInfo {
@@ -179,6 +214,18 @@ export const api = {
   setClashLinks: (enable: boolean) => invoke<void>("set_clash_links", { enable }),
   takeImportRequests: () => invoke<PendingLink[]>("take_import_requests"),
   updateTray: () => invoke<void>("update_tray"),
+  trafficHistory: () => invoke<TrafficDay[]>("traffic_history"),
+  unlockCheck: () => invoke<UnlockCheck[]>("unlock_check"),
+  getPatches: () => invoke<Patches>("get_patches"),
+  savePatches: (patches: Patches) => invoke<void>("save_patches", { patches }),
+  webdavSave: (url: string, username: string, password: string | null) => invoke<void>("webdav_save", { url, username, password }),
+  webdavTest: () => invoke<void>("webdav_test"),
+  backupUpload: () => invoke<string>("backup_upload"),
+  backupList: () => invoke<RemoteBackup[]>("backup_list"),
+  backupDelete: (name: string) => invoke<void>("backup_delete", { name }),
+  backupRestore: (name: string) => invoke<void>("backup_restore", { name }),
+  backupImport: (data: string) => invoke<void>("backup_import", { data }),
+  backupExport: () => invoke<string>("backup_export"),
   installTunService: () => invoke<void>("install_tun_service"),
   uninstallTunService: () => invoke<void>("uninstall_tun_service"),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
@@ -209,17 +256,17 @@ export function fmtSpeed(n: number): string {
 
 export function fmtAgo(ts: number): string {
   const s = Math.max(0, Date.now() / 1000 - ts);
-  if (s < 60) return "刚刚";
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
-  return `${Math.floor(s / 86400)} 天前`;
+  if (s < 60) return t("刚刚");
+  if (s < 3600) return t("{n} 分钟前", { n: Math.floor(s / 60) });
+  if (s < 86400) return t("{n} 小时前", { n: Math.floor(s / 3600) });
+  return t("{n} 天前", { n: Math.floor(s / 86400) });
 }
 
 /** 90 -> "1.5 小时", 1440 -> "1 天". */
 export function fmtInterval(min: number): string {
-  if (min >= 1440 && min % 1440 === 0) return `${min / 1440} 天`;
-  if (min >= 60) return `${+(min / 60).toFixed(1)} 小时`;
-  return `${min} 分钟`;
+  if (min >= 1440 && min % 1440 === 0) return t("{n} 天", { n: min / 1440 });
+  if (min >= 60) return t("{n} 小时", { n: +(min / 60).toFixed(1) });
+  return t("{n} 分钟", { n: min });
 }
 
 export function lastDelay(p?: ProxyItem): number | undefined {

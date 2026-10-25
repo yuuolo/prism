@@ -66,9 +66,12 @@ fn overrides(s: &Settings) -> clash::Overrides {
     }
 }
 
+/// The active profile's content with the user's 覆写 applied.
 fn active_profile(store: &Store, s: &Settings) -> Result<String> {
     let id = s.active_profile.clone().ok_or_else(|| anyhow!("请先在「订阅」页导入并启用一个订阅"))?;
-    Ok(store.read_content(&id)?.trim_start_matches('\u{feff}').to_string())
+    let raw = store.read_content(&id)?.trim_start_matches('\u{feff}').to_string();
+    let name = store.profiles().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
+    crate::patches::apply(&crate::patches::load(&store.dir), &raw, &name)
 }
 
 /// sing-box config for the active profile, before rule-sets are localized.

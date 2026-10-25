@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { api, errText, fmtBytes, fmtSpeed, type AppRule, type Connection, type ConnectionsResp } from "../api";
 import { useApp, usePoll } from "../state";
 import { AppRuleDialog } from "./Apps";
+import { t } from "../i18n";
 
 interface Row extends Connection {
   upSpeed: number;
@@ -47,33 +48,33 @@ export default function Connections() {
   return (
     <>
       <div className="page-head">
-        <h1>连接</h1>
-        <span className="tag">{rows.length} 个</span>
-        <input className="input" placeholder="过滤主机 / 程序 / 规则 / 节点" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <h1>{t("连接")}</h1>
+        <span className="tag">{t("{n} 个", { n: rows.length })}</span>
+        <input className="input" placeholder={t("过滤主机 / 程序 / 规则 / 节点")} value={filter} onChange={(e) => setFilter(e.target.value)} />
         <button className="btn" onClick={() => setPaused(!paused)}>
-          {paused ? "继续" : "暂停"}
+          {paused ? t("继续") : t("暂停")}
         </button>
-        <button className="btn danger" disabled={!running} onClick={() => run(() => api.core("DELETE", "/connections"), "已关闭全部连接")}>
-          全部关闭
+        <button className="btn danger" disabled={!running} onClick={() => run(() => api.core("DELETE", "/connections"), t("已关闭全部连接"))}>
+          {t("全部关闭")}
         </button>
       </div>
       {!running ? (
-        <div className="empty">内核未运行</div>
+        <div className="empty">{t("内核未运行")}</div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>主机</th>
-                <th>程序</th>
-                <th>类型</th>
-                <th>规则</th>
-                <th>链路</th>
-                <th className="num">↑ 速度</th>
-                <th className="num">↓ 速度</th>
-                <th className="num">上传</th>
-                <th className="num">下载</th>
-                <th>时间</th>
+                <th>{t("主机")}</th>
+                <th>{t("程序")}</th>
+                <th>{t("类型")}</th>
+                <th>{t("规则")}</th>
+                <th>{t("链路")}</th>
+                <th className="num">{t("↑ 速度")}</th>
+                <th className="num">{t("↓ 速度")}</th>
+                <th className="num">{t("上传")}</th>
+                <th className="num">{t("下载")}</th>
+                <th>{t("时间")}</th>
                 <th />
               </tr>
             </thead>
@@ -107,12 +108,12 @@ export default function Connections() {
                     <td>
                       <div className="row" style={{ gap: 6 }}>
                         {m.process && (
-                          <button className="btn sm" title="为这个程序设置出口" onClick={() => setRuleFor({ value: m.process!, path: m.processPath || "" })}>
-                            分流
+                          <button className="btn sm" title={t("为这个程序设置出口")} onClick={() => setRuleFor({ value: m.process!, path: m.processPath || "" })}>
+                            {t("分流")}
                           </button>
                         )}
                         <button className="btn sm danger" onClick={() => api.core("DELETE", `/connections/${c.id}`)}>
-                          关闭
+                          {t("关闭")}
                         </button>
                       </div>
                     </td>
@@ -121,7 +122,7 @@ export default function Connections() {
               })}
             </tbody>
           </table>
-          {shown.length === 0 && <div className="empty">暂无连接</div>}
+          {shown.length === 0 && <div className="empty">{t("暂无连接")}</div>}
         </div>
       )}
       {ruleFor && (
@@ -131,7 +132,7 @@ export default function Connections() {
           onSave={async (r: AppRule) => {
             try {
               await api.setAppRules([...(snap?.settings.app_rules ?? []), r]);
-              toast(`已为 ${r.value} 添加应用规则，内核已重新加载`);
+              toast(t("已为 {app} 添加应用规则，内核已重新加载", { app: r.value }));
               return true;
             } catch (e) {
               toast(errText(e), "err");

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, delayClass, enc, lastDelay, type ProxyItem } from "../api";
+import { api, delayClass, enc, errText, lastDelay, type ProxyItem, type UnlockCheck } from "../api";
 import { useApp } from "../state";
 import type { PageKey } from "../App";
 import { ProxyProviders } from "./Providers";
+import { t } from "../i18n";
 
 type ProxyMap = Record<string, ProxyItem>;
 type SortKey = "default" | "delay" | "name";
@@ -37,14 +38,64 @@ function DelayView({ d, testing, onTest }: { d?: number; testing: boolean; onTes
   return (
     <span
       className={`delay ${delayClass(d)}`}
-      title="点击测速"
+      title={t("点击测速")}
       onClick={(e) => {
         e.stopPropagation();
         onTest();
       }}
     >
-      {testing ? "…" : d === undefined ? "测速" : d === 0 ? "超时" : `${d} ms`}
+      {testing ? "…" : d === undefined ? t("测速") : d === 0 ? t("超时") : `${d} ms`}
     </span>
+  );
+}
+
+const VERDICTS: Record<UnlockCheck["verdict"], [string, string]> = {
+  yes: ["可用", "d-good"],
+  partial: ["部分可用", "d-mid"],
+  no: ["不可用", "d-bad"],
+  unknown: ["无法判断", "d-none"],
+};
+
+/** 解锁检测: which streaming / AI services work through the current routing. */
+function UnlockDialog({ onClose }: { onClose: () => void }) {
+  const [list, setList] = useState<UnlockCheck[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const runChecks = useCallback(() => {
+    setList(null);
+    setError(null);
+    api.unlockCheck().then(setList, (e) => setError(errText(e)));
+  }, []);
+  useEffect(runChecks, [runChecks]);
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal unlock-modal" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("解锁检测")}</h2>
+        <div className="small muted">{t("经当前的规则和所选节点访问各服务（与浏览器使用系统代理时一致）。")}</div>
+        {error && <div className="notice">{error}</div>}
+        {!list && !error && <div className="muted">{t("检测中，约 10 秒…")}</div>}
+        {list && (
+          <div className="unlock-list">
+            {list.map((c) => (
+              <div className="row unlock-item" key={c.service}>
+                <span className="unlock-name">{c.service}</span>
+                <span className={VERDICTS[c.verdict][1]}>{t(VERDICTS[c.verdict][0])}</span>
+                {c.region && <span className="tag">{c.region}</span>}
+                {c.note && <span className="small muted">{c.note}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="row">
+          <span className="spacer" />
+          <button className="btn" disabled={!list && !error} onClick={runChecks}>
+            {t("重新检测")}
+          </button>
+          <button className="btn primary" onClick={onClose}>
+            {t("关闭")}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -56,6 +107,7 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>(loadSort);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [unlock, setUnlock] = useState(false);
   const running = !!snap?.running;
   const testUrl = snap?.settings.test_url ?? "";
 
@@ -76,13 +128,13 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
     return (
       <>
         <div className="page-head">
-          <h1>代理</h1>
+          <h1>{t("代理")}</h1>
         </div>
         <div className="empty">
-          内核未运行
+          {t("内核未运行")}
           <br />
           <button className="btn primary" onClick={() => go("home")}>
-            去启动
+            {t("去启动")}
           </button>
         </div>
       </>
@@ -171,7 +223,7 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
 
   const select = async (g: ProxyItem, name: string) => {
     if (!selectable(g)) {
-      toast(`${g.name} 是自动选择组，不能手动选择`, "err");
+      toast(t("{name} 是自动选择组，不能手动选择", { name: g.name }), "err");
       return;
     }
     if (await run(() => api.selectProxy(g.name, name))) load();
@@ -180,13 +232,16 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
   return (
     <>
       <div className="page-head">
-        <h1>代理</h1>
-        <span className="tag accent">{mode === "rule" ? "规则模式" : mode === "global" ? "全局模式" : "直连模式"}</span>
+        <h1>{t("代理")}</h1>
+        <span className="tag accent">{mode === "rule" ? t("规则模式") : mode === "global" ? t("全局模式") : t("直连模式")}</span>
         <button className="btn" onClick={load}>
-          刷新
+          {t("刷新")}
+        </button>
+        <button className="btn" onClick={() => setUnlock(true)}>
+          {t("解锁检测")}
         </button>
         <button className="btn primary" disabled={!!progress} onClick={testAll}>
-          {progress ? `测速中 ${progress.done}/${progress.total}` : "全部测速"}
+          {progress ? t("测速中 {done}/{total}", { done: progress.done, total: progress.total }) : t("全部测速")}
         </button>
       </div>
 
@@ -194,16 +249,16 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
         <input
           className="input"
           style={{ flex: 1 }}
-          placeholder="搜索节点或代理组"
+          placeholder={t("搜索节点或代理组")}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Escape" && setQuery("")}
         />
-        <span className="small muted">排序</span>
+        <span className="small muted">{t("排序")}</span>
         <div className="seg">
           {SORTS.map(([k, label]) => (
             <button key={k} className={sort === k ? "on" : ""} onClick={() => changeSort(k)}>
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
@@ -225,7 +280,7 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
                 {g.now} {delayOfNow ? <span className={delayClass(delayOfNow)}>· {delayOfNow} ms</span> : null}
               </span>
               <span className="spacer" />
-              <span className="small muted">{q ? `${members.length} / ${g.all?.length}` : g.all?.length} 个</span>
+              <span className="small muted">{t("{n} 个", { n: q ? `${members.length} / ${g.all?.length}` : (g.all?.length ?? 0) })}</span>
               <button
                 className="btn sm"
                 disabled={testing[g.name]}
@@ -234,7 +289,7 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
                   testGroup(g);
                 }}
               >
-                {testing[g.name] ? "测速中…" : "测速"}
+                {testing[g.name] ? t("测速中…") : t("测速")}
               </button>
             </div>
             {isOpen && (
@@ -261,8 +316,9 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
           </div>
         );
       })}
-      {groups.length === 0 && <div className="empty">没有代理组</div>}
-      {groups.length > 0 && shown.length === 0 && <div className="empty">没有匹配「{query.trim()}」的节点</div>}
+      {groups.length === 0 && <div className="empty">{t("没有代理组")}</div>}
+      {groups.length > 0 && shown.length === 0 && <div className="empty">{t("没有匹配「{q}」的节点", { q: query.trim() })}</div>}
+      {unlock && <UnlockDialog onClose={() => setUnlock(false)} />}
     </>
   );
 }

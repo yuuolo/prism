@@ -18,8 +18,9 @@
   color-scheme: light;
 }
 
+/* Dark palette: the system's choice unless the user picked one. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #12131a;
     --panel: #1b1d27;
     --panel-2: #232633;
@@ -32,6 +33,20 @@
     --shadow: none;
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #12131a;
+  --panel: #1b1d27;
+  --panel-2: #232633;
+  --side: #171821;
+  --text: #e8eaf3;
+  --muted: #8b90a8;
+  --line: #2b2e3d;
+  --accent: #7b6dff;
+  --accent-soft: rgba(123, 109, 255, 0.16);
+  --shadow: none;
+  color-scheme: dark;
 }
 
 * {
@@ -874,4 +889,38 @@ td.ellipsis {
 
 .proxy-tools .seg button {
   padding: 6px 12px;
+}
+
+.hotkey {
+  width: 220px;
+  cursor: pointer;
+}
+
+.backup-list {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.backup-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.unlock-modal {
+  width: min(520px, 100%);
+}
+
+.unlock-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.unlock-name {
+  width: 140px;
+  font-weight: 600;
+}
+
+.unlock-list {
+  overflow: auto;
+  min-height: 0;
 }

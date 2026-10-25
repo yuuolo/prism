@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use super::tls::Tls;
 use super::Outbound;
-use crate::common::{other, pump, tcp_connect, udp_over_stream, Address, BoxedStream, Framing, UdpPipe};
+use crate::common::{other, pump, udp_over_stream, Address, BoxedStream, Framing, UdpPipe};
 use crate::config::ProxyConfig;
 
 const CMD_WASTE: u8 = 0;
@@ -119,7 +119,7 @@ impl AnyTls {
             server: p.server.clone(),
             port: p.port,
             password_hash: Sha256::digest(password.as_bytes()).into(),
-            tls: Tls::new(p.sni.as_deref().unwrap_or(&p.server), p.skip_cert_verify, &p.alpn)?,
+            tls: Tls::new(p.sni.as_deref().unwrap_or(&p.server), p.skip_cert_verify, &p.alpn, p.fingerprint.as_deref())?,
             idle: Arc::new(Mutex::new(Vec::new())),
             reaper_started: AtomicBool::new(false),
         })
@@ -163,8 +163,7 @@ impl AnyTls {
 
     async fn new_session(&self) -> io::Result<Arc<Session>> {
         self.start_reaper();
-        let tcp = tcp_connect(&self.server, self.port).await?;
-        let mut tls = self.tls.wrap(tcp).await?;
+        let mut tls = self.tls.connect(&self.server, self.port).await?;
         let mut hello = Vec::with_capacity(160);
         hello.extend_from_slice(&self.password_hash);
         hello.extend_from_slice(&0u16.to_be_bytes());

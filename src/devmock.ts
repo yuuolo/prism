@@ -19,6 +19,10 @@ export function installDevMock() {
     system_proxy: true,
     auto_update_check: true,
     silent_start: true,
+    theme: "system",
+    lang: "zh",
+    hotkeys: { toggle_window: "Ctrl+Alt+P" } as Record<string, string>,
+    webdav: { url: "https://dav.jianguoyun.com/dav/", username: "me@example.com", password: "saved" },
     tun: false,
     unified_delay: true,
     proxy_bypass: "localhost;127.*;<local>",
@@ -160,6 +164,45 @@ export function installDevMock() {
     },
     get_logs: () => [],
     update_tray: () => null,
+    get_patches: () => ({
+      merge_enabled: true,
+      merge: "prepend-rules:\n  - DOMAIN-SUFFIX,example.com,DIRECT\n",
+      script_enabled: false,
+      script: "function main(config, profileName) {\n  return config;\n}\n",
+    }),
+    save_patches: () => null,
+    unlock_check: async () => {
+      await new Promise((r) => setTimeout(r, 900));
+      return [
+        { service: "Netflix", verdict: "partial", region: "JP", note: "仅自制剧" },
+        { service: "YouTube Premium", verdict: "yes", region: "JP", note: null },
+        { service: "Prime Video", verdict: "yes", region: "JP", note: null },
+        { service: "TikTok", verdict: "unknown", region: null, note: "HTTP 403" },
+        { service: "ChatGPT", verdict: "yes", region: "JP", note: null },
+        { service: "Claude", verdict: "yes", region: null, note: null },
+        { service: "Gemini", verdict: "no", region: null, note: null },
+      ];
+    },
+    webdav_test: () => null,
+    webdav_save: (a) => {
+      settings.webdav = { url: a.url as string, username: a.username as string, password: "saved" };
+    },
+    backup_upload: () => "prism-DESKTOP-20261025-120000.zip",
+    backup_list: () => [
+      { name: "prism-DESKTOP-20261025-120000.zip", modified: "Sat, 25 Oct 2026 04:00:00 GMT", size: 18342 },
+      { name: "prism-LAPTOP-20261020-090000.zip", modified: "Mon, 20 Oct 2026 01:00:00 GMT", size: 17210 },
+    ],
+    backup_export: () => "C:\\Users\\me\\Downloads\\prism-DESKTOP-20261025-120000.zip",
+    traffic_history: () =>
+      Array.from({ length: 24 }, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const p = (n: number) => String(n).padStart(2, "0");
+        return { date: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`, upload: (i % 5) * 4e7 + 1e7, download: ((i * 7) % 11) * 2.2e8 + 3e7 };
+      }).reverse(),
+    save_settings: (a) => {
+      Object.assign(settings, a.settings as object);
+    },
     select_proxy: (a) => {
       proxies[a.group as string].now = a.name;
     },

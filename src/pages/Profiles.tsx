@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { api, fmtAgo, fmtBytes, fmtInterval, type ProfileMeta } from "../api";
+import { api, fmtAgo, fmtBytes, fmtInterval, type Patches, type ProfileMeta } from "../api";
 import { useApp } from "../state";
+import { t } from "../i18n";
 
 const FORMAT_NAMES = { clash: "Clash", singbox: "sing-box", uri: "分享链接" };
 
@@ -27,7 +28,7 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
       } else {
         await api.importProfile({ content: content ?? "", name });
       }
-    }, "已保存");
+    }, t("已保存"));
     setSaving(false);
     if (ok) onClose();
   };
@@ -35,16 +36,16 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{profile ? "编辑订阅" : "新建本地配置"}</h2>
-        <input className="input" placeholder="名称" value={name} onChange={(e) => setName(e.target.value)} />
+        <h2>{profile ? t("编辑订阅") : t("新建本地配置")}</h2>
+        <input className="input" placeholder={t("名称")} value={name} onChange={(e) => setName(e.target.value)} />
         {profile?.url && (
           <div className="row">
             <span className="small" style={{ whiteSpace: "nowrap" }}>
-              自动更新间隔
+              {t("自动更新间隔")}
             </span>
             <input className="input" style={{ width: 110 }} value={every} onChange={(e) => setEvery(e.target.value)} />
             <span className="small muted">
-              {badInterval ? "请输入分钟数" : minutes ? `分钟（每 ${fmtInterval(minutes)}更新一次）` : "分钟（0 = 不自动更新）"}
+              {badInterval ? t("请输入分钟数") : minutes ? t("分钟（每 {every}更新一次）", { every: fmtInterval(minutes) }) : t("分钟（0 = 不自动更新）")}
             </span>
           </div>
         )}
@@ -52,18 +53,80 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
           className="input"
           rows={20}
           spellCheck={false}
-          placeholder="粘贴 Clash YAML、sing-box JSON，或 anytls:// ss:// trojan:// vless:// 等分享链接（每行一个）"
-          value={content ?? "加载中…"}
+          placeholder={t("粘贴 Clash YAML、sing-box JSON，或 anytls:// ss:// trojan:// vless:// 等分享链接（每行一个）")}
+          value={content ?? t("加载中…")}
           onChange={(e) => setContent(e.target.value)}
         />
-        {profile?.url && <div className="small muted">远程订阅更新时会覆盖这里的修改。</div>}
+        {profile?.url && <div className="small muted">{t("远程订阅更新时会覆盖这里的修改。")}</div>}
         <div className="row">
           <span className="spacer" />
           <button className="btn" onClick={onClose}>
-            取消
+            {t("取消")}
           </button>
           <button className="btn primary" disabled={saving || !content?.trim() || (!!profile?.url && badInterval)} onClick={save}>
-            {saving ? "保存中…" : "保存"}
+            {saving ? t("保存中…") : t("保存")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 覆写 editor: Merge (YAML) and Script (JS) for every profile. */
+function PatchesEditor({ onClose }: { onClose: () => void }) {
+  const { run } = useApp();
+  const [p, setP] = useState<Patches | null>(null);
+  const [tab, setTab] = useState<"merge" | "script">("merge");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    api.getPatches().then(setP);
+  }, []);
+  if (!p) return null;
+  const save = async () => {
+    setSaving(true);
+    const ok = await run(() => api.savePatches(p), t("覆写已保存并生效"));
+    setSaving(false);
+    if (ok) onClose();
+  };
+  const enabledKey = tab === "merge" ? "merge_enabled" : "script_enabled";
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("覆写")}</h2>
+        <div className="small muted">{t("对所有订阅生效，在生成内核配置前应用（先 Merge，后 Script）。远程订阅更新后也会保留。")}</div>
+        <div className="row">
+          <div className="seg">
+            <button className={tab === "merge" ? "on" : ""} onClick={() => setTab("merge")}>
+              {t("Merge（YAML）")}{p.merge_enabled ? t(" ·启用") : ""}
+            </button>
+            <button className={tab === "script" ? "on" : ""} onClick={() => setTab("script")}>
+              {t("Script（JavaScript）")}{p.script_enabled ? t(" ·启用") : ""}
+            </button>
+          </div>
+          <span className="spacer" />
+          <span className="small muted">{t("启用")}</span>
+          <button className={`switch ${p[enabledKey] ? "on" : ""}`} onClick={() => setP({ ...p, [enabledKey]: !p[enabledKey] })} />
+        </div>
+        <textarea
+          className="input mono"
+          rows={20}
+          spellCheck={false}
+          value={tab === "merge" ? p.merge : p.script}
+          onChange={(e) => setP({ ...p, [tab]: e.target.value })}
+        />
+        <div className="small muted">
+          {tab === "merge"
+            ? t("prepend-rules / append-rules（加在 MATCH 之前）、prepend-proxies / append-proxies、prepend-proxy-groups / append-proxy-groups 增加条目；其他键直接覆盖，字典逐项合并。")
+            : t("function main(config, profileName) { … return config; }。config 是订阅转换成的 Clash 配置；不能联网或读写文件。")}
+        </div>
+        <div className="row">
+          <span className="small muted">{t("保存前会先用当前订阅试运行，出错不会保存。")}</span>
+          <span className="spacer" />
+          <button className="btn" onClick={onClose}>
+            {t("取消")}
+          </button>
+          <button className="btn primary" disabled={saving} onClick={save}>
+            {saving ? t("保存中…") : t("保存")}
           </button>
         </div>
       </div>
@@ -76,13 +139,14 @@ export default function Profiles() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<ProfileMeta | null | undefined>(undefined);
+  const [patching, setPatching] = useState(false);
 
   if (!snap) return null;
   const active = snap.settings.active_profile;
 
   const importUrl = async () => {
     setBusy("import");
-    if (await run(() => api.importProfile({ url }), "订阅已导入")) setUrl("");
+    if (await run(() => api.importProfile({ url }), t("订阅已导入"))) setUrl("");
     setBusy(null);
   };
 
@@ -103,12 +167,15 @@ export default function Profiles() {
   return (
     <>
       <div className="page-head">
-        <h1>订阅</h1>
+        <h1>{t("订阅")}</h1>
         <button className="btn" disabled={!!busy} onClick={updateAll}>
-          {busy === "all" ? "更新中…" : "全部更新"}
+          {busy === "all" ? t("更新中…") : t("全部更新")}
         </button>
         <button className="btn" onClick={() => setEditing(null)}>
-          新建本地配置
+          {t("新建本地配置")}
+        </button>
+        <button className="btn" onClick={() => setPatching(true)}>
+          {t("覆写")}
         </button>
       </div>
 
@@ -117,18 +184,18 @@ export default function Profiles() {
           <input
             className="input"
             style={{ flex: 1 }}
-            placeholder="订阅链接（支持 Clash / sing-box / 通用 Base64 订阅）"
+            placeholder={t("订阅链接（支持 Clash / sing-box / 通用 Base64 订阅）")}
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && url.trim() && importUrl()}
           />
           <button className="btn primary" disabled={!url.trim() || !!busy} onClick={importUrl}>
-            {busy === "import" ? "导入中…" : "导入"}
+            {busy === "import" ? t("导入中…") : t("导入")}
           </button>
         </div>
       </div>
 
-      {snap.profiles.length === 0 && <div className="empty">还没有订阅，粘贴订阅链接导入吧</div>}
+      {snap.profiles.length === 0 && <div className="empty">{t("还没有订阅，粘贴订阅链接导入吧")}</div>}
 
       <div className="grid cols-3">
         {snap.profiles.map((p) => {
@@ -138,25 +205,25 @@ export default function Profiles() {
             <div
               key={p.id}
               className={`card profile ${active === p.id ? "active" : ""}`}
-              onClick={() => active !== p.id && act(p.id, () => api.activateProfile(p.id), `已切换到 ${p.name}`)}
+              onClick={() => active !== p.id && act(p.id, () => api.activateProfile(p.id), t("已切换到 {name}", { name: p.name }))}
             >
               <div className="row">
                 <div className="pname" title={p.name}>
                   {p.name}
                 </div>
                 <span className="spacer" />
-                {active === p.id && <span className="tag accent">使用中</span>}
+                {active === p.id && <span className="tag accent">{t("使用中")}</span>}
               </div>
               <div className="row small muted" style={{ marginTop: 6 }}>
-                <span>{p.nodes} 个节点</span>
+                <span>{t("{n} 个节点", { n: p.nodes })}</span>
                 <span>·</span>
-                <span>{FORMAT_NAMES[p.format]}</span>
+                <span>{t(FORMAT_NAMES[p.format])}</span>
                 <span>·</span>
-                <span>{fmtAgo(p.updated_at)}更新</span>
+                <span>{t("{ago}更新", { ago: fmtAgo(p.updated_at) })}</span>
                 {p.url && (
                   <>
                     <span>·</span>
-                    <span title="可在「编辑」中修改">{p.interval ? `每 ${fmtInterval(p.interval)}` : "不自动更新"}</span>
+                    <span title={t("可在「编辑」中修改")}>{p.interval ? t("每 {every}", { every: fmtInterval(p.interval) }) : t("不自动更新")}</span>
                   </>
                 )}
               </div>
@@ -170,26 +237,26 @@ export default function Profiles() {
                       {fmtBytes(used)} / {fmtBytes(u.total)}
                     </span>
                     <span className="spacer" />
-                    {u.expire > 0 && <span>到期 {new Date(u.expire * 1000).toLocaleDateString()}</span>}
+                    {u.expire > 0 && <span>{t("到期 {date}", { date: new Date(u.expire * 1000).toLocaleDateString() })}</span>}
                   </div>
                 </>
               )}
               <div className="row" style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}>
                 {p.url && (
-                  <button className="btn sm" disabled={!!busy} onClick={() => act(p.id, () => api.updateProfile(p.id), "订阅已更新")}>
-                    {busy === p.id ? "更新中…" : "更新"}
+                  <button className="btn sm" disabled={!!busy} onClick={() => act(p.id, () => api.updateProfile(p.id), t("订阅已更新"))}>
+                    {busy === p.id ? t("更新中…") : t("更新")}
                   </button>
                 )}
                 <button className="btn sm" onClick={() => setEditing(p)}>
-                  编辑
+                  {t("编辑")}
                 </button>
                 <span className="spacer" />
                 <button
                   className="btn sm danger"
                   disabled={!!busy}
-                  onClick={() => confirm(`删除订阅「${p.name}」？`) && act(p.id, () => api.deleteProfile(p.id), "已删除")}
+                  onClick={() => confirm(t("删除订阅「{name}」？", { name: p.name })) && act(p.id, () => api.deleteProfile(p.id), t("已删除"))}
                 >
-                  删除
+                  {t("删除")}
                 </button>
               </div>
             </div>
@@ -198,6 +265,7 @@ export default function Profiles() {
       </div>
 
       {editing !== undefined && <Editor profile={editing} onClose={() => setEditing(undefined)} />}
+      {patching && <PatchesEditor onClose={() => setPatching(false)} />}
     </>
   );
 }

@@ -79,7 +79,7 @@ impl Upstream {
         let tls = match kind {
             Kind::Tls | Kind::Https => {
                 let alpn = if kind == Kind::Https { vec!["http/1.1".to_string()] } else { vec![] };
-                Some(Tls::new(&host, false, &alpn).map_err(|e| format!("dns server {spec}: {e}"))?)
+                Some(Tls::new(&host, false, &alpn, None).map_err(|e| format!("dns server {spec}: {e}"))?)
             }
             _ => None,
         };

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
+import { t } from "../i18n";
 
 function cls(line: string): string {
   if (line.startsWith("[prism]")) return "app";
@@ -33,10 +34,10 @@ export default function Logs() {
   return (
     <>
       <div className="page-head">
-        <h1>日志</h1>
-        <input className="input" placeholder="过滤" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <h1>{t("日志")}</h1>
+        <input className="input" placeholder={t("过滤")} value={filter} onChange={(e) => setFilter(e.target.value)} />
         <button className="btn" onClick={() => setFollow(!follow)}>
-          {follow ? "停止滚动" : "自动滚动"}
+          {follow ? t("停止滚动") : t("自动滚动")}
         </button>
         <button
           className="btn"
@@ -45,7 +46,7 @@ export default function Logs() {
             setLines([]);
           }}
         >
-          清空
+          {t("清空")}
         </button>
       </div>
       <div className="logs" ref={box}>
@@ -54,7 +55,7 @@ export default function Logs() {
             {l}
           </div>
         ))}
-        {shown.length === 0 && <div className="muted">暂无日志</div>}
+        {shown.length === 0 && <div className="muted">{t("暂无日志")}</div>}
       </div>
     </>
   );

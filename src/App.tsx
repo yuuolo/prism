@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppProvider, useApp } from "./state";
 import { CORE_NAMES } from "./api";
 import Home from "./pages/Home";
@@ -10,6 +10,7 @@ import Logs from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
 import Apps from "./pages/Apps";
 import ImportDialog from "./ImportDialog";
+import { setLang, t } from "./i18n";
 
 const PAGES = [
   { key: "home", label: "概览", icon: "◎", el: Home },
@@ -32,6 +33,12 @@ function Shell() {
   });
   const { snap, update } = useApp();
   const Page = PAGES.find((p) => p.key === page)!.el;
+  const theme = snap?.settings.theme ?? "system";
+  useEffect(() => {
+    // "system" follows prefers-color-scheme (styles.css).
+    if (theme === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+  }, [theme]);
   return (
     <div className="app">
       <aside className="sidebar">
@@ -43,18 +50,18 @@ function Shell() {
           {PAGES.map((p) => (
             <button key={p.key} className={`nav ${page === p.key ? "active" : ""}`} onClick={() => setPage(p.key)}>
               <span className="nav-icon">{p.icon}</span>
-              {p.label}
+              {t(p.label)}
             </button>
           ))}
         </nav>
         {update && (
-          <button className="update-badge" onClick={() => setPage("settings")} title="去设置页安装">
-            发现新版本 v{update.version}
+          <button className="update-badge" onClick={() => setPage("settings")} title={t("去设置页安装")}>
+            {t("发现新版本 v{v}", { v: update.version })}
           </button>
         )}
         <div className="side-status">
           <span className={`dot ${snap?.running ? "on" : ""}`} />
-          {snap?.running ? `${CORE_NAMES[snap.running]} 运行中` : "内核未运行"}
+          {snap?.running ? t("{core} 运行中", { core: t(CORE_NAMES[snap.running]) }) : t("内核未运行")}
         </div>
       </aside>
       <main className="main">
@@ -65,10 +72,18 @@ function Shell() {
   );
 }
 
+/** Re-renders everything when the interface language changes. */
+function Localized() {
+  const { snap } = useApp();
+  const lang = snap?.settings.lang ?? "zh";
+  setLang(lang);
+  return <Shell key={lang} />;
+}
+
 export default function App() {
   return (
     <AppProvider>
-      <Shell />
+      <Localized />
     </AppProvider>
   );
 }

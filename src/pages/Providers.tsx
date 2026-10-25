@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, enc, errText, fmtAgo } from "../api";
 import { useApp } from "../state";
+import { t } from "../i18n";
 
 interface ProxyProvider {
   name: string;
@@ -17,7 +18,7 @@ interface RuleProvider {
   updatedAt?: string | null;
 }
 
-const ago = (t?: string | null) => (t ? fmtAgo(Date.parse(t) / 1000) + "更新" : "");
+const ago = (when?: string | null) => (when ? t("{ago}更新", { ago: fmtAgo(Date.parse(when) / 1000) }) : "");
 
 /** Fetches a provider map, skipping mihomo's built-in "default" provider. */
 function useProviders<T extends { vehicleType: string }>(path: string, running: boolean) {
@@ -58,20 +59,20 @@ export function ProxyProviders({ onChange }: { onChange: () => void }) {
 
   return (
     <div className="card" style={{ marginBottom: 14 }}>
-      <h3>代理集合</h3>
+      <h3>{t("代理集合")}</h3>
       {list.map((p) => (
         <div className="row small" key={p.name} style={{ padding: "6px 0", borderTop: "1px solid var(--line)" }}>
           <b style={{ fontSize: 13 }}>{p.name}</b>
           <span className="tag">{p.vehicleType}</span>
-          <span className="muted">{p.proxies.length} 个节点</span>
+          <span className="muted">{t("{n} 个节点", { n: p.proxies.length })}</span>
           <span className="muted">{ago(p.updatedAt)}</span>
           <span className="spacer" />
-          <button className="btn sm" disabled={!!busy} onClick={() => act(p.name, "GET", `/providers/proxies/${enc(p.name)}/healthcheck`, `${p.name} 测速完成`)}>
-            {busy === p.name + "GET" ? "测速中…" : "测速"}
+          <button className="btn sm" disabled={!!busy} onClick={() => act(p.name, "GET", `/providers/proxies/${enc(p.name)}/healthcheck`, t("{name} 测速完成", { name: p.name }))}>
+            {busy === p.name + "GET" ? t("测速中…") : t("测速")}
           </button>
           {p.vehicleType === "HTTP" && (
-            <button className="btn sm" disabled={!!busy} onClick={() => act(p.name, "PUT", `/providers/proxies/${enc(p.name)}`, `${p.name} 已更新`)}>
-              {busy === p.name + "PUT" ? "更新中…" : "更新"}
+            <button className="btn sm" disabled={!!busy} onClick={() => act(p.name, "PUT", `/providers/proxies/${enc(p.name)}`, t("{name} 已更新", { name: p.name }))}>
+              {busy === p.name + "PUT" ? t("更新中…") : t("更新")}
             </button>
           )}
         </div>
@@ -91,7 +92,7 @@ export function RuleProviders({ onChange }: { onChange: () => void }) {
     setBusy(name);
     try {
       await api.core("PUT", `/providers/rules/${enc(name)}`);
-      toast(`${name} 已更新`);
+      toast(t("{name} 已更新", { name }));
     } catch (e) {
       toast(errText(e), "err");
     }
@@ -102,18 +103,18 @@ export function RuleProviders({ onChange }: { onChange: () => void }) {
 
   return (
     <div className="card" style={{ marginBottom: 14 }}>
-      <h3>规则集合</h3>
+      <h3>{t("规则集合")}</h3>
       {list.map((p) => (
         <div className="row small" key={p.name} style={{ padding: "6px 0", borderTop: "1px solid var(--line)" }}>
           <b style={{ fontSize: 13 }}>{p.name}</b>
           <span className="tag">{p.behavior}</span>
           <span className="tag">{p.vehicleType}</span>
-          <span className="muted">{p.ruleCount} 条</span>
+          <span className="muted">{t("{n} 条", { n: p.ruleCount })}</span>
           <span className="muted">{ago(p.updatedAt)}</span>
           <span className="spacer" />
           {p.vehicleType === "HTTP" && (
             <button className="btn sm" disabled={!!busy} onClick={() => update(p.name)}>
-              {busy === p.name ? "更新中…" : "更新"}
+              {busy === p.name ? t("更新中…") : t("更新")}
             </button>
           )}
         </div>

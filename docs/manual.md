@@ -1,6 +1,6 @@
 # Prism 使用手册（Windows）
 
-适用版本：v0.1.4（新增 TUN 服务、代理页全部测速 / 排序 / 搜索、托盘切换节点）
+适用版本：v0.1.4 之后的开发版（新增 Reality / Vision / Hysteria2、TLS 指纹、覆写、解锁检测、WebDAV 备份、主题与英文界面、快捷键、流量统计）
 
 - [1. 安装与首次使用](#1-安装与首次使用)
 - [2. 界面说明](#2-界面说明)
@@ -41,6 +41,7 @@
   - **全局**：全部流量走 `GLOBAL` 组选中的节点。
   - **直连**：全部直连，不经过代理。
 - **当前订阅**：启用中的订阅名称和前几个代理组当前选中的节点。
+- **最近 30 天流量**：每天经过内核的上传（紫色）和下载（蓝色）流量，鼠标移上去显示当天数字，右上角是本月合计。数据保存在数据目录的 `traffic.json`，只在 Prism 运行时统计（三种内核都支持），保留约 400 天。
 
 ### 代理
 - 按代理组显示节点；组的顺序与订阅中一致。
@@ -50,6 +51,7 @@
 - **排序**：默认（订阅中的顺序）、延迟（快的在前，超时和未测速的排在最后）、名称。选择会被记住。
 - 延迟颜色：绿色 < 300 ms，黄色 < 800 ms，橙色更慢，红色「超时」表示测试失败。
 - 节点选择会按订阅分别记住，重启内核或 Prism 后自动恢复。
+- **解锁检测**：检测 Netflix、YouTube Premium、Prime Video、TikTok、ChatGPT、Claude、Gemini 能否使用及所在地区。检测经当前的规则和所选节点进行（和浏览器开着系统代理访问时一样），需要先启动内核；换节点后可 **重新检测**。结果为「可用 / 部分可用（如 Netflix 仅自制剧）/ 不可用 / 无法判断（连接失败或遇到验证页）」。
 - 订阅含 `proxy-providers` 时，顶部的 **代理集合** 卡片列出每个集合的类型、节点数和更新时间，可单独 **测速** 或 **更新**（HTTP 类型）。更新后内核热重载，已选节点保持不变。
 
 ### 订阅
@@ -61,6 +63,7 @@
 - **自动更新**：远程订阅按间隔自动重新下载，默认每 24 小时；机场在响应头 `profile-update-interval` 中给出间隔时，导入时采用机场的值。在 **编辑** 中可改为任意分钟数，填 `0` 关闭。自动更新的结果记录在日志中；失败时 30 分钟后重试。
 - **编辑**：修改名称、自动更新间隔和内容。注意远程订阅更新时会覆盖对内容的手动修改。
 - **删除**：内核运行时不能删除正在使用的订阅，请先停止内核或切换到别的订阅。
+- **覆写**：对所有订阅生效的修改，见下面的「覆写」。
 
 ### 连接
 - 实时列出经过内核的连接：主机、发起连接的**程序**（鼠标悬停显示完整路径）、入站类型和 TCP / UDP、命中的规则、链路（如 `节点选择 → 自动选择 → 东京`）、速度和流量。
@@ -100,12 +103,50 @@
 | 更新 GeoSite / GeoIP | 重新下载 `geosite.dat` / `geoip.dat`；使用 sing-box 内核时同时刷新规则集 |
 | 查看生成的内核配置 | 查看 Prism 根据订阅为当前内核生成的实际配置文件 |
 | 打开数据目录 | 在资源管理器中打开数据目录（见第 10 节） |
+| 主题 | 跟随系统 / 浅色 / 深色 |
+| 界面语言 | 中文 / English。英文界面下，内核和后台返回的部分错误提示仍为中文 |
+| 快捷键 | 显示 / 隐藏主界面、开关系统代理、开关 TUN、切换规则 / 全局 / 直连模式的全局快捷键（见下） |
 | 开机自启 | 登录 Windows 时自动启动 Prism，切换后立即生效（见下） |
 | 静默启动 | 开机自启时只在托盘运行，不弹出主界面；需点 **保存** |
 | 接管 clash:// 链接 | 让机场面板的「一键导入 Clash」打开 Prism，切换后立即生效（见下） |
+| TUN 服务 | 安装、更新、卸载 TUN 服务（见第 4 节） |
+| 备份与同步 | WebDAV 云端备份与恢复、导出 / 导入备份文件（见下） |
 | 软件更新 | 当前版本、**检查更新**、**启动时自动检查**开关，以及新版本的说明和 **下载并安装**（见下） |
 
 修改端口、密钥、局域网、日志级别或统一延迟后点 **保存**，运行中的内核会自动重启。
+
+### 快捷键
+- 在设置页「外观与快捷键」中点击某个动作的输入框，按下组合键（如 `Ctrl+Alt+P`）即可设置，按 Backspace 清除；点 **保存** 后生效。
+- 快捷键是全局的，Prism 最小化到托盘时也有效。
+- 组合键需包含 Ctrl / Alt / Shift / Win 中的至少一个（F1–F12 可单独使用）。格式不对或已被其他程序占用时，保存后会提示哪一个没有注册成功。
+
+### 覆写
+在 **订阅** 页点 **覆写**，可以写对所有订阅生效的修改。它们在生成内核配置前应用（先 Merge 后 Script），远程订阅更新后依然有效，三种内核都支持。
+- **Merge（YAML）**：
+  - `prepend-rules` / `append-rules`：在规则最前 / 最后的 `MATCH` 之前加入规则；
+  - `prepend-proxies` / `append-proxies`、`prepend-proxy-groups` / `append-proxy-groups`：加入节点和代理组；
+  - 其他键直接覆盖订阅中的同名键，字典逐项合并（例如只写 `dns: {nameserver: [...]}` 只替换 nameserver）。
+- **Script（JavaScript）**：定义 `function main(config, profileName) { …; return config; }`。`config` 是订阅转换成的 Clash 配置对象，`profileName` 是订阅名称。脚本不能联网或读写文件，死循环会被中止。
+- 保存时会先用当前订阅试运行，出错（YAML 格式错误、脚本异常、结果无法使用）会提示原因且不保存。保存后运行中的 Prism / Mihomo 内核热重载，sing-box 内核重启。
+- 覆写后，sing-box JSON 订阅会先转换成 Clash 格式再应用。
+
+示例（Merge）：
+
+```yaml
+prepend-rules:
+  - DOMAIN-SUFFIX,example.com,DIRECT
+append-proxies:
+  - { name: 我的节点, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw }
+```
+
+### 备份与同步
+- **WebDAV**：在设置页填写地址（如坚果云 `https://dav.jianguoyun.com/dav/`）、用户名和密码（坚果云等请使用「应用密码」），点 **保存**、**测试连接**。
+  - **立即备份**：把所有订阅和设置打包上传到 WebDAV 的 `prism/` 目录，文件名包含电脑名和时间。
+  - **查看云端备份**：列出备份，可 **恢复** 或 **删除**。
+- **导出到文件 / 从文件恢复**：备份保存到「下载」文件夹，或从一个备份文件恢复，不需要 WebDAV。
+- **备份不包含**：WebDAV 密码、本机的 Mihomo / sing-box 路径。
+- **恢复时保留**：本机的内核路径、系统代理和 TUN 开关、WebDAV 登录信息；其余设置和全部订阅（含覆写）换成备份中的，内核按备份重新启动。
+- WebDAV 密码用 Windows 账户加密（DPAPI）保存在本机，换电脑或换 Windows 用户后需要重新填写。
 
 ### 开机自启与一键导入
 - **开机自启**：在当前用户的「启动」项中登记 Prism（任务管理器的「启动应用」里能看到，名为 Prism）。开机后 Prism 自动启动内核并恢复系统代理；开着 **静默启动** 时不弹出窗口，只显示托盘图标。卸载 Prism 时会自动移除这一项。
@@ -134,16 +175,18 @@
 | | Prism 内核 | Mihomo | sing-box |
 |---|---|---|---|
 | 来源 | 本项目自研（Rust），随安装包自带 | 设置页下载 | 设置页下载 |
-| AnyTLS / Shadowsocks / Trojan / VLESS | ✅（VLESS 仅 TCP/TLS） | ✅ | ✅ |
-| VMess / Hysteria2 / Reality / WebSocket / gRPC | ❌ | ✅ | ✅ |
+| AnyTLS / Shadowsocks / Trojan / VLESS | ✅ | ✅ | ✅ |
+| VLESS Reality / Vision、Hysteria2 | ✅（Vision 节点不转发 UDP） | ✅ | ✅ |
+| TLS 指纹（`client-fingerprint`） | ✅（Chrome 指纹） | ✅ | ✅ |
+| VMess / WebSocket / gRPC | ❌ | ✅ | ✅ |
 | 经代理转发 UDP | ✅（每个目标一条会话） | ✅ | ✅ |
 | TUN 模式 | ✅ | ✅ | ✅ |
 | DNS 模块 / fake-ip | ✅ | ✅ | ✅ |
 | proxy-providers / rule-providers | ✅（规则集仅 yaml / text 格式） | ✅ | — |
 | 应用分流（按程序选择出口） | ✅ | ✅ | ✅ |
 
-- 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS(TCP) 节点：**Prism 内核**即可，体积小、启动快，TCP 和 UDP 都可经代理。
-- 订阅含 VMess、Hysteria2、Reality、WebSocket / gRPC 节点，或用到 `AND/OR` 等组合规则、`.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
+- 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS（含 Reality / Vision）/ Hysteria2 节点：**Prism 内核**即可，体积小、启动快，TCP 和 UDP 都可经代理。
+- 订阅含 VMess、WebSocket / gRPC 传输的节点，或用到 `AND/OR` 等组合规则、`.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
 - 同一份订阅三个内核通用，Prism 会自动转换格式（见第 5、8 节）。Prism 内核遇到不支持的节点或规则会跳过，并在日志中给出警告。
 
 ## 4. 系统代理与 TUN 模式
@@ -291,7 +334,7 @@ rules:
 | `sni` | TLS 服务器名，默认同 `server` |
 | `skip-cert-verify` | 跳过证书校验（自签证书时使用），默认 `false` |
 | `alpn` | ALPN 列表，如 `[h2, http/1.1]` |
-| `client-fingerprint` | TLS 指纹（Prism 内核忽略，Mihomo / sing-box 使用） |
+| `client-fingerprint` | TLS 指纹。填写任意值（如 `chrome`）时，Prism 内核的 TLS 握手与 Chrome 浏览器一致（JA4 `t13d1516h2_8daaf6152771_d8a2da3f94cd`，含 X25519MLKEM768 后量子密钥交换）；服务器只支持 TLS 1.2 时自动改用普通握手。`safari`、`firefox` 等也按 Chrome 处理 |
 
 Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手，空闲 30 秒后关闭。
 
@@ -320,7 +363,9 @@ Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手
 | `tls` | 是否启用 TLS |
 | `servername` | TLS 服务器名 |
 | `skip-cert-verify`、`alpn` | 同上 |
-| `flow`、`reality-opts`、`network: ws/grpc` | Prism 内核不支持（含这些字段的节点会被跳过） |
+| `flow` | `xtls-rprx-vision`（需 TLS 或 Reality）。Vision 节点不转发 UDP（服务端要求 XUDP，Prism 内核未实现），UDP 会改走其他规则或失败 |
+| `reality-opts` | `public-key`、`short-id`：VLESS Reality；`servername` 为伪装的网站域名 |
+| `network: ws/grpc` | Prism 内核不支持（这样的节点会被跳过） |
 
 **SOCKS5**（`type: socks5`）、**HTTP**（`type: http`）
 
@@ -330,7 +375,16 @@ Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手
 | `tls` | 通过 TLS 连接上游代理 |
 | `sni`、`skip-cert-verify` | TLS 参数 |
 
-**仅 Mihomo / sing-box 支持的类型**：`vmess`、`hysteria2`，以及上面标注不支持的传输方式。Prism 能识别并在转换时保留它们（`ws-opts`、`grpc-opts`、`reality-opts`、`obfs` 等），但 Prism 内核运行时会跳过这些节点。
+**Hysteria2**（`type: hysteria2`）
+
+| 字段 | 说明 |
+|---|---|
+| `password` | 认证密码 |
+| `sni`、`skip-cert-verify`、`alpn` | TLS 参数（ALPN 默认 `h3`） |
+| `obfs`、`obfs-password` | 混淆，仅支持 `salamander` |
+| `up`、`down` | 带宽提示；Prism 内核使用 QUIC 默认拥塞控制，不使用 Brutal |
+
+**仅 Mihomo / sing-box 支持的类型**：`vmess`，以及上面标注不支持的传输方式。Prism 能识别并在转换时保留它们（`ws-opts`、`grpc-opts` 等），但 Prism 内核运行时会跳过这些节点。
 
 ### 6.4 proxy-groups（代理组）
 
@@ -588,7 +642,7 @@ hy2://...（同上）
 socks5://用户名:密码@服务器:端口#节点名
 ```
 
-VLESS 的 Reality / Vision / WS / gRPC、Trojan 的 WS / gRPC、VMess、Hysteria2 只能在 Mihomo / sing-box 内核下使用。
+VLESS / Trojan 的 WS / gRPC 传输和 VMess 只能在 Mihomo / sing-box 内核下使用；VLESS Reality / Vision、Hysteria2 三个内核都可用。
 
 ## 8. sing-box JSON 与格式转换
 

@@ -83,7 +83,7 @@ fn tls_of(p: &ProxyConfig) -> io::Result<Option<Tls>> {
     if !p.tls {
         return Ok(None);
     }
-    Tls::new(p.sni.as_deref().unwrap_or(&p.server), p.skip_cert_verify, &p.alpn).map(Some)
+    Tls::new(p.sni.as_deref().unwrap_or(&p.server), p.skip_cert_verify, &p.alpn, None).map(Some)
 }
 
 pub struct Socks5 {

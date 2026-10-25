@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type RuleItem } from "../api";
 import { useApp } from "../state";
 import { RuleProviders } from "./Providers";
+import { t } from "../i18n";
 
 export default function Rules() {
   const { snap } = useApp();
@@ -26,22 +27,22 @@ export default function Rules() {
   return (
     <>
       <div className="page-head">
-        <h1>规则</h1>
-        <span className="tag">{rules.length} 条</span>
-        <input className="input" placeholder="过滤" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <h1>{t("规则")}</h1>
+        <span className="tag">{t("{n} 条", { n: rules.length })}</span>
+        <input className="input" placeholder={t("过滤")} value={filter} onChange={(e) => setFilter(e.target.value)} />
       </div>
       {running && <RuleProviders onChange={load} />}
       {!running ? (
-        <div className="empty">内核未运行</div>
+        <div className="empty">{t("内核未运行")}</div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
                 <th style={{ width: 60 }}>#</th>
-                <th>类型</th>
-                <th>内容</th>
-                <th>目标</th>
+                <th>{t("类型")}</th>
+                <th>{t("内容")}</th>
+                <th>{t("目标")}</th>
               </tr>
             </thead>
             <tbody>
@@ -55,7 +56,7 @@ export default function Rules() {
               ))}
             </tbody>
           </table>
-          {shown.length === 0 && <div className="empty">没有规则</div>}
+          {shown.length === 0 && <div className="empty">{t("没有规则")}</div>}
         </div>
       )}
     </>

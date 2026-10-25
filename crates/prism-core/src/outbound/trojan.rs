@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::tls::Tls;
 use super::Outbound;
-use crate::common::{tcp_connect, udp_over_stream, Address, BoxedStream, Framing, UdpPipe};
+use crate::common::{udp_over_stream, Address, BoxedStream, Framing, UdpPipe};
 use crate::config::ProxyConfig;
 
 pub struct Trojan {
@@ -26,16 +26,15 @@ impl Trojan {
             server: p.server.clone(),
             port: p.port,
             hash: hex::encode(Sha224::digest(p.password.as_deref().unwrap_or("").as_bytes())),
-            tls: Tls::new(p.sni.as_deref().unwrap_or(&p.server), p.skip_cert_verify, &p.alpn)?,
+            tls: Tls::new(p.sni.as_deref().unwrap_or(&p.server), p.skip_cert_verify, &p.alpn, p.fingerprint.as_deref())?,
         })
     }
 }
 
 impl Trojan {
     /// TLS connection with the Trojan request header (cmd 1 = TCP, 3 = UDP).
-    async fn open(&self, cmd: u8, target: &Address) -> io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
-        let tcp = tcp_connect(&self.server, self.port).await?;
-        let mut s = self.tls.wrap(tcp).await?;
+    async fn open(&self, cmd: u8, target: &Address) -> io::Result<BoxedStream> {
+        let mut s = self.tls.connect(&self.server, self.port).await?;
         let mut head = Vec::with_capacity(128);
         head.extend_from_slice(self.hash.as_bytes());
         head.extend_from_slice(b"\r\n");

@@ -47,6 +47,18 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 netstack-smoltcp = "0.2"
 socket2 = { version = "0.6", features = ["all"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ml-kem = { version = "0.2", features = ["deterministic"] }
+rustls-webpki = { version = "0.103", features = ["ring"] }
+ring = "0.17"
+brotli-decompressor = "4"
+hmac = "0.12"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+bytes = "1"
+blake2 = "0.10"
+http = "1"
+quinn = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5"

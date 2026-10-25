@@ -1,11 +1,15 @@
 mod autostart;
+mod backup;
 mod core;
 mod download;
+mod patches;
 mod elevate;
 mod links;
 mod store;
 mod sysproxy;
+mod traffic;
 mod tunsvc;
+mod unlock;
 mod updater;
 
 use std::collections::HashMap;
@@ -32,6 +36,9 @@ pub struct AppState {
     imports: Mutex<Vec<PendingLink>>,
     /// One tray menu rebuild at a time, so an older one can't land last.
     tray_lock: tokio::sync::Mutex<()>,
+    traffic: traffic::Traffic,
+    /// Registered global hotkey id -> action.
+    hotkeys: Mutex<HashMap<u32, String>>,
 }
 
 type Res<T> = Result<T, String>;
@@ -79,7 +86,11 @@ struct Snapshot {
 
 #[tauri::command]
 async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
-    let s = st.settings();
+    let mut s = st.settings();
+    if !s.webdav.password.is_empty() {
+        // The UI only needs to know a password is stored.
+        s.webdav.password = "saved".into();
+    }
     let (on, server) = sysproxy::get();
     let path = |k| core::core_binary(&st.store, &s, k);
     let paths = json!({
@@ -127,6 +138,7 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
         s.mode = keep.mode;
         s.active_profile = keep.active_profile;
         s.app_rules = keep.app_rules;
+        s.webdav = keep.webdav;
     })?;
     let restart = old.core != new.core
         || old.mixed_port != new.mixed_port
@@ -141,7 +153,217 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
     if new.system_proxy {
         sysproxy::set(true, &format!("127.0.0.1:{}", new.mixed_port), &new.proxy_bypass).map_err(e)?;
     }
+    apply_theme(&app, &new.theme);
+    refresh_tray(&app);
+    let errors = apply_hotkeys(&app, &new);
+    if !errors.is_empty() {
+        return Err(format!("设置已保存，但以下快捷键无法注册（格式不对或已被其他程序占用）：{}", errors.join("；")));
+    }
     Ok(())
+}
+
+/// Window frame follows the chosen theme (None = the system's).
+fn apply_theme(app: &AppHandle, theme: &str) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_theme(match theme {
+            "light" => Some(tauri::Theme::Light),
+            "dark" => Some(tauri::Theme::Dark),
+            _ => None,
+        });
+    }
+}
+
+/// Global hotkey actions; the rest are tray menu ids.
+const HOTKEY_ACTIONS: [&str; 6] = ["toggle_window", "sysproxy", "tun", "mode_rule", "mode_global", "mode_direct"];
+
+/// (Re)registers the hotkeys from settings; returns the ones that failed.
+fn apply_hotkeys(app: &AppHandle, s: &Settings) -> Vec<String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    let mut map = HashMap::new();
+    let mut failed = Vec::new();
+    for (action, accel) in &s.hotkeys {
+        let accel = accel.trim();
+        if accel.is_empty() || !HOTKEY_ACTIONS.contains(&action.as_str()) {
+            continue;
+        }
+        match accel.parse::<Shortcut>() {
+            Ok(sc) => match gs.register(sc) {
+                Ok(()) => {
+                    map.insert(sc.id(), action.clone());
+                }
+                Err(err) => failed.push(format!("{accel}（{err}）")),
+            },
+            Err(err) => failed.push(format!("{accel}（{err}）")),
+        }
+    }
+    if let Some(st) = app.try_state::<AppState>() {
+        *st.hotkeys.lock().unwrap() = map;
+    }
+    failed
+}
+
+fn on_hotkey(app: &AppHandle, action: &str) {
+    if action == "toggle_window" {
+        let visible = app.get_webview_window("main").map(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false));
+        if visible == Some(true) {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.hide();
+            }
+        } else {
+            show_main(app);
+        }
+        return;
+    }
+    on_menu(app, action);
+}
+
+/// Saves the WebDAV target; `password` None keeps the stored one.
+#[tauri::command]
+fn webdav_save(st: State<'_, AppState>, url: String, username: String, password: Option<String>) -> Res<()> {
+    let enc = match password {
+        Some(p) => Some(backup::protect(&p).map_err(e)?),
+        None => None,
+    };
+    st.update(|s| {
+        s.webdav.url = url.trim().to_string();
+        s.webdav.username = username.trim().to_string();
+        if let Some(enc) = enc {
+            s.webdav.password = enc;
+        }
+    })?;
+    Ok(())
+}
+
+fn dav(st: &AppState) -> Res<backup::Dav> {
+    backup::Dav::new(&st.settings().webdav).map_err(e)
+}
+
+#[tauri::command]
+async fn webdav_test(st: State<'_, AppState>) -> Res<()> {
+    dav(&st)?.ensure_dir().await.map_err(e)
+}
+
+/// Uploads a backup; returns its file name.
+#[tauri::command]
+async fn backup_upload(st: State<'_, AppState>) -> Res<String> {
+    let data = backup::create(&st.store, &st.settings()).map_err(e)?;
+    let name = backup::file_name();
+    dav(&st)?.upload(&name, data).await.map_err(e)?;
+    Ok(name)
+}
+
+#[tauri::command]
+async fn backup_list(st: State<'_, AppState>) -> Res<Vec<backup::RemoteBackup>> {
+    dav(&st)?.list().await.map_err(e)
+}
+
+#[tauri::command]
+async fn backup_delete(st: State<'_, AppState>, name: String) -> Res<()> {
+    dav(&st)?.delete(&name).await.map_err(e)
+}
+
+#[tauri::command]
+async fn backup_restore(app: AppHandle, st: State<'_, AppState>, name: String) -> Res<()> {
+    let data = dav(&st)?.download(&name).await.map_err(e)?;
+    restore_backup(&app, &st, &data).await
+}
+
+/// Restores a backup file the user picked (base64).
+#[tauri::command]
+async fn backup_import(app: AppHandle, st: State<'_, AppState>, data: String) -> Res<()> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(e)?;
+    restore_backup(&app, &st, &bytes).await
+}
+
+/// Writes a backup to the Downloads folder and shows it in Explorer.
+#[tauri::command]
+fn backup_export(app: AppHandle, st: State<'_, AppState>) -> Res<String> {
+    let data = backup::create(&st.store, &st.settings()).map_err(e)?;
+    let dir = app.path().download_dir().map_err(e)?;
+    let path = dir.join(backup::file_name());
+    std::fs::write(&path, data).map_err(e)?;
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    Ok(path.display().to_string())
+}
+
+async fn restore_backup(app: &AppHandle, st: &AppState, data: &[u8]) -> Res<()> {
+    let s = {
+        let current = st.settings();
+        backup::restore(&st.store, &current, data).map_err(e)?
+    };
+    *st.settings.lock().unwrap() = s.clone();
+    note(app, st, "已从备份恢复设置和订阅".into());
+    apply_theme(app, &s.theme);
+    let _ = apply_hotkeys(app, &s);
+    if st.core.running().await.is_some() {
+        if s.active_profile.is_some() {
+            start(app, st).await?;
+        } else {
+            st.core.stop().await;
+        }
+    }
+    let _ = app.emit("core-changed", ());
+    refresh_tray(app);
+    Ok(())
+}
+
+/// Streaming / AI availability through the running core.
+#[tauri::command]
+async fn unlock_check(st: State<'_, AppState>) -> Res<Vec<unlock::Check>> {
+    let port = st.proxy_port().await.ok_or("请先启动内核")?;
+    unlock::run_all(Some(port)).await.map_err(e)
+}
+
+#[tauri::command]
+fn get_patches(st: State<'_, AppState>) -> patches::Patches {
+    patches::load(&st.store.dir)
+}
+
+/// Saves 覆写 after trying it on the active profile, then applies it.
+#[tauri::command]
+async fn save_patches(app: AppHandle, st: State<'_, AppState>, patches: patches::Patches) -> Res<()> {
+    let s = st.settings();
+    if let Some(id) = &s.active_profile {
+        let raw = st.store.read_content(id).map_err(e)?;
+        let name = st.store.profiles().into_iter().find(|p| &p.id == id).map(|p| p.name).unwrap_or_default();
+        let out = patches::apply(&patches, &raw, &name).map_err(e)?;
+        prism_core::config::parse_any(&out).map_err(|err| format!("覆写后的配置无法使用：{err:#}"))?;
+    }
+    patches::save(&st.store.dir, &patches).map_err(e)?;
+    reload_core(&app, &st).await
+}
+
+#[tauri::command]
+fn traffic_history(st: State<'_, AppState>) -> Vec<traffic::Day> {
+    st.traffic.history()
+}
+
+/// Samples the core's traffic counters into daily totals.
+async fn traffic_sampler(app: AppHandle) {
+    let mut tick = 0u32;
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let st = app.state::<AppState>();
+        let totals = match st.core.running().await {
+            Some(_) => core::api(&st.settings(), "GET", "/connections", None).await.ok(),
+            None => None,
+        };
+        match totals {
+            Some(v) => {
+                let up = v["uploadTotal"].as_u64().unwrap_or(0);
+                let down = v["downloadTotal"].as_u64().unwrap_or(0);
+                st.traffic.record(&chrono::Local::now().format("%Y-%m-%d").to_string(), up, down);
+            }
+            None => st.traffic.reset_baseline(),
+        }
+        tick += 1;
+        if tick % 12 == 0 {
+            st.traffic.save();
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -794,21 +1016,23 @@ fn menu_text(s: &str) -> String {
 fn build_tray_menu(app: &AppHandle, groups: &[TrayGroup]) -> tauri::Result<Menu<tauri::Wry>> {
     let st = app.state::<AppState>();
     let s = st.settings();
+    let en = s.lang == "en";
+    let tr = |zh: &'static str, english: &'static str| if en { english } else { zh };
     let menu = Menu::new(app)?;
-    menu.append(&MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "show", tr("显示主界面", "Show Prism"), true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&CheckMenuItem::with_id(app, "sysproxy", "系统代理", true, s.system_proxy, None::<&str>)?)?;
-    menu.append(&CheckMenuItem::with_id(app, "tun", "TUN 模式", true, s.tun, None::<&str>)?)?;
-    menu.append(&CheckMenuItem::with_id(app, "mode_rule", "规则模式", true, s.mode == Mode::Rule, None::<&str>)?)?;
-    menu.append(&CheckMenuItem::with_id(app, "mode_global", "全局模式", true, s.mode == Mode::Global, None::<&str>)?)?;
-    menu.append(&CheckMenuItem::with_id(app, "mode_direct", "直连模式", true, s.mode == Mode::Direct, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "sysproxy", tr("系统代理", "System proxy"), true, s.system_proxy, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "tun", tr("TUN 模式", "TUN mode"), true, s.tun, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "mode_rule", tr("规则模式", "Rule mode"), true, s.mode == Mode::Rule, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "mode_global", tr("全局模式", "Global mode"), true, s.mode == Mode::Global, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "mode_direct", tr("直连模式", "Direct mode"), true, s.mode == Mode::Direct, None::<&str>)?)?;
     if !groups.is_empty() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
         for g in groups {
             let sub = Submenu::new(app, menu_text(&format!("{}：{}", g.name, g.now)), true)?;
             for (m, d) in &g.members {
                 let delay = match d {
-                    Some(0) => "\t超时".to_string(),
+                    Some(0) => format!("\t{}", tr("超时", "timeout")),
                     Some(ms) => format!("\t{ms} ms"),
                     None => String::new(),
                 };
@@ -818,7 +1042,7 @@ fn build_tray_menu(app: &AppHandle, groups: &[TrayGroup]) -> tauri::Result<Menu<
         }
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", tr("退出", "Quit"), true, None::<&str>)?)?;
     Ok(menu)
 }
 
@@ -902,6 +1126,19 @@ pub fn run() {
             None => show_main(app),
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, sc, ev| {
+                    if ev.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    let action = app.try_state::<AppState>().and_then(|st| st.hotkeys.lock().unwrap().get(&sc.id()).cloned());
+                    if let Some(a) = action {
+                        on_hotkey(app, &a);
+                    }
+                })
+                .build(),
+        )
         .setup(move |app| {
             // PRISM_DATA_DIR: a separate data folder (portable use, tests).
             let dir = match std::env::var_os("PRISM_DATA_DIR") {
@@ -910,6 +1147,7 @@ pub fn run() {
             };
             let store = Store::new(dir)?;
             let settings = store.settings();
+            let traffic = traffic::Traffic::load(store.dir.join("traffic.json"));
             let hidden = autostarted && settings.silent_start && link.is_none();
             app.manage(AppState {
                 store,
@@ -918,7 +1156,17 @@ pub fn run() {
                 update: Mutex::new(None),
                 imports: Mutex::new(Vec::new()),
                 tray_lock: Default::default(),
+                traffic,
+                hotkeys: Default::default(),
             });
+            {
+                let s = app.state::<AppState>().settings();
+                apply_theme(app.handle(), &s.theme);
+                for f in apply_hotkeys(app.handle(), &s) {
+                    eprintln!("[prism] hotkey not registered: {f}");
+                }
+            }
+            tauri::async_runtime::spawn(traffic_sampler(app.handle().clone()));
 
             let menu = build_tray_menu(app.handle(), &[])?;
             TrayIconBuilder::with_id("main")
@@ -1027,6 +1275,18 @@ pub fn run() {
             set_clash_links,
             take_import_requests,
             update_tray,
+            traffic_history,
+            unlock_check,
+            get_patches,
+            save_patches,
+            webdav_save,
+            webdav_test,
+            backup_upload,
+            backup_list,
+            backup_delete,
+            backup_restore,
+            backup_import,
+            backup_export,
             install_tun_service,
             uninstall_tun_service,
             check_update,
@@ -1043,6 +1303,7 @@ pub fn run() {
     app.run(|app, ev| {
         if let RunEvent::Exit = ev {
             let st = app.state::<AppState>();
+            st.traffic.save();
             if st.settings().system_proxy {
                 let _ = sysproxy::set(false, "", "");
             }

@@ -3,10 +3,13 @@
 
 pub mod anytls;
 pub mod basic;
+pub mod ctls;
 pub mod group;
+pub mod hysteria2;
 pub mod shadowsocks;
 pub mod tls;
 pub mod trojan;
+pub mod vision;
 pub mod vless;
 
 use std::collections::HashMap;
@@ -85,7 +88,8 @@ pub fn build_proxy(p: &ProxyConfig) -> anyhow::Result<Arc<dyn Outbound>> {
         ProxyKind::Vless => Arc::new(vless::Vless::new(p)?),
         ProxyKind::Socks5 => Arc::new(basic::Socks5::new(p)?),
         ProxyKind::Http => Arc::new(basic::Http::new(p)?),
-        ProxyKind::Vmess | ProxyKind::Hysteria2 => {
+        ProxyKind::Hysteria2 => Arc::new(hysteria2::Hysteria2::new(p)?),
+        ProxyKind::Vmess => {
             anyhow::bail!("{}: {} is not supported by prism-core yet (use mihomo or sing-box core)", p.name, p.kind().clash_type())
         }
     })

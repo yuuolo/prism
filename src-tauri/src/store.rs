@@ -1,6 +1,6 @@
 //! Persistent settings and subscription profiles (JSON files in app data).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -31,6 +31,14 @@ pub struct Settings {
     pub auto_update_check: bool,
     /// When started with Windows, stay in the tray instead of opening the window.
     pub silent_start: bool,
+    /// system / light / dark
+    pub theme: String,
+    /// Interface language: zh / en
+    pub lang: String,
+    /// Global hotkeys: action -> accelerator such as "Ctrl+Alt+P".
+    pub hotkeys: BTreeMap<String, String>,
+    /// WebDAV backup target (password DPAPI-encrypted).
+    pub webdav: crate::backup::WebDav,
     pub tun: bool,
     /// Latency tests time a warm second request (mihomo unified-delay).
     pub unified_delay: bool,
@@ -59,6 +67,10 @@ impl Default for Settings {
             system_proxy: false,
             auto_update_check: true,
             silent_start: true,
+            theme: "system".into(),
+            lang: "zh".into(),
+            hotkeys: BTreeMap::new(),
+            webdav: Default::default(),
             tun: false,
             unified_delay: true,
             proxy_bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*;<local>".into(),

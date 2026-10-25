@@ -46,7 +46,8 @@ async fn wait_ready(l: &Layout) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runs_a_core_for_its_owner_only() {
-    let core = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/prism-core.exe");
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let core = target.join("debug").join("prism-core.exe");
     if !core.exists() {
         eprintln!("skipped: build prism-core first ({})", core.display());
         return;

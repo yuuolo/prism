@@ -91,7 +91,7 @@ pub async fn connect(host: &str, port: u16, https: bool, via: Option<&Arc<dyn Ou
         None => Box::new(crate::net::tcp_connect(host, port).await?),
     };
     if https {
-        Ok(Box::new(Tls::new(host, false, &["http/1.1".to_string()])?.wrap(raw).await?))
+        Ok(Box::new(Tls::new(host, false, &["http/1.1".to_string()], None)?.wrap(raw).await?))
     } else {
         Ok(raw)
     }

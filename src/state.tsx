@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, errText, type Snapshot, type UpdateInfo } from "./api";
+import { t } from "./i18n";
 
 interface Toast {
   id: number;
@@ -68,15 +69,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (msg.startsWith("NEED_ADMIN") && !retried) {
             if (
               confirm(
-                "TUN 模式需要管理员权限。\n\n推荐安装「TUN 服务」：只需授权一次，以后开启 TUN 无需以管理员身份运行 Prism。\n\n确定：安装 TUN 服务\n取消：查看其他选择",
+                t("TUN 模式需要管理员权限。\n\n推荐安装「TUN 服务」：只需授权一次，以后开启 TUN 无需以管理员身份运行 Prism。\n\n确定：安装 TUN 服务\n取消：查看其他选择"),
               )
             ) {
               if (await installTunService()) return attempt(true);
-            } else if (confirm("改为以管理员身份重新启动 Prism？")) {
+            } else if (confirm(t("改为以管理员身份重新启动 Prism？"))) {
               api.restartAsAdmin().catch((err) => toast(errText(err), "err"));
             }
           } else if (msg.startsWith("NEED_SERVICE_UPDATE") && !retried) {
-            if (confirm("TUN 服务中的内核与当前版本不一致（Prism 或内核更新过）。\n需要管理员授权一次来更新 TUN 服务，现在更新？")) {
+            if (confirm(t("TUN 服务中的内核与当前版本不一致（Prism 或内核更新过）。\n需要管理员授权一次来更新 TUN 服务，现在更新？"))) {
               if (await installTunService()) return attempt(true);
             }
           } else {

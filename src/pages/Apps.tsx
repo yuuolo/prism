@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, errText, type AppRule, type Outbounds, type ProcessInfo } from "../api";
 import { useApp } from "../state";
+import { t } from "../i18n";
 
 const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
@@ -9,11 +10,11 @@ function TargetSelect({ value, outs, onChange }: { value: string; outs: Outbound
   const known = !outs || value === "DIRECT" || value === "REJECT" || outs.groups.includes(value) || outs.proxies.includes(value);
   return (
     <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
-      {!known && <option value={value}>{value}（当前订阅中不存在）</option>}
-      <option value="DIRECT">DIRECT · 直连</option>
-      <option value="REJECT">REJECT · 拒绝</option>
+      {!known && <option value={value}>{t("{v}（当前订阅中不存在）", { v: value })}</option>}
+      <option value="DIRECT">{t("DIRECT · 直连")}</option>
+      <option value="REJECT">{t("REJECT · 拒绝")}</option>
       {outs && outs.groups.length > 0 && (
-        <optgroup label="代理组">
+        <optgroup label={t("代理组")}>
           {outs.groups.map((g) => (
             <option key={g} value={g}>
               {g}
@@ -22,7 +23,7 @@ function TargetSelect({ value, outs, onChange }: { value: string; outs: Outbound
         </optgroup>
       )}
       {outs && outs.proxies.length > 0 && (
-        <optgroup label="节点">
+        <optgroup label={t("节点")}>
           {outs.proxies.map((p) => (
             <option key={p} value={p}>
               {p}
@@ -103,38 +104,38 @@ export function AppRuleDialog({
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{initial.id ? "编辑应用规则" : "添加应用规则"}</h2>
+        <h2>{initial.id ? t("编辑应用规则") : t("添加应用规则")}</h2>
 
         <div className="row">
-          <input className="input" style={{ flex: 1 }} placeholder="搜索正在运行的程序" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <input className="input" style={{ flex: 1 }} placeholder={t("搜索正在运行的程序")} value={search} onChange={(e) => setSearch(e.target.value)} />
           <button className="btn" onClick={() => api.listProcesses().then(setProcs)}>
-            刷新
+            {t("刷新")}
           </button>
         </div>
         <div className="proc-list">
-          {procs === null && <div className="muted small" style={{ padding: 10 }}>读取中…</div>}
+          {procs === null && <div className="muted small" style={{ padding: 10 }}>{t("读取中…")}</div>}
           {shown.map((p) => (
             <div key={p.path} className={`proc-item ${picked?.path === p.path ? "sel" : ""}`} onClick={() => pick(p)} title={p.path}>
               <b>{p.name}</b>
               <span className="muted small">{p.path}</span>
             </div>
           ))}
-          {procs !== null && shown.length === 0 && <div className="muted small" style={{ padding: 10 }}>没有匹配的程序，可在下方手动输入</div>}
+          {procs !== null && shown.length === 0 && <div className="muted small" style={{ padding: 10 }}>{t("没有匹配的程序，可在下方手动输入")}</div>}
         </div>
 
         <div className="field">
-          <label>匹配方式</label>
+          <label>{t("匹配方式")}</label>
           <div className="seg">
             <button className={!byPath ? "on" : ""} onClick={() => setMode(false)}>
-              按程序名
+              {t("按程序名")}
             </button>
             <button className={byPath ? "on" : ""} onClick={() => setMode(true)}>
-              按完整路径
+              {t("按完整路径")}
             </button>
           </div>
         </div>
         <div className="field">
-          <label>{byPath ? "程序路径" : "程序名"}</label>
+          <label>{byPath ? t("程序路径") : t("程序名")}</label>
           <input
             className="input mono"
             placeholder={byPath ? "C:\\Program Files\\App\\app.exe" : "app.exe"}
@@ -146,21 +147,21 @@ export function AppRuleDialog({
           />
         </div>
         <div className="field">
-          <label>出口</label>
+          <label>{t("出口")}</label>
           <TargetSelect value={target} outs={outs} onChange={setTarget} />
         </div>
         <div className="small muted">
-          {byPath ? "只匹配这个路径的程序。" : "所有同名程序都会匹配（不区分大小写）。"} 规则模式下生效，优先于订阅中的规则。
-          {value.includes(",") && <span style={{ color: "var(--bad)" }}> 不能包含逗号。</span>}
+          {byPath ? t("只匹配这个路径的程序。") : t("所有同名程序都会匹配（不区分大小写）。")} {t("规则模式下生效，优先于订阅中的规则。")}
+          {value.includes(",") && <span style={{ color: "var(--bad)" }}> {t("不能包含逗号。")}</span>}
         </div>
 
         <div className="row">
           <span className="spacer" />
           <button className="btn" onClick={onClose}>
-            取消
+            {t("取消")}
           </button>
           <button className="btn primary" disabled={saving || invalid} onClick={save}>
-            {saving ? "保存中…" : "保存"}
+            {saving ? t("保存中…") : t("保存")}
           </button>
         </div>
       </div>
@@ -174,10 +175,10 @@ export default function Apps() {
   const [dialog, setDialog] = useState<(Partial<AppRule> & { path?: string }) | null>(null);
   const rules = snap?.settings.app_rules ?? [];
 
-  const save = async (next: AppRule[], ok = "已保存") => {
+  const save = async (next: AppRule[], ok = t("已保存")) => {
     try {
       await api.setAppRules(next);
-      toast(snap?.running ? `${ok}，内核已重新加载` : ok);
+      toast(snap?.running ? t("{msg}，内核已重新加载", { msg: ok }) : ok);
       return true;
     } catch (e) {
       toast(errText(e), "err");
@@ -191,37 +192,37 @@ export default function Apps() {
   return (
     <>
       <div className="page-head">
-        <h1>应用分流</h1>
-        <span className="tag">{rules.length} 条</span>
+        <h1>{t("应用分流")}</h1>
+        <span className="tag">{t("{n} 条", { n: rules.length })}</span>
         <button className="btn primary" onClick={() => setDialog({})}>
-          添加应用
+          {t("添加应用")}
         </button>
       </div>
 
       <div className="notice">
-        指定程序的连接走固定出口：直连、拒绝，或某个代理组 / 节点。规则模式下生效，排在订阅规则之前；三种内核都支持。
-        系统代理只对走系统代理的程序有效，其他程序（游戏、命令行等）请开启 TUN 模式。
+        {t("指定程序的连接走固定出口：直连、拒绝，或某个代理组 / 节点。规则模式下生效，排在订阅规则之前；三种内核都支持。")}
+        {t("系统代理只对走系统代理的程序有效，其他程序（游戏、命令行等）请开启 TUN 模式。")}
       </div>
 
-      {rules.length === 0 && <div className="empty">还没有应用规则。点「添加应用」从正在运行的程序中选择，或在「连接」页从某条连接直接添加。</div>}
+      {rules.length === 0 && <div className="empty">{t("还没有应用规则。点「添加应用」从正在运行的程序中选择，或在「连接」页从某条连接直接添加。")}</div>}
 
       {rules.map((r) => (
         <div className="card app-rule" key={r.id}>
-          <button className={`switch ${r.enabled ? "on" : ""}`} title={r.enabled ? "停用" : "启用"} onClick={() => save(rules.map((x) => (x.id === r.id ? { ...x, enabled: !x.enabled } : x)))} />
+          <button className={`switch ${r.enabled ? "on" : ""}`} title={r.enabled ? t("停用") : t("启用")} onClick={() => save(rules.map((x) => (x.id === r.id ? { ...x, enabled: !x.enabled } : x)))} />
           <div className="app-name" title={r.value}>
             <b>{r.by_path ? fileName(r.value) : r.value}</b>
             {r.by_path && <span className="muted small mono">{r.value}</span>}
           </div>
-          <span className="tag">{r.by_path ? "按路径" : "按程序名"}</span>
+          <span className="tag">{r.by_path ? t("按路径") : t("按程序名")}</span>
           <span className="muted">→</span>
           <div style={{ width: 200 }}>
             <TargetSelect value={r.target} outs={outs} onChange={(t) => save(rules.map((x) => (x.id === r.id ? { ...x, target: t } : x)))} />
           </div>
           <button className="btn sm" onClick={() => setDialog(r)}>
-            编辑
+            {t("编辑")}
           </button>
-          <button className="btn sm danger" onClick={() => save(rules.filter((x) => x.id !== r.id), "已删除")}>
-            删除
+          <button className="btn sm danger" onClick={() => save(rules.filter((x) => x.id !== r.id), t("已删除"))}>
+            {t("删除")}
           </button>
         </div>
       ))}
