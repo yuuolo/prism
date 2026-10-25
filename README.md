@@ -40,6 +40,7 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 - **应用分流**：PROCESS-NAME / PROCESS-PATH（含 `-REGEX`）规则，通过 Windows TCP/UDP 连接表识别程序；客户端「应用分流」页按程序选择出口，三种内核通用
 - **软件更新**：启动时检查 GitHub Releases，下载后校验发布签名（minisign，版本绑定）再安装
 - **代理页**：全部测速、按延迟 / 名称排序、搜索节点；托盘菜单直接切换节点；**解锁检测**（Netflix、YouTube Premium、ChatGPT、Claude、Gemini 等）
+- **连接页导出**：把（过滤后的）连接导出为 Excel / CSV / JSON / HTML / Markdown
 - **覆写**：全局或按订阅的 Merge（YAML）和 Script（JavaScript，内置 Boa 引擎）
 - **备份与同步**：WebDAV 云端备份 / 恢复、本地导出导入（密码用 DPAPI 加密）
 - **外观**：浅色 / 深色主题、中文 / English 界面、全局快捷键、最近 30 天流量统计
@@ -51,9 +52,10 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 - **TLS 指纹**：`client-fingerprint` 时使用自研 TLS 1.3 客户端，ClientHello 与 Chrome 一致（JA4 `t13d1516h2_8daaf6152771_d8a2da3f94cd`，X25519MLKEM768）
 - **VLESS Reality / Vision**（UDP 经 XUDP）、**Hysteria2**（QUIC，salamander 混淆，UDP 分片）
 - **TUIC v5**（native / quic 两种 UDP 模式，cubic / new_reno / bbr）、**WireGuard**（程序内协议栈，支持 WARP 的 reserved）
+- **VMess**（AEAD，aes-128-gcm / chacha20-poly1305 / none）与 **WebSocket / HTTPUpgrade / gRPC 传输**（VLESS、Trojan、VMess 通用，可叠加 TLS、REALITY 和 TLS 指纹）
 - **链式代理**：`dialer-proxy` 和 `relay` 组，UDP 类协议也可经前一跳转发；**组合规则** `AND` / `OR` / `NOT` 与 `SRC-GEOIP`
 
-**暂不支持**（需要时切换到 mihomo / sing-box 内核）：VMess、WebSocket/gRPC 传输、Shadowsocks 插件、`mrs` 格式规则集、DNS fallback、QUIC/DoH3 上游、TUN 的 IPv6 路由。
+**暂不支持**（需要时切换到 mihomo / sing-box 内核）：HTTP/2、xhttp 等传输，旧式（非 AEAD）VMess 认证、Shadowsocks 插件、`mrs` 格式规则集、DNS fallback、QUIC/DoH3 上游、TUN 的 IPv6 路由。
 
 > prism-core 的 TUN 已在真实网卡上使用：路由接管、DNS 劫持 + fake-ip、直连 TCP、经代理的 UDP 均正常；经代理的 TCP 曾因 fake-ip 被 IP 规则误判为直连，已修复（`crates/prism-core/tests/fake_ip_rules.rs`）。
 

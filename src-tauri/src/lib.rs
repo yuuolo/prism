@@ -4,6 +4,7 @@ mod core;
 mod download;
 mod patches;
 mod elevate;
+mod export;
 mod links;
 mod store;
 mod sysproxy;
@@ -284,6 +285,20 @@ fn backup_export(app: AppHandle, st: State<'_, AppState>) -> Res<String> {
     let data = backup::create(&st.store, &st.settings()).map_err(e)?;
     let dir = app.path().download_dir().map_err(e)?;
     let path = dir.join(backup::file_name());
+    std::fs::write(&path, data).map_err(e)?;
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    Ok(path.display().to_string())
+}
+
+/// Writes a table from the UI (`what` names it, e.g. connections) to the
+/// Downloads folder as `format` and shows it in Explorer.
+#[tauri::command]
+fn export_table(app: AppHandle, table: export::Table, format: String, what: String) -> Res<String> {
+    if !export::FORMATS.contains(&format.as_str()) {
+        return Err(format!("不支持的导出格式 {format}"));
+    }
+    let data = export::render(&table, &format).map_err(e)?;
+    let path = app.path().download_dir().map_err(e)?.join(export::file_name(&what, &format));
     std::fs::write(&path, data).map_err(e)?;
     let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
     Ok(path.display().to_string())
@@ -1307,6 +1322,7 @@ pub fn run() {
             backup_restore,
             backup_import,
             backup_export,
+            export_table,
             install_tun_service,
             uninstall_tun_service,
             check_update,

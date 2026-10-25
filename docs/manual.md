@@ -69,6 +69,9 @@
 - 实时列出经过内核的连接：主机、发起连接的**程序**（鼠标悬停显示完整路径）、入站类型和 TCP / UDP、命中的规则、链路（如 `节点选择 → 自动选择 → 东京`）、速度和流量。
 - 可按主机 / 程序 / 规则 / 节点过滤，**暂停** 刷新，单独 **关闭** 某个连接或 **全部关闭**。
 - 某条连接后面的 **分流** 按钮：直接为这个程序添加应用分流规则（见下面的「应用分流」）。
+- **导出**：把当前列表导出为 Excel（`.xlsx`）、CSV、JSON、HTML 或 Markdown 文件。输入了过滤条件时只导出过滤后的连接；想导出某一刻的状态，可先 **暂停**。文件保存到「下载」文件夹（`prism-connections-日期-时间.扩展名`），并在资源管理器中选中。
+  - 导出的列：开始时间、主机、目标 IP、端口、来源、程序、程序路径、入站、网络、规则、规则内容、链路、上传 / 下载（字节）、导出时的上传 / 下载速度（字节/秒）。流量和速度在 Excel 和 JSON 中是数字，可以直接排序、求和。
+  - CSV 带 UTF-8 BOM，用 Excel 打开中文不会乱码；以 `=`、`+`、`-`、`@` 开头的内容前会加 `'`，防止被当作公式执行。
 
 ### 规则
 - 显示内核实际加载的规则（不受支持而被跳过的规则不会出现在这里，原因见日志）。
@@ -182,7 +185,9 @@ append-proxies:
 | 链式代理（`dialer-proxy`、`relay` 组） | ✅ | ✅（`relay` 组转换为 `dialer-proxy`） | ✅（转换为 `detour`） |
 | 组合规则 `AND` / `OR` / `NOT`、`SRC-GEOIP` | ✅ | ✅ | ✅ |
 | TLS 指纹（`client-fingerprint`） | ✅（Chrome 指纹） | ✅ | ✅ |
-| VMess / WebSocket / gRPC | ❌ | ✅ | ✅ |
+| VMess（AEAD） | ✅ | ✅ | ✅ |
+| WebSocket / HTTPUpgrade / gRPC 传输 | ✅ | ✅ | ✅ |
+| HTTP/2、xhttp 等其他传输 | ❌ | 部分 | 部分 |
 | 经代理转发 UDP | ✅（每个目标一条会话） | ✅ | ✅ |
 | TUN 模式 | ✅ | ✅ | ✅ |
 | DNS 模块 / fake-ip | ✅ | ✅ | ✅ |
@@ -190,7 +195,7 @@ append-proxies:
 | 应用分流（按程序选择出口） | ✅ | ✅ | ✅ |
 
 - 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS（含 Reality / Vision）/ Hysteria2 / TUIC / WireGuard 节点：**Prism 内核**即可，体积小、启动快，TCP 和 UDP 都可经代理。
-- 订阅含 VMess、WebSocket / gRPC 传输的节点，或用到 `.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
+- 订阅含 HTTP/2、xhttp 等其他传输的节点、带插件的 Shadowsocks 节点，或用到 `.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
 - 同一份订阅三个内核通用，Prism 会自动转换格式（见第 5、8 节）。Prism 内核遇到不支持的节点或规则会跳过，并在日志中给出警告。
 
 ## 4. 系统代理与 TUN 模式
@@ -357,7 +362,7 @@ Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手
 |---|---|
 | `password` | 密码 |
 | `sni`、`skip-cert-verify`、`alpn` | 同 AnyTLS |
-| `network` | Prism 内核只支持默认的 TCP；`ws` / `grpc` 需切换到 Mihomo / sing-box |
+| `network` | 传输方式，见下面的「传输方式」 |
 
 **VLESS**（`type: vless`）
 
@@ -369,7 +374,33 @@ Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手
 | `skip-cert-verify`、`alpn` | 同上 |
 | `flow` | `xtls-rprx-vision`（需 TLS 或 Reality）。Vision 节点的 UDP 以 XUDP 方式转发（每个 UDP 会话一条连接） |
 | `reality-opts` | `public-key`、`short-id`：VLESS Reality；`servername` 为伪装的网站域名 |
-| `network: ws/grpc` | Prism 内核不支持（这样的节点会被跳过） |
+| `network` | 传输方式，见下面的「传输方式」。`xtls-rprx-vision` 只能用默认的 TCP |
+
+**VMess**（`type: vmess`）
+
+| 字段 | 说明 |
+|---|---|
+| `uuid` | 用户 UUID |
+| `alterId` | 填 `0`。Prism 内核只使用 AEAD 认证（当前 V2Ray / Xray / sing-box 服务端的默认要求），不使用旧式 MD5 认证 |
+| `cipher` | `auto`（= `aes-128-gcm`）、`aes-128-gcm`、`chacha20-poly1305`、`none` / `zero` |
+| `tls`、`servername`、`skip-cert-verify`、`alpn`、`client-fingerprint` | TLS 参数，同 VLESS |
+| `network` | 传输方式，见下面的「传输方式」 |
+
+UDP 以 VMess 自身的 UDP 请求转发（每个目标一条连接）。
+
+**传输方式**（VLESS、Trojan、VMess 的 `network`）
+
+| `network` | 选项 | 说明 |
+|---|---|---|
+| 不写或 `tcp` | | 直接在 TCP / TLS 上传输 |
+| `ws` | `ws-opts: { path: /路径, headers: { Host: 域名 } }` | WebSocket |
+| `ws` + `ws-opts.v2ray-http-upgrade: true` | 同上 | HTTPUpgrade：只用 WebSocket 的升级请求，之后直接传输（sing-box 中为 `httpupgrade` 传输） |
+| `grpc` | `grpc-opts: { grpc-service-name: 服务名 }` | gRPC（HTTP/2，`/服务名/Tun`） |
+| `http`、`h2` 等 | | Prism 内核不支持，这样的节点会被跳过 |
+
+- 开启 TLS 且没写 `alpn` 时，WebSocket / HTTPUpgrade 使用 `http/1.1`，gRPC 使用 `h2`。
+- `Host` 不写时，开启 TLS 用 `servername`（或 `sni`），否则用服务器地址。
+- 路径里的 `?ed=2048` 等早期数据参数会原样发送，不使用早期数据（服务端兼容）。
 
 **SOCKS5**（`type: socks5`）、**HTTP**（`type: http`）
 
@@ -418,7 +449,7 @@ Prism 内核在程序内实现 WireGuard 和 TCP/IP 协议栈，不创建网卡�
 
 `dialer-proxy` 写一个节点或代理组的名字：连接这个节点的服务器时先经过它（链式代理）。TUIC、Hysteria2、WireGuard 这类走 UDP 的节点需要前一跳支持 UDP。前一跳又回到自己（例如 `dialer-proxy` 指向的组当前选中了自己）时，连接会失败并在日志中提示，不会卡死。
 
-**仅 Mihomo / sing-box 支持的类型**：`vmess`，以及上面标注不支持的传输方式。Prism 能识别并在转换时保留它们（`ws-opts`、`grpc-opts` 等），但 Prism 内核运行时会跳过这些节点。
+**仅 Mihomo / sing-box 支持的**：上面标注不支持的传输方式和插件。Prism 能识别并在转换时保留它们，但 Prism 内核运行时会跳过这些节点。
 
 ### 6.4 proxy-groups（代理组）
 
@@ -656,8 +687,8 @@ vless://UUID@服务器:端口?security=reality&sni=域名&pbk=公钥&sid=短ID&f
 | 参数 | 说明 |
 |---|---|
 | `security` | `none` / `tls` / `reality` |
-| `type` | `tcp`（默认）/ `ws` / `grpc` |
-| `path`、`host` | WebSocket 路径和 Host |
+| `type` | `tcp`（默认）/ `ws` / `httpupgrade` / `grpc` |
+| `path`、`host` | WebSocket / HTTPUpgrade 路径和 Host |
 | `serviceName` | gRPC 服务名 |
 | `flow`、`pbk`、`sid` | Vision / Reality 参数 |
 
@@ -666,6 +697,8 @@ vless://UUID@服务器:端口?security=reality&sni=域名&pbk=公钥&sid=短ID&f
 ```
 vmess://BASE64({"ps":"节点名","add":"服务器","port":"443","id":"UUID","aid":"0","scy":"auto","net":"ws","host":"域名","path":"/路径","tls":"tls","sni":"域名"})
 ```
+
+`net` 为 `tcp` / `ws` / `httpupgrade` / `grpc`（gRPC 时 `path` 是服务名）；`fp`、`alpn` 为 TLS 指纹和 ALPN。
 
 **Hysteria2**
 
@@ -695,7 +728,7 @@ wg://...（同上）
 socks5://用户名:密码@服务器:端口#节点名
 ```
 
-VLESS / Trojan 的 WS / gRPC 传输和 VMess 只能在 Mihomo / sing-box 内核下使用；VLESS Reality / Vision、Hysteria2、TUIC、WireGuard 三个内核都可用。
+以上节点类型和 WS / HTTPUpgrade / gRPC 传输三个内核都可用；其他传输（`h2`、`xhttp` 等）只能在 Mihomo / sing-box 内核下使用。
 
 ## 8. sing-box JSON 与格式转换
 

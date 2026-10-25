@@ -176,6 +176,14 @@ export interface Connection {
   rulePayload: string;
 }
 
+export type ExportFormat = "xlsx" | "csv" | "json" | "html" | "md";
+
+/** A table for `exportTable`: numbers stay numbers in Excel / JSON. */
+export interface ExportTable {
+  headers: string[];
+  rows: (string | number)[][];
+}
+
 export interface ConnectionsResp {
   downloadTotal: number;
   uploadTotal: number;
@@ -220,6 +228,8 @@ export const api = {
   getPatches: (profile: string | null) => invoke<Patches>("get_patches", { profile }),
   savePatches: (patches: Patches, profile: string | null) => invoke<void>("save_patches", { patches, profile }),
   patchedProfiles: () => invoke<string[]>("patched_profiles"),
+  /** Saves to the Downloads folder; returns the file path. */
+  exportTable: (table: ExportTable, format: ExportFormat, what: string) => invoke<string>("export_table", { table, format, what }),
   webdavSave: (url: string, username: string, password: string | null) => invoke<void>("webdav_save", { url, username, password }),
   webdavTest: () => invoke<void>("webdav_test"),
   backupUpload: () => invoke<string>("backup_upload"),

@@ -172,6 +172,10 @@ export function installDevMock() {
     }),
     save_patches: () => null,
     patched_profiles: () => ["demo"],
+    export_table: (a) => {
+      console.log("export_table", a);
+      return `C:\\Users\\me\\Downloads\\prism-${a.what}-20261025-120000.${a.format}`;
+    },
     unlock_check: async () => {
       await new Promise((r) => setTimeout(r, 900));
       return [

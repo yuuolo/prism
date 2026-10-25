@@ -162,16 +162,18 @@ fn parse_generic(line: &str, scheme: &str) -> Result<ProxyConfig> {
     }
     if matches!(kind, ProxyKind::Vless | ProxyKind::Trojan) {
         match q.get("type").map(String::as_str) {
-            Some("ws") => {
-                p.network = Some("ws".into());
+            Some(t @ ("ws" | "httpupgrade")) => {
+                p.network = Some(t.into());
                 p.ws_path = q.get("path").cloned();
-                p.ws_host = q.get("host").cloned();
+                p.ws_host = q.get("host").cloned().filter(|h| !h.is_empty());
             }
             Some("grpc") => {
                 p.network = Some("grpc".into());
                 p.grpc_service = q.get("serviceName").cloned();
             }
-            _ => {}
+            None | Some("" | "tcp" | "raw") => {}
+            // h2, xhttp, kcp...: kept so the node isn't dialed as plain TCP.
+            Some(t) => p.network = Some(t.into()),
         }
     }
     Ok(p)
@@ -226,7 +228,11 @@ fn parse_vmess(line: &str) -> Result<ProxyConfig> {
     };
     let server = st("add").ok_or_else(|| anyhow!("vmess: missing add"))?;
     let port: u16 = st("port").and_then(|p| p.parse().ok()).ok_or_else(|| anyhow!("vmess: bad port"))?;
-    let net = st("net").filter(|n| n != "tcp");
+    let mut net = st("net").filter(|n| n != "tcp" && n != "raw");
+    // tcp with an HTTP header ("obfs") is a different transport.
+    if net.is_none() && st("type").as_deref() == Some("http") {
+        net = Some("http".into());
+    }
     Ok(ProxyConfig {
         name: st("ps").unwrap_or_else(|| format!("{server}:{port}")),
         kind: Some(ProxyKind::Vmess),
@@ -235,6 +241,8 @@ fn parse_vmess(line: &str) -> Result<ProxyConfig> {
         cipher: st("scy").or(Some("auto".into())),
         tls: st("tls").as_deref() == Some("tls"),
         sni: st("sni"),
+        alpn: st("alpn").map(|a| a.split(',').map(String::from).collect()).unwrap_or_default(),
+        fingerprint: st("fp"),
         ws_path: st("path"),
         ws_host: st("host"),
         grpc_service: if net.as_deref() == Some("grpc") { st("path") } else { None },

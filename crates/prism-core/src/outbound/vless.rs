@@ -1,4 +1,5 @@
-//! VLESS over TCP, TLS or REALITY, with optional XTLS Vision
+//! VLESS over TCP, TLS or REALITY (optionally over WebSocket, HTTPUpgrade
+//! or gRPC), with optional XTLS Vision
 //! (`flow: xtls-rprx-vision`).
 //!
 //! Request:  ver(0) uuid[16] addons_len addons cmd(1=tcp, 2=udp, 3=mux) [port u16 BE atyp addr]
@@ -17,6 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::ctls::{self, Reality};
 use super::tls::Tls;
+use super::transport::Transport;
 use super::vision::VisionStream;
 use super::{Dialer, Outbound};
 use crate::common::{pump, udp_over_stream, udp_pump, Address, BoxedStream, Framing, UdpPipe};
@@ -24,7 +26,7 @@ use crate::config::ProxyConfig;
 
 const VISION: &str = "xtls-rprx-vision";
 
-enum Transport {
+enum Security {
     Plain,
     Tls(Tls),
     /// The Chrome-style client: REALITY, or TLS when Vision needs to reach
@@ -38,7 +40,10 @@ pub struct Vless {
     port: u16,
     uuid: [u8; 16],
     vision: bool,
+    security: Security,
     transport: Transport,
+    /// Host header / gRPC authority.
+    host: String,
     dialer: Dialer,
 }
 
@@ -51,30 +56,41 @@ impl Vless {
         };
         let uuid = uuid::Uuid::parse_str(p.uuid.as_deref().unwrap_or("")).map_err(|_| anyhow::anyhow!("{}: invalid uuid", p.name))?;
         let sni = p.sni.clone().unwrap_or_else(|| p.server.clone());
-        let alpn = if p.alpn.is_empty() { vec!["h2".to_string(), "http/1.1".to_string()] } else { p.alpn.clone() };
-        let transport = if let Some(pk) = &p.reality_public_key {
+        let transport = Transport::from_config(p)?;
+        if vision && !transport.is_tcp() {
+            anyhow::bail!("{}: {VISION} only works over plain TCP, not {}", p.name, p.network.as_deref().unwrap_or(""));
+        }
+        let alpn = match (p.alpn.is_empty(), transport.is_tcp()) {
+            (false, _) => p.alpn.clone(),
+            (true, true) => vec!["h2".to_string(), "http/1.1".to_string()],
+            (true, false) => transport.alpn(),
+        };
+        let host = p.ws_host.clone().unwrap_or_else(|| if p.tls { sni.clone() } else { p.server.clone() });
+        let security = if let Some(pk) = &p.reality_public_key {
             let reality = Reality::parse(pk, p.reality_short_id.as_deref().unwrap_or(""))
                 .ok_or_else(|| anyhow::anyhow!("{}: invalid reality-opts public-key / short-id", p.name))?;
-            Transport::Ctls(ctls::Config { server_name: sni, alpn, skip_verify: true, reality: Some(reality) })
+            Security::Ctls(ctls::Config { server_name: sni, alpn, skip_verify: true, reality: Some(reality) })
         } else if p.tls && vision {
-            Transport::Ctls(ctls::Config { server_name: sni, alpn, skip_verify: p.skip_cert_verify, reality: None })
+            Security::Ctls(ctls::Config { server_name: sni, alpn, skip_verify: p.skip_cert_verify, reality: None })
         } else if p.tls {
-            Transport::Tls(Tls::new(&sni, p.skip_cert_verify, &p.alpn, p.fingerprint.as_deref())?)
+            Security::Tls(Tls::new(&sni, p.skip_cert_verify, &alpn, p.fingerprint.as_deref())?)
         } else {
             if vision {
                 anyhow::bail!("{}: {VISION} needs TLS or REALITY", p.name);
             }
-            Transport::Plain
+            Security::Plain
         };
-        Ok(Vless { name: p.name.clone(), server: p.server.clone(), port: p.port, uuid: *uuid.as_bytes(), vision, transport, dialer })
+        Ok(Vless { name: p.name.clone(), server: p.server.clone(), port: p.port, uuid: *uuid.as_bytes(), vision, security, transport, host, dialer })
     }
 
+    /// Connection with TLS / REALITY and the transport (WebSocket, gRPC...).
     async fn dial(&self) -> io::Result<BoxedStream> {
-        match &self.transport {
-            Transport::Plain => self.dialer.tcp(&self.server, self.port).await,
-            Transport::Tls(t) => t.connect(&self.dialer, &self.server, self.port).await,
-            Transport::Ctls(cfg) => Ok(Box::new(ctls::connect(self.dialer.tcp(&self.server, self.port).await?, cfg).await?)),
-        }
+        let s: BoxedStream = match &self.security {
+            Security::Plain => self.dialer.tcp(&self.server, self.port).await?,
+            Security::Tls(t) => t.connect(&self.dialer, &self.server, self.port).await?,
+            Security::Ctls(cfg) => Box::new(ctls::connect(self.dialer.tcp(&self.server, self.port).await?, cfg).await?),
+        };
+        self.transport.wrap(s, &self.host).await
     }
 }
 
@@ -235,7 +251,7 @@ impl Outbound for Vless {
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
         if self.vision {
-            let Transport::Ctls(cfg) = &self.transport else { unreachable!() };
+            let Security::Ctls(cfg) = &self.security else { unreachable!() };
             let tls = ctls::connect(self.dialer.tcp(&self.server, self.port).await?, cfg).await?;
             // The header goes out plain (Vision pads what follows); the
             // stream skips the response header itself.
@@ -248,16 +264,13 @@ impl Outbound for Vless {
     }
     async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
         if self.vision {
-            let Transport::Ctls(cfg) = &self.transport else { unreachable!() };
+            let Security::Ctls(cfg) = &self.security else { unreachable!() };
             let tls = ctls::connect(self.dialer.tcp(&self.server, self.port).await?, cfg).await?;
             let mut v = VisionStream::new(tls, self.uuid);
             v.write_header(&header(&self.uuid, Some(VISION), CMD_MUX, target)).await?;
             return Ok(xudp(v, target.clone()));
         }
-        let mut s = match &self.transport {
-            Transport::Ctls(cfg) => Box::new(ctls::connect(self.dialer.tcp(&self.server, self.port).await?, cfg).await?) as BoxedStream,
-            _ => self.dial().await?,
-        };
+        let mut s = self.dial().await?;
         s.write_all(&header(&self.uuid, None, 2, target)).await?;
         s.flush().await?;
         Ok(udp_over_stream(s, Framing::Vless))

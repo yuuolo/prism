@@ -2222,6 +2222,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap 2.14.2",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "h3"
 version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4047,6 +4066,7 @@ dependencies = [
 name = "prism-core"
 version = "0.1.5"
 dependencies = [
+ "aes",
  "aes-gcm",
  "anyhow",
  "async-trait",
@@ -4060,6 +4080,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "h2",
  "h3",
  "h3-quinn",
  "hex",
@@ -4082,6 +4103,7 @@ dependencies = [
  "serde_yaml",
  "sha1",
  "sha2",
+ "sha3",
  "smoltcp",
  "socket2",
  "tokio",
@@ -5883,6 +5905,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]

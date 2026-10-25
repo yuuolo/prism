@@ -122,6 +122,10 @@ pub fn parse_proxy(m: &Mapping) -> Result<ProxyConfig> {
     if let Some(ws) = sub(m, "ws-opts") {
         p.ws_path = s(ws, "path");
         p.ws_host = sub(ws, "headers").and_then(|h| s(h, "Host").or_else(|| s(h, "host")));
+        // mihomo spells HTTPUpgrade as a WebSocket option.
+        if p.network.as_deref() == Some("ws") && b(ws, "v2ray-http-upgrade") {
+            p.network = Some("httpupgrade".into());
+        }
     }
     if let Some(g) = sub(m, "grpc-opts") {
         p.grpc_service = s(g, "grpc-service-name");
@@ -365,9 +369,13 @@ pub fn emit_proxy(p: &ProxyConfig) -> Value {
     put_opt(&mut m, "client-fingerprint", &p.fingerprint);
     put_opt(&mut m, "flow", &p.flow);
     if let Some(net) = &p.network {
-        put(&mut m, "network", net.clone());
-        if net == "ws" {
+        let upgrade = net == "httpupgrade";
+        put(&mut m, "network", if upgrade { "ws".to_string() } else { net.clone() });
+        if net == "ws" || upgrade {
             let mut ws = Mapping::new();
+            if upgrade {
+                put(&mut ws, "v2ray-http-upgrade", true);
+            }
             put(&mut ws, "path", p.ws_path.clone().unwrap_or_else(|| "/".into()));
             if let Some(h) = &p.ws_host {
                 let mut hd = Mapping::new();

@@ -9,10 +9,12 @@ pub mod group;
 pub mod hysteria2;
 pub mod shadowsocks;
 pub mod tls;
+pub mod transport;
 pub mod trojan;
 pub mod tuic;
 pub mod vision;
 pub mod vless;
+pub mod vmess;
 pub mod wireguard;
 
 use std::collections::HashMap;
@@ -88,7 +90,8 @@ pub type RegistryCell = Arc<OnceLock<Arc<Registry>>>;
 /// Builds a protocol outbound that reaches its server through `dialer`.
 /// Errors mean "unsupported by prism-core".
 pub fn build_proxy(p: &ProxyConfig, dialer: Dialer) -> anyhow::Result<Arc<dyn Outbound>> {
-    if p.network.as_deref().is_some_and(|n| n != "tcp") {
+    let transports = matches!(p.kind(), ProxyKind::Vless | ProxyKind::Trojan | ProxyKind::Vmess);
+    if !transports && p.network.as_deref().is_some_and(|n| n != "tcp") {
         anyhow::bail!("{}: transport {} is not supported by prism-core", p.name, p.network.as_deref().unwrap());
     }
     Ok(match p.kind() {
@@ -101,8 +104,6 @@ pub fn build_proxy(p: &ProxyConfig, dialer: Dialer) -> anyhow::Result<Arc<dyn Ou
         ProxyKind::Hysteria2 => Arc::new(hysteria2::Hysteria2::new(p, dialer)?),
         ProxyKind::Tuic => Arc::new(tuic::Tuic::new(p, dialer)?),
         ProxyKind::WireGuard => Arc::new(wireguard::WireGuard::new(p, dialer)?),
-        ProxyKind::Vmess => {
-            anyhow::bail!("{}: {} is not supported by prism-core yet (use mihomo or sing-box core)", p.name, p.kind().clash_type())
-        }
+        ProxyKind::Vmess => Arc::new(vmess::Vmess::new(p, dialer)?),
     })
 }

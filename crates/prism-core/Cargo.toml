@@ -1,6 +1,6 @@
 [package]
 name = "prism-core"
-description = "Prism proxy core: mixed inbound, rule routing, AnyTLS/Trojan/VLESS/Shadowsocks/Hysteria2/TUIC/WireGuard outbounds, Clash-compatible API"
+description = "Prism proxy core: mixed inbound, rule routing, AnyTLS/Trojan/VLESS/Shadowsocks/Hysteria2/TUIC/WireGuard/VMess outbounds, WebSocket/HTTPUpgrade/gRPC transports, Clash-compatible API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -59,6 +59,9 @@ bytes = "1"
 blake2 = "0.10"
 http = "1"
 quinn = "0.11"
+h2 = "0.4"
+sha3 = "0.10"
+aes = "0.8"
 boringtun = { version = "0.7", default-features = false }
 smoltcp = { version = "0.12", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "proto-ipv4-fragmentation", "proto-ipv6-fragmentation", "fragmentation-buffer-size-65536", "reassembly-buffer-size-65536", "reassembly-buffer-count-4"] }
 

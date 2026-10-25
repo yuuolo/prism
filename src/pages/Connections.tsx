@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { api, errText, fmtBytes, fmtSpeed, type AppRule, type Connection, type ConnectionsResp } from "../api";
+import { api, errText, fmtBytes, fmtSpeed, type AppRule, type Connection, type ConnectionsResp, type ExportFormat, type ExportTable } from "../api";
 import { useApp, usePoll } from "../state";
 import { AppRuleDialog } from "./Apps";
 import { t } from "../i18n";
@@ -9,12 +9,74 @@ interface Row extends Connection {
   downSpeed: number;
 }
 
+const EXPORT_FORMATS: [ExportFormat, string][] = [
+  ["xlsx", "Excel (.xlsx)"],
+  ["csv", "CSV (.csv)"],
+  ["json", "JSON (.json)"],
+  ["html", "HTML (.html)"],
+  ["md", "Markdown (.md)"],
+];
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/** Local time as `2026-10-25 14:03:09`. */
+function stamp(iso: string) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** The rows as shown (filtered), with raw byte counts for spreadsheets. */
+function exportTable(rows: Row[]): ExportTable {
+  return {
+    headers: [
+      t("开始时间"),
+      t("主机"),
+      t("目标 IP"),
+      t("端口"),
+      t("来源"),
+      t("程序"),
+      t("程序路径"),
+      t("入站"),
+      t("网络"),
+      t("规则"),
+      t("规则内容"),
+      t("链路"),
+      t("上传（字节）"),
+      t("下载（字节）"),
+      t("上传速度（字节/秒）"),
+      t("下载速度（字节/秒）"),
+    ],
+    rows: rows.map((c) => {
+      const m = c.metadata;
+      return [
+        stamp(c.start),
+        m.host || "",
+        m.destinationIP || "",
+        Number(m.destinationPort) || m.destinationPort || "",
+        m.sourceIP ? `${m.sourceIP}:${m.sourcePort}` : "",
+        m.process || "",
+        m.processPath || "",
+        m.type || "",
+        (m.network || "").toUpperCase(),
+        c.rule,
+        c.rulePayload,
+        [...c.chains].reverse().join(" → "),
+        c.upload,
+        c.download,
+        c.upSpeed,
+        c.downSpeed,
+      ];
+    }),
+  };
+}
+
 export default function Connections() {
   const { snap, run, toast, refresh } = useApp();
   const [ruleFor, setRuleFor] = useState<{ value: string; path: string } | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState("");
   const [paused, setPaused] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const prev = useRef<Map<string, Connection>>(new Map());
   const running = !!snap?.running;
 
@@ -45,6 +107,16 @@ export default function Connections() {
       )
     : rows;
 
+  const doExport = async (format: ExportFormat) => {
+    setExportOpen(false);
+    try {
+      const path = await api.exportTable(exportTable(shown), format, "connections");
+      toast(t("已导出 {n} 条连接到 {path}", { n: shown.length, path }));
+    } catch (e) {
+      toast(errText(e), "err");
+    }
+  };
+
   return (
     <>
       <div className="page-head">
@@ -54,6 +126,28 @@ export default function Connections() {
         <button className="btn" onClick={() => setPaused(!paused)}>
           {paused ? t("继续") : t("暂停")}
         </button>
+        <div className="menu-wrap">
+          <button
+            className="btn"
+            disabled={!running || shown.length === 0}
+            title={f ? t("导出过滤后的 {n} 条连接", { n: shown.length }) : t("导出全部 {n} 条连接", { n: shown.length })}
+            onClick={() => setExportOpen(!exportOpen)}
+          >
+            {t("导出")} ▾
+          </button>
+          {exportOpen && (
+            <>
+              <div className="menu-backdrop" onClick={() => setExportOpen(false)} />
+              <div className="menu">
+                {EXPORT_FORMATS.map(([fmt, label]) => (
+                  <button key={fmt} onClick={() => doExport(fmt)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
         <button className="btn danger" disabled={!running} onClick={() => run(() => api.core("DELETE", "/connections"), t("已关闭全部连接"))}>
           {t("全部关闭")}
         </button>

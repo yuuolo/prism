@@ -44,6 +44,13 @@ fn transport_json(p: &ProxyConfig) -> Option<Value> {
             }
             Some(t)
         }
+        "httpupgrade" => {
+            let mut t = json!({ "type": "httpupgrade", "path": p.ws_path.clone().unwrap_or_else(|| "/".into()) });
+            if let Some(h) = &p.ws_host {
+                t["host"] = json!(h);
+            }
+            Some(t)
+        }
         "grpc" => Some(json!({ "type": "grpc", "service_name": p.grpc_service.clone().unwrap_or_default() })),
         _ => None,
     }
@@ -802,7 +809,7 @@ pub fn parse(v: &Value) -> Result<Profile> {
             flow: st(ob, "flow"),
             network: st(&tr, "type"),
             ws_path: st(&tr, "path"),
-            ws_host: tr.get("headers").and_then(|h| st(h, "Host")),
+            ws_host: tr.get("headers").and_then(|h| st(h, "Host")).or_else(|| st(&tr, "host")),
             grpc_service: st(&tr, "service_name"),
             reality_public_key: st(&reality, "public_key"),
             reality_short_id: st(&reality, "short_id"),

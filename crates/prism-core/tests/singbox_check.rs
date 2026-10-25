@@ -53,8 +53,10 @@ proxies:
   - { name: hy, type: hysteria2, server: h.example.com, port: 443, password: pw, sni: h.example.com }
   - { name: tu, type: tuic, server: tu.example.com, port: 443, uuid: 0b6a0b4e-1111-4222-8333-444455556666, password: pw, congestion-controller: bbr, udp-relay-mode: native, alpn: [h3] }
   - { name: wg, type: wireguard, server: 162.159.192.1, port: 2408, private-key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", public-key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", ip: 172.16.0.2, ipv6: "fd01::2", reserved: [1, 2, 3], mtu: 1280, udp: true, dialer-proxy: ss1 }
+  - { name: vm, type: vmess, server: v.example.com, port: 443, uuid: 0b6a0b4e-1111-4222-8333-444455556666, alterId: 0, cipher: auto, tls: true, servername: v.example.com, network: grpc, grpc-opts: { grpc-service-name: g } }
+  - { name: vu, type: vmess, server: v.example.com, port: 80, uuid: 0b6a0b4e-1111-4222-8333-444455556666, alterId: 0, cipher: chacha20-poly1305, network: ws, ws-opts: { path: /u, headers: { Host: v.example.com }, v2ray-http-upgrade: true } }
 proxy-groups:
-  - { name: PROXY, type: select, proxies: [auto, "东京", ss1, tj, vr, hy, tu, wg, chain, DIRECT, REJECT] }
+  - { name: PROXY, type: select, proxies: [auto, "东京", ss1, tj, vr, hy, tu, wg, vm, vu, chain, DIRECT, REJECT] }
   - { name: chain, type: relay, proxies: [auto, ss1, tu] }
   - { name: auto, type: url-test, proxies: ["东京", ss1], url: "https://www.gstatic.com/generate_204", interval: 300 }
 rules:
