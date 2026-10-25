@@ -44,6 +44,8 @@ pub struct Settings {
     pub unified_delay: bool,
     pub proxy_bypass: String,
     pub active_profile: Option<String>,
+    /// Profiles whose nodes are added to the active one (合并订阅).
+    pub merge_profiles: Vec<String>,
     pub mihomo_path: Option<String>,
     pub singbox_path: Option<String>,
     pub test_url: String,
@@ -75,12 +77,25 @@ impl Default for Settings {
             unified_delay: true,
             proxy_bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*;<local>".into(),
             active_profile: None,
+            merge_profiles: Vec::new(),
             mihomo_path: None,
             singbox_path: None,
             test_url: config::DEFAULT_TEST_URL.into(),
             selections: HashMap::new(),
             app_rules: Vec::new(),
         }
+    }
+}
+
+impl Settings {
+    /// The merged profiles, without the active one.
+    pub fn merged(&self) -> Vec<String> {
+        self.merge_profiles.iter().filter(|id| Some(*id) != self.active_profile.as_ref()).cloned().collect()
+    }
+
+    /// Whether `id` feeds the running config (active or merged).
+    pub fn uses_profile(&self, id: &str) -> bool {
+        self.active_profile.as_deref() == Some(id) || self.merged().iter().any(|m| m == id)
     }
 }
 

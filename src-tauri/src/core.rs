@@ -66,29 +66,45 @@ fn overrides(s: &Settings) -> clash::Overrides {
     }
 }
 
-/// The active profile's content with the user's 覆写 applied.
-fn active_profile(store: &Store, s: &Settings) -> Result<String> {
+/// The active profile's content with the merged profiles' nodes added and
+/// the user's 覆写 applied, plus warnings from merging.
+fn active_profile_full(store: &Store, s: &Settings) -> Result<(String, Vec<String>)> {
     let id = s.active_profile.clone().ok_or_else(|| anyhow!("请先在「订阅」页导入并启用一个订阅"))?;
     let raw = store.read_content(&id)?.trim_start_matches('\u{feff}').to_string();
-    let name = store.profiles().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
-    crate::patches::apply_both(&crate::patches::load(&store.dir, None), &crate::patches::load(&store.dir, Some(&id)), &raw, &name)
+    let profiles = store.profiles();
+    let name = profiles.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
+    let parts: Vec<crate::merge::Part> = s
+        .merged()
+        .iter()
+        .filter_map(|m| {
+            let meta = profiles.iter().find(|p| &p.id == m)?;
+            Some(crate::merge::Part { name: meta.name.clone(), raw: store.read_content(m).ok()? })
+        })
+        .collect();
+    let (raw, warnings) = crate::merge::merge(&raw, &parts)?;
+    let out = crate::patches::apply_both(&crate::patches::load(&store.dir, None), &crate::patches::load(&store.dir, Some(&id)), &raw, &name)?;
+    Ok((out, warnings))
+}
+
+fn active_profile(store: &Store, s: &Settings) -> Result<String> {
+    active_profile_full(store, s).map(|(raw, _)| raw)
 }
 
 /// sing-box config for the active profile, before rule-sets are localized.
-fn singbox_config(store: &Store, s: &Settings) -> Result<Value> {
-    let raw = active_profile(store, s)?;
+fn singbox_config(store: &Store, s: &Settings) -> Result<(Value, Vec<String>)> {
+    let (raw, warnings) = active_profile_full(store, s)?;
     let o = overrides(s);
     let mut doc: Value = match config::detect(&raw) {
         Format::SingBox => serde_json::from_str(&raw)?,
         _ => singbox::emit(&config::parse_any(&raw)?, &o),
     };
     singbox::apply_overrides(&mut doc, &o);
-    Ok(doc)
+    Ok((doc, warnings))
 }
 
 /// Remote rule-sets the sing-box config uses (the app downloads them).
 pub fn singbox_rule_sets(store: &Store, s: &Settings) -> Result<Vec<singbox::RemoteRuleSet>> {
-    Ok(singbox::remote_rule_sets(&singbox_config(store, s)?))
+    Ok(singbox::remote_rule_sets(&singbox_config(store, s)?.0))
 }
 
 pub struct RuntimeConfig {
@@ -121,7 +137,7 @@ pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig
     let dir = store.runtime_dir();
     match s.core {
         CoreKind::Prism | CoreKind::Mihomo => {
-            let raw = active_profile(store, s)?;
+            let (raw, mut warnings) = active_profile_full(store, s)?;
             let mut doc: serde_yaml::Value = match config::detect(&raw) {
                 Format::Clash => serde_yaml::from_str(&raw)?,
                 _ => clash::emit(&config::parse_any(&raw)?),
@@ -130,14 +146,14 @@ pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig
             if s.core == CoreKind::Mihomo {
                 clash::relays_to_dialer_proxy(&mut doc);
             }
-            let warnings = app_warnings(clash::add_app_rules(&mut doc, &app_routes(s)));
+            warnings.extend(app_warnings(clash::add_app_rules(&mut doc, &app_routes(s))));
             let path = dir.join("config.yaml");
             std::fs::write(&path, serde_yaml::to_string(&doc)?)?;
             Ok(RuntimeConfig { path, warnings })
         }
         CoreKind::Singbox => {
-            let mut doc = singbox_config(store, s)?;
-            let mut warnings = app_warnings(singbox::add_app_rules(&mut doc, &app_routes(s)));
+            let (mut doc, mut warnings) = singbox_config(store, s)?;
+            warnings.extend(app_warnings(singbox::add_app_rules(&mut doc, &app_routes(s))));
             // sing-box exits if a remote rule-set can't be fetched at startup,
             // so it only ever gets the files the app downloaded.
             warnings.extend(

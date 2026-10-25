@@ -155,6 +155,17 @@ export default function Profiles() {
 
   if (!snap) return null;
   const active = snap.settings.active_profile;
+  const merged = (snap.settings.merge_profiles ?? []).filter((id) => id !== active && snap.profiles.some((p) => p.id === id));
+
+  const toggleMerge = (p: ProfileMeta) => {
+    const on = merged.includes(p.id);
+    const ids = on ? merged.filter((id) => id !== p.id) : [...merged, p.id];
+    act(
+      p.id,
+      () => api.setMergeProfiles(ids),
+      on ? t("已从当前订阅中移除「{name}」的节点", { name: p.name }) : t("已把「{name}」的节点合并到当前订阅", { name: p.name }),
+    );
+  };
 
   const importUrl = async () => {
     setBusy("import");
@@ -225,10 +236,19 @@ export default function Profiles() {
                 </div>
                 <span className="spacer" />
                 {patched.includes(p.id) && <span className="tag" title={t("这个订阅有自己的覆写")}>{t("已覆写")}</span>}
+                {merged.includes(p.id) && <span className="tag accent">{t("已合并")}</span>}
                 {active === p.id && <span className="tag accent">{t("使用中")}</span>}
               </div>
               <div className="row small muted" style={{ marginTop: 6 }}>
                 <span>{t("{n} 个节点", { n: p.nodes })}</span>
+                {active === p.id && merged.length > 0 && (
+                  <>
+                    <span>·</span>
+                    <span className="accent-text" title={t("合并了其他订阅的节点")}>
+                      {t("+{n} 个订阅", { n: merged.length })}
+                    </span>
+                  </>
+                )}
                 <span>·</span>
                 <span>{t(FORMAT_NAMES[p.format])}</span>
                 <span>·</span>
@@ -267,6 +287,14 @@ export default function Profiles() {
                   {t("覆写")}
                 </button>
                 <span className="spacer" />
+                {active && active !== p.id && (
+                  <label className="row small" style={{ gap: 6, cursor: "pointer", flexWrap: "nowrap" }} title={t("把这个订阅的节点加入当前订阅的代理组，规则仍用当前订阅的")}>
+                    <span className="muted" style={{ whiteSpace: "nowrap" }}>
+                      {t("合并")}
+                    </span>
+                    <button className={`switch ${merged.includes(p.id) ? "on" : ""}`} disabled={!!busy} onClick={() => toggleMerge(p)} />
+                  </label>
+                )}
                 <button
                   className="btn sm danger"
                   disabled={!!busy}

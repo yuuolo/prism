@@ -448,6 +448,21 @@ textarea.input {
   background: var(--panel-2);
   color: var(--muted);
   font-weight: 500;
+  white-space: nowrap;
+}
+
+.accent-text {
+  color: var(--accent);
+}
+
+/* Profile card info line: wrap between items, not inside them. */
+.card.profile .row.small {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.card.profile .row.small > span {
+  white-space: nowrap;
 }
 
 .tag.accent {

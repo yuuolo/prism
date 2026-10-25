@@ -27,6 +27,7 @@ export function installDevMock() {
     unified_delay: true,
     proxy_bypass: "localhost;127.*;<local>",
     active_profile: "demo",
+    merge_profiles: [] as string[],
     mihomo_path: null,
     singbox_path: null,
     test_url: "https://www.gstatic.com/generate_204",
@@ -159,6 +160,9 @@ export function installDevMock() {
     core_versions: () => ({ prism: "prism-core preview", mihomo: null, singbox: null }),
     profile_outbounds: () => ({ groups: ["节点选择", "自动选择"], proxies: ["东京", "香港"] }),
     list_processes: () => processes,
+    set_merge_profiles: (a) => {
+      settings.merge_profiles = a.ids as string[];
+    },
     set_app_rules: (a) => {
       settings.app_rules = a.rules as typeof settings.app_rules;
     },

@@ -26,6 +26,8 @@ export interface Settings {
   unified_delay: boolean;
   proxy_bypass: string;
   active_profile: string | null;
+  /** 合并订阅: profiles whose nodes are added to the active one. */
+  merge_profiles: string[];
   mihomo_path: string | null;
   singbox_path: string | null;
   test_url: string;
@@ -217,6 +219,7 @@ export const api = {
   listProcesses: () => invoke<ProcessInfo[]>("list_processes"),
   profileOutbounds: () => invoke<Outbounds>("profile_outbounds"),
   setAppRules: (rules: AppRule[]) => invoke<void>("set_app_rules", { rules }),
+  setMergeProfiles: (ids: string[]) => invoke<void>("set_merge_profiles", { ids }),
   setProfileInterval: (id: string, minutes: number) => invoke<void>("set_profile_interval", { id, minutes }),
   setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
   setClashLinks: (enable: boolean) => invoke<void>("set_clash_links", { enable }),

@@ -6,6 +6,7 @@ mod patches;
 mod elevate;
 mod export;
 mod links;
+mod merge;
 mod store;
 mod sysproxy;
 mod traffic;
@@ -13,7 +14,7 @@ mod tunsvc;
 mod unlock;
 mod updater;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -496,7 +497,7 @@ async fn refresh_profile(app: &AppHandle, st: &AppState, id: &str) -> Res<Profil
     let url = meta.url.clone().ok_or("本地配置无需更新")?;
     let sub = fetch_subscription(st, &url).await?;
     let meta = st.store.put(Some(id), &meta.name, Some(url), &sub.content, sub.usage, None).map_err(e)?;
-    if st.settings().active_profile.as_deref() == Some(id) {
+    if st.settings().uses_profile(id) {
         reload_core(app, st).await?;
     }
     Ok(meta)
@@ -506,7 +507,7 @@ async fn refresh_profile(app: &AppHandle, st: &AppState, id: &str) -> Res<Profil
 async fn save_profile_content(app: AppHandle, st: State<'_, AppState>, id: String, content: String) -> Res<ProfileMeta> {
     let meta = st.store.profiles().into_iter().find(|p| p.id == id).ok_or("订阅不存在")?;
     let meta = st.store.put(Some(&id), &meta.name, meta.url, &content, meta.usage, None).map_err(e)?;
-    if st.settings().active_profile.as_deref() == Some(id.as_str()) {
+    if st.settings().uses_profile(&id) {
         reload_core(&app, &st).await?;
     }
     Ok(meta)
@@ -563,18 +564,34 @@ fn read_profile(st: State<'_, AppState>, id: String) -> Res<String> {
 }
 
 #[tauri::command]
-async fn delete_profile(st: State<'_, AppState>, id: String) -> Res<()> {
+async fn delete_profile(app: AppHandle, st: State<'_, AppState>, id: String) -> Res<()> {
     if st.settings().active_profile.as_deref() == Some(id.as_str()) {
         if st.core.running().await.is_some() {
             return Err("不能删除正在使用的订阅，请先停止内核或切换订阅".into());
         }
         st.update(|s| s.active_profile = None)?;
     }
+    let was_merged = st.settings().uses_profile(&id);
     st.update(|s| {
         s.selections.remove(&id);
+        s.merge_profiles.retain(|m| m != &id);
     })?;
     patches::delete(&st.store.dir, &id);
-    st.store.delete(&id).map_err(e)
+    st.store.delete(&id).map_err(e)?;
+    if was_merged {
+        reload_core(&app, &st).await?;
+    }
+    Ok(())
+}
+
+/// 合并订阅: the profiles whose nodes are added to the active one.
+#[tauri::command]
+async fn set_merge_profiles(app: AppHandle, st: State<'_, AppState>, ids: Vec<String>) -> Res<()> {
+    let known: HashSet<String> = st.store.profiles().into_iter().map(|p| p.id).collect();
+    let mut ids: Vec<String> = ids.into_iter().filter(|id| known.contains(id)).collect();
+    ids.dedup();
+    st.update(|s| s.merge_profiles = ids)?;
+    reload_core(&app, &st).await
 }
 
 #[tauri::command]
@@ -1291,6 +1308,7 @@ pub fn run() {
             rename_profile,
             read_profile,
             delete_profile,
+            set_merge_profiles,
             activate_profile,
             start_core,
             stop_core,
