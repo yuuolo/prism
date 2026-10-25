@@ -1,8 +1,8 @@
 //! prism-core: a small rule-based proxy core.
 //!
 //! Mixed (SOCKS5 + HTTP) inbound and TUN -> rule router -> outbounds
-//! (AnyTLS, Shadowsocks AEAD, Trojan, VLESS, SOCKS5, HTTP, groups), TCP and
-//! UDP, with a DNS module (fake-ip), proxy / rule providers and a
+//! (AnyTLS, Shadowsocks AEAD, Trojan, VLESS, Hysteria2, TUIC, WireGuard,
+//! SOCKS5, HTTP, groups, relay chains), TCP and UDP, with a DNS module (fake-ip), proxy / rule providers and a
 //! Clash-compatible REST API. Config is Clash/mihomo YAML (or any format
 //! understood by [`config::parse_any`]).
 
@@ -162,15 +162,19 @@ pub async fn build(mut profile: Profile, home: &Path, env: &BuildEnv) -> Result<
     }
 
     // ---- protocol outbounds; drop the ones prism-core can't speak
+    let cell: outbound::RegistryCell = Arc::new(OnceLock::new());
+    let mut configs = HashMap::new();
     let mut map: HashMap<String, Arc<dyn Outbound>> = HashMap::new();
     let mut order = Vec::new();
     let mut kept = Vec::new();
     let provider_names: HashSet<String> = extra.iter().map(|p| p.name.clone()).collect();
     profile.proxies.extend(extra);
     for p in &profile.proxies {
-        match outbound::build_proxy(p) {
+        let dialer = outbound::Dialer::named(p.dialer_proxy.as_deref(), &cell);
+        match outbound::build_proxy(p, dialer) {
             Ok(o) => {
                 map.insert(p.name.clone(), o);
+                configs.insert(p.name.clone(), p.clone());
                 kept.push(p.clone());
             }
             Err(e) => warnings.push(e.to_string()),
@@ -186,7 +190,6 @@ pub async fn build(mut profile: Profile, home: &Path, env: &BuildEnv) -> Result<
     map.insert("DIRECT".into(), Arc::new(basic::Direct));
     map.insert("REJECT".into(), Arc::new(basic::Reject));
 
-    let cell: outbound::RegistryCell = Arc::new(OnceLock::new());
     let mut groups = Vec::new();
     let mut global_members = Vec::new();
     for g in &profile.groups {
@@ -209,7 +212,12 @@ pub async fn build(mut profile: Profile, home: &Path, env: &BuildEnv) -> Result<
     map.insert("GLOBAL".into(), global);
     order.insert(0, "GLOBAL".into());
 
-    let reg = Arc::new(Registry { map, order, delays: Default::default(), unified_delay: profile.general.unified_delay });
+    let reg = Arc::new(Registry { map, order, delays: Default::default(), unified_delay: profile.general.unified_delay, configs });
+    for p in &profile.proxies {
+        if let Some(d) = p.dialer_proxy.as_deref().filter(|d| reg.get(d).is_none()) {
+            warnings.push(format!("proxy {}: dialer-proxy {d} is not available, so this node can't connect", p.name));
+        }
+    }
     let _ = cell.set(reg.clone());
     for g in groups {
         g.spawn_health_loop(shutdown.clone());

@@ -72,19 +72,21 @@ function Editor({ profile, onClose }: { profile: ProfileMeta | null; onClose: ()
   );
 }
 
-/** 覆写 editor: Merge (YAML) and Script (JS) for every profile. */
-function PatchesEditor({ onClose }: { onClose: () => void }) {
+/** 覆写 editor: Merge (YAML) and Script (JS), for every profile or for one
+ * (`profile`), applied after the global set. */
+function PatchesEditor({ profile, live, onClose }: { profile: ProfileMeta | null; live: boolean; onClose: () => void }) {
   const { run } = useApp();
   const [p, setP] = useState<Patches | null>(null);
   const [tab, setTab] = useState<"merge" | "script">("merge");
   const [saving, setSaving] = useState(false);
+  const id = profile?.id ?? null;
   useEffect(() => {
-    api.getPatches().then(setP);
-  }, []);
+    api.getPatches(id).then(setP);
+  }, [id]);
   if (!p) return null;
   const save = async () => {
     setSaving(true);
-    const ok = await run(() => api.savePatches(p), t("覆写已保存并生效"));
+    const ok = await run(() => api.savePatches(p, id), live ? t("覆写已保存并生效") : t("覆写已保存"));
     setSaving(false);
     if (ok) onClose();
   };
@@ -92,8 +94,12 @@ function PatchesEditor({ onClose }: { onClose: () => void }) {
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t("覆写")}</h2>
-        <div className="small muted">{t("对所有订阅生效，在生成内核配置前应用（先 Merge，后 Script）。远程订阅更新后也会保留。")}</div>
+        <h2>{profile ? t("覆写 · {name}", { name: profile.name }) : t("全局覆写")}</h2>
+        <div className="small muted">
+          {profile
+            ? t("只对这个订阅生效，在全局覆写之后应用（先 Merge，后 Script）。远程订阅更新后也会保留。")
+            : t("对所有订阅生效，在生成内核配置前应用（先 Merge，后 Script）。远程订阅更新后也会保留。")}
+        </div>
         <div className="row">
           <div className="seg">
             <button className={tab === "merge" ? "on" : ""} onClick={() => setTab("merge")}>
@@ -120,7 +126,7 @@ function PatchesEditor({ onClose }: { onClose: () => void }) {
             : t("function main(config, profileName) { … return config; }。config 是订阅转换成的 Clash 配置；不能联网或读写文件。")}
         </div>
         <div className="row">
-          <span className="small muted">{t("保存前会先用当前订阅试运行，出错不会保存。")}</span>
+          <span className="small muted">{profile ? t("保存前会先用这个订阅试运行，出错不会保存。") : t("保存前会先用当前订阅试运行，出错不会保存。")}</span>
           <span className="spacer" />
           <button className="btn" onClick={onClose}>
             {t("取消")}
@@ -139,7 +145,13 @@ export default function Profiles() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<ProfileMeta | null | undefined>(undefined);
-  const [patching, setPatching] = useState(false);
+  // undefined = closed, null = the global set
+  const [patching, setPatching] = useState<ProfileMeta | null | undefined>(undefined);
+  const [patched, setPatched] = useState<string[]>([]);
+  const refreshPatched = () => api.patchedProfiles().then(setPatched, () => {});
+  useEffect(() => {
+    refreshPatched();
+  }, []);
 
   if (!snap) return null;
   const active = snap.settings.active_profile;
@@ -174,8 +186,8 @@ export default function Profiles() {
         <button className="btn" onClick={() => setEditing(null)}>
           {t("新建本地配置")}
         </button>
-        <button className="btn" onClick={() => setPatching(true)}>
-          {t("覆写")}
+        <button className="btn" onClick={() => setPatching(null)}>
+          {t("全局覆写")}
         </button>
       </div>
 
@@ -212,6 +224,7 @@ export default function Profiles() {
                   {p.name}
                 </div>
                 <span className="spacer" />
+                {patched.includes(p.id) && <span className="tag" title={t("这个订阅有自己的覆写")}>{t("已覆写")}</span>}
                 {active === p.id && <span className="tag accent">{t("使用中")}</span>}
               </div>
               <div className="row small muted" style={{ marginTop: 6 }}>
@@ -250,6 +263,9 @@ export default function Profiles() {
                 <button className="btn sm" onClick={() => setEditing(p)}>
                   {t("编辑")}
                 </button>
+                <button className="btn sm" onClick={() => setPatching(p)}>
+                  {t("覆写")}
+                </button>
                 <span className="spacer" />
                 <button
                   className="btn sm danger"
@@ -265,7 +281,16 @@ export default function Profiles() {
       </div>
 
       {editing !== undefined && <Editor profile={editing} onClose={() => setEditing(undefined)} />}
-      {patching && <PatchesEditor onClose={() => setPatching(false)} />}
+      {patching !== undefined && (
+        <PatchesEditor
+          profile={patching}
+          live={!patching || patching.id === active}
+          onClose={() => {
+            setPatching(undefined);
+            refreshPatched();
+          }}
+        />
+      )}
     </>
   );
 }

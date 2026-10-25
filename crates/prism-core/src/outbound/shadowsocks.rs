@@ -15,8 +15,8 @@ use rand::RngCore;
 use sha1::Sha1;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::Outbound;
-use crate::common::{invalid, other, pump, tcp_connect, udp_pump, Address, BoxedStream, UdpPipe};
+use super::{Dialer, Outbound};
+use crate::common::{invalid, pump, udp_pump, Address, BoxedStream, UdpPipe};
 use crate::config::ProxyConfig;
 
 const TAG: usize = 16;
@@ -126,10 +126,11 @@ pub struct Shadowsocks {
     port: u16,
     method: Method,
     key: Vec<u8>,
+    dialer: Dialer,
 }
 
 impl Shadowsocks {
-    pub fn new(p: &ProxyConfig) -> anyhow::Result<Self> {
+    pub fn new(p: &ProxyConfig, dialer: Dialer) -> anyhow::Result<Self> {
         let cipher = p.cipher.clone().unwrap_or_default();
         let method = Method::parse(&cipher)
             .ok_or_else(|| anyhow::anyhow!("{}: cipher {cipher} is not supported by prism-core", p.name))?;
@@ -139,6 +140,7 @@ impl Shadowsocks {
             port: p.port,
             method,
             key: evp_bytes_to_key(p.password.as_deref().unwrap_or("").as_bytes(), method.key_len()),
+            dialer,
         })
     }
 }
@@ -157,13 +159,7 @@ impl Outbound for Shadowsocks {
     /// AEAD UDP: each packet is `salt | seal(addr | payload)` with a fresh
     /// salt (so a fresh subkey) and nonce 0.
     async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
-        let server = *crate::net::resolve(&self.server, self.port)
-            .await?
-            .iter()
-            .min_by_key(|a| a.is_ipv6())
-            .ok_or_else(|| other("no address"))?;
-        let sock = crate::net::udp_socket(server).await?;
-        sock.connect(server).await?;
+        let (tx, mut rx) = self.dialer.udp(&self.server, self.port).await?.split();
         let (method, key, target) = (self.method, self.key.clone(), target.clone());
         Ok(udp_pump(move |mut out, inc| async move {
             let kl = method.key_len();
@@ -179,11 +175,11 @@ impl Outbound for Shadowsocks {
                             rand::thread_rng().fill_bytes(&mut pkt);
                             let mut c = Cipher::new(method, &key, &pkt);
                             pkt.extend(c.seal(&plain));
-                            sock.send(&pkt).await?;
+                            tx.send(&pkt).await?;
                         }
                         None => return Ok(()),
                     },
-                    r = sock.recv(&mut buf) => {
+                    r = rx.recv(&mut buf) => {
                         let n = r?;
                         if n < kl + TAG {
                             continue;
@@ -203,14 +199,14 @@ impl Outbound for Shadowsocks {
         }))
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
-        let tcp = tcp_connect(&self.server, self.port).await?;
+        let tcp = self.dialer.tcp(&self.server, self.port).await?;
         let (method, key) = (self.method, self.key.clone());
         let mut salt = vec![0u8; method.key_len()];
         rand::thread_rng().fill_bytes(&mut salt);
         let mut enc = Cipher::new(method, &key, &salt);
         let mut header = Vec::new();
         target.write_socks(&mut header);
-        let (mut rd, mut wr) = tcp.into_split();
+        let (mut rd, mut wr) = tokio::io::split(tcp);
         let mut first = salt;
         enc.seal_chunk(&header, &mut first);
         wr.write_all(&first).await?;

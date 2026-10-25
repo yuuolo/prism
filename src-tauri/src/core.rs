@@ -71,7 +71,7 @@ fn active_profile(store: &Store, s: &Settings) -> Result<String> {
     let id = s.active_profile.clone().ok_or_else(|| anyhow!("请先在「订阅」页导入并启用一个订阅"))?;
     let raw = store.read_content(&id)?.trim_start_matches('\u{feff}').to_string();
     let name = store.profiles().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
-    crate::patches::apply(&crate::patches::load(&store.dir), &raw, &name)
+    crate::patches::apply_both(&crate::patches::load(&store.dir, None), &crate::patches::load(&store.dir, Some(&id)), &raw, &name)
 }
 
 /// sing-box config for the active profile, before rule-sets are localized.
@@ -127,6 +127,9 @@ pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig
                 _ => clash::emit(&config::parse_any(&raw)?),
             };
             clash::apply_overrides(&mut doc, &overrides(s));
+            if s.core == CoreKind::Mihomo {
+                clash::relays_to_dialer_proxy(&mut doc);
+            }
             let warnings = app_warnings(clash::add_app_rules(&mut doc, &app_routes(s)));
             let path = dir.join("config.yaml");
             std::fs::write(&path, serde_yaml::to_string(&doc)?)?;

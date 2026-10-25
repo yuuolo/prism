@@ -4,13 +4,16 @@
 pub mod anytls;
 pub mod basic;
 pub mod ctls;
+pub mod dialer;
 pub mod group;
 pub mod hysteria2;
 pub mod shadowsocks;
 pub mod tls;
 pub mod trojan;
+pub mod tuic;
 pub mod vision;
 pub mod vless;
+pub mod wireguard;
 
 use std::collections::HashMap;
 use std::io;
@@ -22,6 +25,7 @@ use crate::common::{Address, BoxedStream, UdpPipe};
 use crate::config::{ProxyConfig, ProxyKind};
 use crate::delay::DelayStore;
 
+pub use dialer::Dialer;
 pub use group::ProxyGroup;
 
 #[async_trait]
@@ -50,6 +54,8 @@ pub struct Registry {
     pub delays: Arc<DelayStore>,
     /// mihomo's unified-delay: URL tests time only a warm second request.
     pub unified_delay: bool,
+    /// Configs of the protocol outbounds, for rebuilding them as relay hops.
+    pub configs: HashMap<String, ProxyConfig>,
 }
 
 impl Registry {
@@ -63,7 +69,10 @@ impl Registry {
         let mut out = self.get(name).ok_or_else(|| crate::common::other(format!("unknown proxy {name}")))?;
         let mut chain = vec![name.to_string()];
         for _ in 0..16 {
-            let Some(next) = out.as_group().map(|g| g.pick(target)) else { break };
+            // A relay group dials its chain itself.
+            let Some(next) = out.as_group().filter(|g| g.kind() != crate::config::GroupKind::Relay).map(|g| g.pick(target)) else {
+                break;
+            };
             let next = next.ok_or_else(|| crate::common::other(format!("group {} has no usable member", out.name())))?;
             chain.push(next.name().to_string());
             out = next;
@@ -76,19 +85,22 @@ impl Registry {
 /// constructed before the registry that contains them).
 pub type RegistryCell = Arc<OnceLock<Arc<Registry>>>;
 
-/// Builds a protocol outbound. Errors mean "unsupported by prism-core".
-pub fn build_proxy(p: &ProxyConfig) -> anyhow::Result<Arc<dyn Outbound>> {
+/// Builds a protocol outbound that reaches its server through `dialer`.
+/// Errors mean "unsupported by prism-core".
+pub fn build_proxy(p: &ProxyConfig, dialer: Dialer) -> anyhow::Result<Arc<dyn Outbound>> {
     if p.network.as_deref().is_some_and(|n| n != "tcp") {
         anyhow::bail!("{}: transport {} is not supported by prism-core", p.name, p.network.as_deref().unwrap());
     }
     Ok(match p.kind() {
-        ProxyKind::AnyTls => Arc::new(anytls::AnyTls::new(p)?),
-        ProxyKind::Shadowsocks => Arc::new(shadowsocks::Shadowsocks::new(p)?),
-        ProxyKind::Trojan => Arc::new(trojan::Trojan::new(p)?),
-        ProxyKind::Vless => Arc::new(vless::Vless::new(p)?),
-        ProxyKind::Socks5 => Arc::new(basic::Socks5::new(p)?),
-        ProxyKind::Http => Arc::new(basic::Http::new(p)?),
-        ProxyKind::Hysteria2 => Arc::new(hysteria2::Hysteria2::new(p)?),
+        ProxyKind::AnyTls => Arc::new(anytls::AnyTls::new(p, dialer)?),
+        ProxyKind::Shadowsocks => Arc::new(shadowsocks::Shadowsocks::new(p, dialer)?),
+        ProxyKind::Trojan => Arc::new(trojan::Trojan::new(p, dialer)?),
+        ProxyKind::Vless => Arc::new(vless::Vless::new(p, dialer)?),
+        ProxyKind::Socks5 => Arc::new(basic::Socks5::new(p, dialer)?),
+        ProxyKind::Http => Arc::new(basic::Http::new(p, dialer)?),
+        ProxyKind::Hysteria2 => Arc::new(hysteria2::Hysteria2::new(p, dialer)?),
+        ProxyKind::Tuic => Arc::new(tuic::Tuic::new(p, dialer)?),
+        ProxyKind::WireGuard => Arc::new(wireguard::WireGuard::new(p, dialer)?),
         ProxyKind::Vmess => {
             anyhow::bail!("{}: {} is not supported by prism-core yet (use mihomo or sing-box core)", p.name, p.kind().clash_type())
         }

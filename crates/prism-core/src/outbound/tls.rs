@@ -109,15 +109,15 @@ impl Tls {
     }
 
     /// Dials `host:port` and completes the TLS handshake.
-    pub async fn connect(&self, host: &str, port: u16) -> io::Result<crate::common::BoxedStream> {
-        let tcp = crate::common::tcp_connect(host, port).await?;
+    pub async fn connect(&self, dialer: &super::Dialer, host: &str, port: u16) -> io::Result<crate::common::BoxedStream> {
+        let tcp = dialer.tcp(host, port).await?;
         if let Some(cfg) = self.chrome.as_ref().filter(|_| !self.tls12_only.load(Ordering::Relaxed)) {
             match super::ctls::connect(tcp, cfg).await {
                 Ok(s) => return Ok(Box::new(s)),
                 Err(e) if e.kind() == io::ErrorKind::Unsupported => {
                     tracing::info!("{host}:{port} only speaks TLS 1.2; using the default TLS client");
                     self.tls12_only.store(true, Ordering::Relaxed);
-                    let tcp = crate::common::tcp_connect(host, port).await?;
+                    let tcp = dialer.tcp(host, port).await?;
                     return Ok(Box::new(self.wrap(tcp).await?));
                 }
                 Err(e) => return Err(e),

@@ -121,13 +121,14 @@
 - 组合键需包含 Ctrl / Alt / Shift / Win 中的至少一个（F1–F12 可单独使用）。格式不对或已被其他程序占用时，保存后会提示哪一个没有注册成功。
 
 ### 覆写
-在 **订阅** 页点 **覆写**，可以写对所有订阅生效的修改。它们在生成内核配置前应用（先 Merge 后 Script），远程订阅更新后依然有效，三种内核都支持。
+在 **订阅** 页点 **全局覆写**，可以写对所有订阅生效的修改；点某个订阅卡片上的 **覆写**，写只对这个订阅生效的修改（卡片上会显示「已覆写」）。它们在生成内核配置前应用：先全局覆写，再这个订阅自己的覆写，每一份都是先 Merge 后 Script。远程订阅更新后依然有效，三种内核都支持。
 - **Merge（YAML）**：
   - `prepend-rules` / `append-rules`：在规则最前 / 最后的 `MATCH` 之前加入规则；
   - `prepend-proxies` / `append-proxies`、`prepend-proxy-groups` / `append-proxy-groups`：加入节点和代理组；
   - 其他键直接覆盖订阅中的同名键，字典逐项合并（例如只写 `dns: {nameserver: [...]}` 只替换 nameserver）。
 - **Script（JavaScript）**：定义 `function main(config, profileName) { …; return config; }`。`config` 是订阅转换成的 Clash 配置对象，`profileName` 是订阅名称。脚本不能联网或读写文件，死循环会被中止。
-- 保存时会先用当前订阅试运行，出错（YAML 格式错误、脚本异常、结果无法使用）会提示原因且不保存。保存后运行中的 Prism / Mihomo 内核热重载，sing-box 内核重启。
+- 保存时会先试运行（全局覆写用当前订阅，订阅自己的覆写用那个订阅），出错（YAML 格式错误、脚本异常、结果无法使用）会提示原因且不保存。影响到当前订阅时，运行中的 Prism / Mihomo 内核热重载，sing-box 内核重启。
+- 删除订阅时，它自己的覆写一起删除；备份包含全局覆写和每个订阅的覆写。
 - 覆写后，sing-box JSON 订阅会先转换成 Clash 格式再应用。
 
 示例（Merge）：
@@ -176,7 +177,10 @@ append-proxies:
 |---|---|---|---|
 | 来源 | 本项目自研（Rust），随安装包自带 | 设置页下载 | 设置页下载 |
 | AnyTLS / Shadowsocks / Trojan / VLESS | ✅ | ✅ | ✅ |
-| VLESS Reality / Vision、Hysteria2 | ✅（Vision 节点不转发 UDP） | ✅ | ✅ |
+| VLESS Reality / Vision（UDP 经 XUDP）、Hysteria2 | ✅ | ✅ | ✅ |
+| TUIC v5、WireGuard | ✅ | ✅ | ✅ |
+| 链式代理（`dialer-proxy`、`relay` 组） | ✅ | ✅（`relay` 组转换为 `dialer-proxy`） | ✅（转换为 `detour`） |
+| 组合规则 `AND` / `OR` / `NOT`、`SRC-GEOIP` | ✅ | ✅ | ✅ |
 | TLS 指纹（`client-fingerprint`） | ✅（Chrome 指纹） | ✅ | ✅ |
 | VMess / WebSocket / gRPC | ❌ | ✅ | ✅ |
 | 经代理转发 UDP | ✅（每个目标一条会话） | ✅ | ✅ |
@@ -185,8 +189,8 @@ append-proxies:
 | proxy-providers / rule-providers | ✅（规则集仅 yaml / text 格式） | ✅ | — |
 | 应用分流（按程序选择出口） | ✅ | ✅ | ✅ |
 
-- 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS（含 Reality / Vision）/ Hysteria2 节点：**Prism 内核**即可，体积小、启动快，TCP 和 UDP 都可经代理。
-- 订阅含 VMess、WebSocket / gRPC 传输的节点，或用到 `AND/OR` 等组合规则、`.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
+- 订阅只用 AnyTLS / Shadowsocks / Trojan / VLESS（含 Reality / Vision）/ Hysteria2 / TUIC / WireGuard 节点：**Prism 内核**即可，体积小、启动快，TCP 和 UDP 都可经代理。
+- 订阅含 VMess、WebSocket / gRPC 传输的节点，或用到 `.mrs` 规则集：切换到 **Mihomo** 或 **sing-box**。
 - 同一份订阅三个内核通用，Prism 会自动转换格式（见第 5、8 节）。Prism 内核遇到不支持的节点或规则会跳过，并在日志中给出警告。
 
 ## 4. 系统代理与 TUN 模式
@@ -363,7 +367,7 @@ Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手
 | `tls` | 是否启用 TLS |
 | `servername` | TLS 服务器名 |
 | `skip-cert-verify`、`alpn` | 同上 |
-| `flow` | `xtls-rprx-vision`（需 TLS 或 Reality）。Vision 节点不转发 UDP（服务端要求 XUDP，Prism 内核未实现），UDP 会改走其他规则或失败 |
+| `flow` | `xtls-rprx-vision`（需 TLS 或 Reality）。Vision 节点的 UDP 以 XUDP 方式转发（每个 UDP 会话一条连接） |
 | `reality-opts` | `public-key`、`short-id`：VLESS Reality；`servername` 为伪装的网站域名 |
 | `network: ws/grpc` | Prism 内核不支持（这样的节点会被跳过） |
 
@@ -384,6 +388,36 @@ Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手
 | `obfs`、`obfs-password` | 混淆，仅支持 `salamander` |
 | `up`、`down` | 带宽提示；Prism 内核使用 QUIC 默认拥塞控制，不使用 Brutal |
 
+**TUIC**（`type: tuic`，仅 v5）
+
+| 字段 | 说明 |
+|---|---|
+| `uuid`、`password` | 用户 UUID 和密码（只有 `token` 的 v4 节点不支持，会被跳过） |
+| `sni`、`skip-cert-verify`、`alpn` | TLS 参数（ALPN 默认 `h3`）；`disable-sni: true` 时不发送 SNI |
+| `congestion-controller` | `cubic`（默认）、`new_reno`、`bbr` |
+| `udp-relay-mode` | `native`（默认，QUIC 数据报，大包自动分片）或 `quic`（每个 UDP 包一条 QUIC 流） |
+
+**WireGuard**（`type: wireguard`）
+
+| 字段 | 说明 |
+|---|---|
+| `private-key` | 本机私钥（Base64） |
+| `public-key`、`pre-shared-key` | 服务端公钥、预共享密钥（可省略） |
+| `ip`、`ipv6` | 本机在隧道内的地址，如 `172.16.0.2`、`fd01::2`（可带 `/32` 等前缀长度），至少填一个 |
+| `reserved` | 3 字节保留位，如 `[1, 2, 3]` 或其 Base64；Cloudflare WARP 需要 |
+| `mtu` | 隧道 MTU，默认 1408 |
+| `peers` | 也可以把 `server`、`port`、`public-key`、`pre-shared-key`、`reserved` 写在只含一项的 `peers` 列表里；多个 peer 不支持 |
+
+Prism 内核在程序内实现 WireGuard 和 TCP/IP 协议栈，不创建网卡、不需要管理员权限。目标域名在本机解析后再经隧道连接；只填了 `ip` 时只能访问 IPv4 目标。AmneziaWG（`amnezia-wg-option`）不支持。
+
+**所有节点通用：`dialer-proxy`**
+
+```yaml
+  - { name: 落地, type: ss, server: 5.6.7.8, port: 8388, cipher: aes-128-gcm, password: pw, dialer-proxy: 中转 }
+```
+
+`dialer-proxy` 写一个节点或代理组的名字：连接这个节点的服务器时先经过它（链式代理）。TUIC、Hysteria2、WireGuard 这类走 UDP 的节点需要前一跳支持 UDP。前一跳又回到自己（例如 `dialer-proxy` 指向的组当前选中了自己）时，连接会失败并在日志中提示，不会卡死。
+
 **仅 Mihomo / sing-box 支持的类型**：`vmess`，以及上面标注不支持的传输方式。Prism 能识别并在转换时保留它们（`ws-opts`、`grpc-opts` 等），但 Prism 内核运行时会跳过这些节点。
 
 ### 6.4 proxy-groups（代理组）
@@ -391,7 +425,7 @@ Prism 内核会复用与服务端的 TLS 会话：新连接不需要重新握手
 ```yaml
 proxy-groups:
   - name: 组名
-    type: select | url-test | fallback | load-balance
+    type: select | url-test | fallback | load-balance | relay
     proxies: [节点或组名, ..., DIRECT, REJECT]
     url: https://www.gstatic.com/generate_204   # 健康检查地址（自动类型使用）
     interval: 300                               # 检查间隔（秒），最小 10
@@ -407,6 +441,7 @@ proxy-groups:
 | `url-test` | 每隔 `interval` 秒测速，当前节点比最快节点慢超过 `tolerance` 毫秒时切换到最快的 |
 | `fallback` | 使用列表中第一个可用（最近一次测速未失败）的节点 |
 | `load-balance` | 在可用节点间分配；同一个目标主机始终走同一个节点 |
+| `relay` | 链式代理：依次经过 `proxies` 中的每一个（第一个连第二个的服务器，以此类推），最后一个连接目标。成员可以是组（按当前选择）；除第一个外都必须是节点。`DIRECT` 成员会被忽略。新版 Mihomo 已不支持 `relay`，Prism 生成配置时会把它改写成一串用 `dialer-proxy` 相连的节点副本（最后一个副本使用组名） |
 
 - 组可以嵌套组（`proxies` 里写其他组的名字）。
 - 内置的 `DIRECT`（直连）、`REJECT`（拒绝）可直接使用；`GLOBAL` 组由内核自动生成，包含所有组和节点，供全局模式使用。
@@ -443,6 +478,9 @@ MATCH,目标
 | `PROCESS-PATH` | 程序完整路径（不区分大小写，`/` 与 `\` 等同） | `PROCESS-PATH,D:\Games\Steam\steam.exe,DIRECT` |
 | `PROCESS-NAME-REGEX` / `PROCESS-PATH-REGEX` | 程序名 / 路径匹配正则 | `PROCESS-NAME-REGEX,^(chrome\|msedge)\.exe$,PROXY` |
 | `RULE-SET` | 规则集合（rule-providers，见 6.8）中的任一条 | `RULE-SET,reject,REJECT`、`RULE-SET,telegram,PROXY,no-resolve` |
+| `SRC-GEOIP` | 来源 IP 的分类（`lan` / `private` 为私有地址） | `SRC-GEOIP,lan,DIRECT` |
+| `AND` / `OR` | 括号里的条件全部 / 任一满足，条件可以嵌套组合规则 | `AND,((NETWORK,udp),(DST-PORT,443)),REJECT` |
+| `NOT` | 括号里的唯一条件不满足 | `NOT,((GEOSITE,cn)),PROXY` |
 | `MATCH`（或 `FINAL`） | 匹配所有，放在最后 | `MATCH,PROXY` |
 
 **no-resolve**：`GEOIP`、`IP-CIDR` 类规则遇到域名目标时，默认会先解析出 IP 再匹配（超时 3 秒）。加上 `no-resolve` 则域名目标直接跳过这条规则，避免为了匹配规则而做 DNS 查询。一般给 IP 类规则都加上 `no-resolve`，只在确实需要按 IP 分流的规则上去掉。
@@ -451,7 +489,7 @@ MATCH,目标
 
 进程规则通过系统的 TCP / UDP 连接表找出连接所属的程序：系统代理模式下识别本机通过代理端口连接的程序，TUN 模式下识别所有本机程序；局域网其他设备的连接没有程序信息。
 
-**Prism 内核不支持的规则**（会被跳过并在日志中警告，Mihomo 内核可用）：`AND` / `OR` / `NOT`、`SRC-GEOIP` 等。
+**Prism 内核不支持的规则**（会被跳过并在日志中警告，Mihomo 内核可用）：`IP-ASN`、`SUB-RULE` 等。组合规则里只要有一个条件不支持，整条规则都会被跳过。
 
 ### 6.6 dns（DNS 模块）与 hosts
 
@@ -636,13 +674,28 @@ hysteria2://密码@服务器:端口?sni=域名&obfs=salamander&obfs-password=混
 hy2://...（同上）
 ```
 
+**TUIC**
+
+```
+tuic://UUID:密码@服务器:端口?sni=域名&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#节点名
+```
+
+**WireGuard**（v2rayN 格式）
+
+```
+wireguard://私钥@服务器:端口?publickey=服务端公钥&presharedkey=预共享密钥&address=172.16.0.2/32,fd01::2/128&reserved=1,2,3&mtu=1280#节点名
+wg://...（同上）
+```
+
+私钥、公钥中的 `+`、`/`、`=` 需 URL 编码。
+
 **SOCKS5**
 
 ```
 socks5://用户名:密码@服务器:端口#节点名
 ```
 
-VLESS / Trojan 的 WS / gRPC 传输和 VMess 只能在 Mihomo / sing-box 内核下使用；VLESS Reality / Vision、Hysteria2 三个内核都可用。
+VLESS / Trojan 的 WS / gRPC 传输和 VMess 只能在 Mihomo / sing-box 内核下使用；VLESS Reality / Vision、Hysteria2、TUIC、WireGuard 三个内核都可用。
 
 ## 8. sing-box JSON 与格式转换
 
@@ -656,15 +709,20 @@ VLESS / Trojan 的 WS / gRPC 传输和 VMess 只能在 Mihomo / sing-box 内核�
 | `DOMAIN` / `DOMAIN-SUFFIX` / `DOMAIN-KEYWORD` / `DOMAIN-REGEX` | `domain` / `domain_suffix` / `domain_keyword` / `domain_regex` |
 | `IP-CIDR` / `IP-CIDR6` | `ip_cidr` |
 | `SRC-IP-CIDR` | `source_ip_cidr` |
-| `DST-PORT` | `port` / `port_range` |
-| `PROCESS-NAME` | `process_name` |
+| `DST-PORT` / `SRC-PORT` | `port` / `port_range`、`source_port` / `source_port_range` |
+| `NETWORK` | `network` |
+| `PROCESS-NAME` / `PROCESS-PATH` | `process_name` / `process_path` |
 | `GEOIP,private` | `ip_is_private` |
+| `SRC-GEOIP,xx` | 规则集 `geoip-xx` 加 `rule_set_ip_cidr_match_source` |
+| `AND` / `OR` | `type: logical`，`mode: and` / `or` |
+| `NOT` | 条件加 `invert: true` |
 | `GEOIP,xx` | 规则集 `geoip-xx` |
 | `GEOSITE,xx` | 规则集 `geosite-xx` |
 | 目标 `REJECT` | `action: reject` |
 | `MATCH` | `route.final` |
 
   其他类型的规则（包括 `RULE-SET`）在转换时会被丢弃；`proxy-providers` 也不会转换（组里只保留 `proxies` 中写明的成员）。代理组 `select` 转为 `selector`，其余自动类型都转为 `urltest`。
+  WireGuard 节点转为 sing-box 的 `endpoints`；`dialer-proxy` 转为 `detour`；`relay` 组转为一串经 `detour` 相连的节点副本（最后一个副本使用组名），第一跳可以是组，后面的必须是节点。
 
 - **规则集**：GEOSITE / GEOIP 对应的 `.srs` 规则集由 Prism 下载到 `runtime/rule-set/`（优先经运行中的代理，其次 jsdelivr 镜像，最后 GitHub），再以本地规则集交给 sing-box。这样 sing-box 启动时不依赖网络，节点不可用也能启动。超过 7 天的规则集会在后台刷新；实在下载不到的规则集会连同使用它的规则一起跳过，并在日志中提示。原生 sing-box 订阅里的远程规则集也按同样方式处理。
 - 全局 / 直连模式通过 sing-box 的 `clash_mode`（`Global` / `Direct`）实现。
@@ -673,7 +731,7 @@ VLESS / Trojan 的 WS / gRPC 传输和 VMess 只能在 Mihomo / sing-box 内核�
 
 sing-box 配置会转换为 Clash YAML：
 
-- 出站：`anytls`、`shadowsocks`、`trojan`、`vless`、`vmess`、`hysteria2`、`socks`、`http` 转为节点；`selector` / `urltest` 转为代理组；`direct` 视为 `DIRECT`，`block` 视为 `REJECT`。
+- 出站：`anytls`、`shadowsocks`、`trojan`、`vless`、`vmess`、`hysteria2`、`tuic`、`socks`、`http` 转为节点（`detour` 转为 `dialer-proxy`），只有一个 peer 的 WireGuard `endpoints` 也转为节点；`selector` / `urltest` 转为代理组；`direct` 视为 `DIRECT`，`block` 视为 `REJECT`。
 - 路由规则：`domain`、`domain_suffix`、`domain_keyword`、`domain_regex`、`ip_cidr`、`port`、`process_name`、`ip_is_private`，以及名为 `geosite-xx` / `geoip-xx` 的规则集，转为对应的 Clash 规则；`route.final` 转为 `MATCH`。
 - 含 `clash_mode`、`protocol`、`inbound` 条件的规则会跳过。
 - 一条 sing-box 规则里的多个条件会拆成多条 Clash 规则（相当于「或」），属于近似转换；需要精确语义时请直接使用 sing-box 内核。

@@ -58,6 +58,8 @@ pub fn emit_outbound(p: &ProxyConfig) -> Value {
         ProxyKind::Vmess => "vmess",
         ProxyKind::AnyTls => "anytls",
         ProxyKind::Hysteria2 => "hysteria2",
+        ProxyKind::Tuic => "tuic",
+        ProxyKind::WireGuard => return wireguard_endpoint(p),
         ProxyKind::Socks5 => "socks",
         ProxyKind::Http => "http",
     };
@@ -107,14 +109,154 @@ pub fn emit_outbound(p: &ProxyConfig) -> Value {
         ProxyKind::Trojan | ProxyKind::AnyTls => {
             o.insert("password".into(), json!(p.password.clone().unwrap_or_default()));
         }
+        ProxyKind::Tuic => {
+            o.insert("uuid".into(), json!(p.uuid.clone().unwrap_or_default()));
+            o.insert("password".into(), json!(p.password.clone().unwrap_or_default()));
+            if let Some(c) = &p.congestion {
+                o.insert("congestion_control".into(), json!(c));
+            }
+            if let Some(m) = &p.udp_relay_mode {
+                o.insert("udp_relay_mode".into(), json!(m));
+            }
+        }
+        ProxyKind::WireGuard => unreachable!(),
     }
     if p.tls {
-        o.insert("tls".into(), tls_json(p));
+        let mut t = tls_json(p);
+        if p.kind() == ProxyKind::Tuic && p.alpn.is_empty() {
+            t["alpn"] = json!(["h3"]);
+        }
+        o.insert("tls".into(), t);
     }
     if let Some(t) = transport_json(p) {
         o.insert("transport".into(), t);
     }
+    if let Some(d) = &p.dialer_proxy {
+        o.insert("detour".into(), json!(d));
+    }
     Value::Object(o)
+}
+
+/// WireGuard is an endpoint in sing-box 1.11+, not an outbound.
+fn wireguard_endpoint(p: &ProxyConfig) -> Value {
+    let mut address: Vec<String> = Vec::new();
+    for (ip, bits) in [(&p.ip, 32), (&p.ipv6, 128)] {
+        if let Some(ip) = ip {
+            address.push(if ip.contains('/') { ip.clone() } else { format!("{ip}/{bits}") });
+        }
+    }
+    let allowed = if p.allowed_ips.is_empty() { vec!["0.0.0.0/0".to_string(), "::/0".to_string()] } else { p.allowed_ips.clone() };
+    let mut peer = json!({
+        "address": p.server, "port": p.port,
+        "public_key": p.public_key.clone().unwrap_or_default(),
+        "allowed_ips": allowed,
+    });
+    if let Some(psk) = &p.pre_shared_key {
+        peer["pre_shared_key"] = json!(psk);
+    }
+    if p.reserved.len() == 3 {
+        peer["reserved"] = json!(p.reserved);
+    }
+    let mut v = json!({
+        "type": "wireguard", "tag": p.name,
+        "address": address,
+        "private_key": p.private_key.clone().unwrap_or_default(),
+        "peers": [peer],
+    });
+    if let Some(mtu) = p.mtu {
+        v["mtu"] = json!(mtu);
+    }
+    if let Some(d) = &p.dialer_proxy {
+        v["detour"] = json!(d);
+    }
+    v
+}
+
+/// A Clash rule condition as sing-box rule fields. None = not expressible.
+fn rule_cond(kind: &str, pl: &str, sets: &mut BTreeSet<(String, String)>) -> Option<Value> {
+    let pl = pl.to_string();
+    Some(match kind {
+        "DOMAIN" => json!({ "domain": [pl] }),
+        "DOMAIN-SUFFIX" => json!({ "domain_suffix": [pl] }),
+        "DOMAIN-KEYWORD" => json!({ "domain_keyword": [pl] }),
+        "DOMAIN-REGEX" => json!({ "domain_regex": [pl] }),
+        "IP-CIDR" | "IP-CIDR6" => json!({ "ip_cidr": [pl] }),
+        "SRC-IP-CIDR" => json!({ "source_ip_cidr": [pl] }),
+        "DST-PORT" => match pl.parse::<u16>() {
+            Ok(port) => json!({ "port": [port] }),
+            Err(_) => json!({ "port_range": [pl.replace('-', ":")] }),
+        },
+        "SRC-PORT" => match pl.parse::<u16>() {
+            Ok(port) => json!({ "source_port": [port] }),
+            Err(_) => json!({ "source_port_range": [pl.replace('-', ":")] }),
+        },
+        "NETWORK" => json!({ "network": [pl.to_ascii_lowercase()] }),
+        "PROCESS-NAME" => json!({ "process_name": [pl] }),
+        "PROCESS-PATH" => json!({ "process_path": [pl] }),
+        "GEOIP" | "SRC-GEOIP" if pl.eq_ignore_ascii_case("private") || pl.eq_ignore_ascii_case("lan") => {
+            if kind == "GEOIP" {
+                json!({ "ip_is_private": true })
+            } else {
+                json!({ "source_ip_is_private": true })
+            }
+        }
+        "GEOIP" | "SRC-GEOIP" => {
+            let tag = format!("geoip-{}", pl.to_ascii_lowercase());
+            sets.insert((tag.clone(), GEOIP_URL.replace("{}", &pl.to_ascii_lowercase())));
+            if kind == "GEOIP" {
+                json!({ "rule_set": [tag] })
+            } else {
+                json!({ "rule_set": [tag], "rule_set_ip_cidr_match_source": true })
+            }
+        }
+        "GEOSITE" => {
+            let tag = format!("geosite-{}", pl.to_ascii_lowercase());
+            sets.insert((tag.clone(), GEOSITE_URL.replace("{}", &pl.to_ascii_lowercase())));
+            json!({ "rule_set": [tag] })
+        }
+        "AND" | "OR" | "NOT" => {
+            let subs = logical_parts(&pl)?;
+            let rules = subs.iter().map(|(k, p)| rule_cond(k, p, sets)).collect::<Option<Vec<_>>>()?;
+            match kind {
+                "NOT" if rules.len() == 1 => {
+                    let mut r = rules.into_iter().next().unwrap();
+                    if r.get("type").is_some() || r.get("invert").is_some() {
+                        json!({ "type": "logical", "mode": "and", "rules": [r], "invert": true })
+                    } else {
+                        r["invert"] = json!(true);
+                        r
+                    }
+                }
+                "NOT" => return None,
+                _ => json!({ "type": "logical", "mode": kind.to_ascii_lowercase(), "rules": rules }),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Relay groups have no sing-box counterpart: the chain is rebuilt from
+/// copies of the hops, each dialing through the previous one. The last copy
+/// takes the group's name. The first hop may be a group; the later ones
+/// must be nodes.
+fn relay_chain(g: &GroupConfig, proxies: &[ProxyConfig]) -> Option<Vec<Value>> {
+    let hops: Vec<&String> = g.proxies.iter().filter(|h| h.as_str() != "DIRECT").collect();
+    let (first, rest) = hops.split_first()?;
+    let mut prev = (*first).clone();
+    let mut out = Vec::new();
+    for (i, hop) in rest.iter().enumerate() {
+        let node = proxies.iter().find(|p| &&p.name == hop)?;
+        let mut copy = node.clone();
+        copy.name = if i + 1 == rest.len() { g.name.clone() } else { format!("{} · {}", g.name, i + 1) };
+        copy.dialer_proxy = Some(prev.clone());
+        prev = copy.name.clone();
+        out.push(emit_outbound(&copy));
+    }
+    if out.is_empty() {
+        // A one-hop relay is just that hop.
+        return Some(vec![json!({ "type": "selector", "tag": g.name, "outbounds": [first] })]);
+    }
+    Some(out)
 }
 
 /// Remote entry without a download detour: `download_detour` is deprecated
@@ -229,6 +371,13 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
     };
     for g in &p.groups {
         members_all.push(g.name.clone());
+        if g.kind == GroupKind::Relay {
+            match relay_chain(g, &p.proxies) {
+                Some(chain) => outbounds.extend(chain),
+                None => outbounds.push(json!({ "type": "selector", "tag": g.name, "outbounds": strip(&g.proxies) })),
+            }
+            continue;
+        }
         let mut v = match g.kind {
             GroupKind::Select => json!({ "type": "selector", "tag": g.name, "outbounds": strip(&g.proxies) }),
             _ => json!({
@@ -241,10 +390,20 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
         }
         outbounds.push(v);
     }
+    let mut endpoints: Vec<Value> = Vec::new();
     for px in &p.proxies {
         members_all.push(px.name.clone());
-        outbounds.push(emit_outbound(px));
+        let v = emit_outbound(px);
+        if px.kind() == ProxyKind::WireGuard {
+            endpoints.push(v);
+        } else {
+            outbounds.push(v);
+        }
     }
+    // Relay copies of WireGuard nodes are endpoints too.
+    let (eps, obs): (Vec<Value>, Vec<Value>) = outbounds.into_iter().partition(|o| o["type"] == "wireguard");
+    endpoints.extend(eps);
+    let mut outbounds = obs;
     members_all.push("DIRECT".into());
     outbounds.push(json!({ "type": "direct", "tag": "DIRECT" }));
     outbounds.push(json!({ "type": "selector", "tag": "GLOBAL", "outbounds": members_all }));
@@ -266,35 +425,10 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
     rules.push(json!({ "clash_mode": "Global", "outbound": "GLOBAL" }));
     let mut sets: BTreeSet<(String, String)> = BTreeSet::new();
     for r in &p.rules {
-        let pl = r.payload.clone();
-        let cond = match r.kind.as_str() {
-            "DOMAIN" => json!({ "domain": [pl] }),
-            "DOMAIN-SUFFIX" => json!({ "domain_suffix": [pl] }),
-            "DOMAIN-KEYWORD" => json!({ "domain_keyword": [pl] }),
-            "DOMAIN-REGEX" => json!({ "domain_regex": [pl] }),
-            "IP-CIDR" | "IP-CIDR6" => json!({ "ip_cidr": [pl] }),
-            "SRC-IP-CIDR" => json!({ "source_ip_cidr": [pl] }),
-            "DST-PORT" => match pl.parse::<u16>() {
-                Ok(port) => json!({ "port": [port] }),
-                Err(_) => json!({ "port_range": [pl.replace('-', ":")] }),
-            },
-            "PROCESS-NAME" => json!({ "process_name": [pl] }),
-            "GEOIP" if pl.eq_ignore_ascii_case("private") || pl.eq_ignore_ascii_case("lan") => {
-                json!({ "ip_is_private": true })
-            }
-            "GEOIP" => {
-                let tag = format!("geoip-{}", pl.to_ascii_lowercase());
-                sets.insert((tag.clone(), GEOIP_URL.replace("{}", &pl.to_ascii_lowercase())));
-                json!({ "rule_set": [tag] })
-            }
-            "GEOSITE" => {
-                let tag = format!("geosite-{}", pl.to_ascii_lowercase());
-                sets.insert((tag.clone(), GEOSITE_URL.replace("{}", &pl.to_ascii_lowercase())));
-                json!({ "rule_set": [tag] })
-            }
-            _ => continue,
-        };
-        let mut rule = cond;
+        if r.kind == "MATCH" {
+            continue;
+        }
+        let Some(mut rule) = rule_cond(&r.kind, &r.payload, &mut sets) else { continue };
         if r.target == "REJECT" {
             rule["action"] = json!("reject");
         } else {
@@ -325,7 +459,7 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
     } else {
         json!({ "servers": [{ "type": "local", "tag": "local" }], "final": "local", "strategy": "prefer_ipv4" })
     };
-    json!({
+    let mut root = json!({
         "log": { "level": singbox_level(&o.log_level), "timestamp": true },
         "dns": dns,
         "inbounds": inbounds(o),
@@ -338,7 +472,11 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
             "default_domain_resolver": "local",
         },
         "experimental": clash_api(o),
-    })
+    });
+    if !endpoints.is_empty() {
+        root["endpoints"] = json!(endpoints);
+    }
+    root
 }
 
 /// A Clash nameserver (`223.5.5.5`, `tcp://…`, `tls://…`,
@@ -635,6 +773,7 @@ pub fn parse(v: &Value) -> Result<Profile> {
             "vmess" => ProxyKind::Vmess,
             "anytls" => ProxyKind::AnyTls,
             "hysteria2" => ProxyKind::Hysteria2,
+            "tuic" => ProxyKind::Tuic,
             "socks" => ProxyKind::Socks5,
             "http" => ProxyKind::Http,
             other => {
@@ -670,8 +809,46 @@ pub fn parse(v: &Value) -> Result<Profile> {
             obfs: ob.get("obfs").and_then(|o| st(o, "type")),
             obfs_password: ob.get("obfs").and_then(|o| st(o, "password")),
             udp: true,
+            dialer_proxy: st(ob, "detour"),
+            congestion: st(ob, "congestion_control"),
+            udp_relay_mode: st(ob, "udp_relay_mode"),
             ..Default::default()
         });
+    }
+    for ep in v.get("endpoints").and_then(|e| e.as_array()).cloned().unwrap_or_default() {
+        let tag = st(&ep, "tag").unwrap_or_else(|| "wireguard".into());
+        if st(&ep, "type").as_deref() != Some("wireguard") {
+            p.warnings.push(format!("endpoint {tag}: unsupported type"));
+            continue;
+        }
+        let peers = ep.get("peers").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let [peer] = peers.as_slice() else {
+            p.warnings.push(format!("endpoint {tag}: only WireGuard with exactly one peer is supported"));
+            continue;
+        };
+        let mut wg = ProxyConfig {
+            name: tag,
+            kind: Some(ProxyKind::WireGuard),
+            server: st(peer, "address").unwrap_or_default(),
+            port: peer.get("port").and_then(|x| x.as_u64()).unwrap_or(0) as u16,
+            private_key: st(&ep, "private_key"),
+            public_key: st(peer, "public_key"),
+            pre_shared_key: st(peer, "pre_shared_key"),
+            reserved: peer.get("reserved").and_then(|r| r.as_array()).map(|a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as u8).collect()).unwrap_or_default(),
+            allowed_ips: strs(peer, "allowed_ips"),
+            mtu: ep.get("mtu").and_then(|x| x.as_u64()).map(|x| x as u16),
+            dialer_proxy: st(&ep, "detour"),
+            udp: true,
+            ..Default::default()
+        };
+        for a in strs(&ep, "address") {
+            if a.contains(':') {
+                wg.ipv6 = Some(a);
+            } else {
+                wg.ip = Some(a);
+            }
+        }
+        p.proxies.push(wg);
     }
     let fix = |n: &String| rename.get(n).cloned().unwrap_or_else(|| n.clone());
     for g in &mut p.groups {
@@ -772,6 +949,48 @@ mod tests {
             tun: false,
             unified_delay: false,
         }
+    }
+
+    #[test]
+    fn tuic_wireguard_relay_and_logical_rules() {
+        let y = r#"
+proxies:
+  - {name: t, type: tuic, server: t.example.com, port: 443, uuid: 0b6a0b4e-0000-4000-8000-000000000000, password: pw, congestion-controller: bbr}
+  - {name: w, type: wireguard, server: 1.2.3.4, port: 51820, private-key: priv=, public-key: pub=, ip: 10.0.0.2, reserved: [1, 2, 3], dialer-proxy: t}
+  - {name: s, type: ss, server: 5.6.7.8, port: 1, cipher: aes-128-gcm, password: x}
+proxy-groups:
+  - {name: PROXY, type: select, proxies: [t, w, s]}
+  - {name: chain, type: relay, proxies: [PROXY, s, t]}
+rules:
+  - AND,((NETWORK,udp),(DST-PORT,443)),REJECT
+  - NOT,((GEOSITE,cn)),PROXY
+  - OR,((DOMAIN-SUFFIX,a.com),(SRC-GEOIP,cn)),chain
+  - MATCH,DIRECT
+"#;
+        let p = crate::config::parse_any(y).unwrap();
+        let sb = emit(&p, &overrides());
+        let eps = sb["endpoints"].as_array().unwrap();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0]["address"], json!(["10.0.0.2/32"]));
+        assert_eq!(eps[0]["peers"][0]["reserved"], json!([1, 2, 3]));
+        assert_eq!(eps[0]["detour"], "t");
+        let ob = |tag: &str| sb["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == tag).cloned().unwrap();
+        assert_eq!(ob("t")["tls"]["alpn"], json!(["h3"]));
+        assert_eq!(ob("t")["congestion_control"], "bbr");
+        // relay [PROXY, s, t]: copy of s through PROXY, copy of t (named chain) through it
+        assert_eq!(ob("chain · 1")["detour"], "PROXY");
+        assert_eq!(ob("chain · 1")["type"], "shadowsocks");
+        assert_eq!(ob("chain")["detour"], "chain · 1");
+        assert_eq!(ob("chain")["type"], "tuic");
+        let rules = sb["route"]["rules"].as_array().unwrap();
+        assert!(rules.contains(&json!({"type": "logical", "mode": "and", "rules": [{"network": ["udp"]}, {"port": [443]}], "action": "reject"})));
+        assert!(rules.contains(&json!({"rule_set": ["geosite-cn"], "invert": true, "outbound": "PROXY"})));
+        assert!(rules.contains(&json!({"type": "logical", "mode": "or", "rules": [{"domain_suffix": ["a.com"]}, {"rule_set": ["geoip-cn"], "rule_set_ip_cidr_match_source": true}], "outbound": "chain"})));
+        // and back
+        let back = parse(&sb).unwrap();
+        let w = back.proxies.iter().find(|x| x.name == "w").unwrap();
+        assert_eq!((w.kind, w.public_key.as_deref(), w.dialer_proxy.as_deref()), (Some(ProxyKind::WireGuard), Some("pub="), Some("t")));
+        assert_eq!(back.proxies.iter().find(|x| x.name == "t").unwrap().kind, Some(ProxyKind::Tuic));
     }
 
     #[test]

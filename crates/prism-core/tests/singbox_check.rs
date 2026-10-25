@@ -34,6 +34,7 @@ fn generated_mihomo_config_passes_check() {
     let raw: String = CLASH.lines().filter(|l| !l.contains("GEO")).collect::<Vec<_>>().join("\n");
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
     clash::apply_overrides(&mut doc, &o);
+    clash::relays_to_dialer_proxy(&mut doc);
     assert!(clash::add_app_rules(&mut doc, &app_routes()).is_empty());
     let path = dir.join("config.yaml");
     std::fs::write(&path, serde_yaml::to_string(&doc).unwrap()).unwrap();
@@ -50,8 +51,11 @@ proxies:
   - { name: tj, type: trojan, server: t.example.com, port: 443, password: pw, network: ws, ws-opts: { path: /ws, headers: { Host: t.example.com } } }
   - { name: vr, type: vless, server: r.example.com, port: 443, uuid: 0b6a0b4e-1111-4222-8333-444455556666, tls: true, flow: xtls-rprx-vision, servername: www.microsoft.com, reality-opts: { public-key: "Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw", short-id: "6ba85179e30d4fc2" }, client-fingerprint: chrome }
   - { name: hy, type: hysteria2, server: h.example.com, port: 443, password: pw, sni: h.example.com }
+  - { name: tu, type: tuic, server: tu.example.com, port: 443, uuid: 0b6a0b4e-1111-4222-8333-444455556666, password: pw, congestion-controller: bbr, udp-relay-mode: native, alpn: [h3] }
+  - { name: wg, type: wireguard, server: 162.159.192.1, port: 2408, private-key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", public-key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", ip: 172.16.0.2, ipv6: "fd01::2", reserved: [1, 2, 3], mtu: 1280, udp: true, dialer-proxy: ss1 }
 proxy-groups:
-  - { name: PROXY, type: select, proxies: [auto, "东京", ss1, tj, vr, hy, DIRECT, REJECT] }
+  - { name: PROXY, type: select, proxies: [auto, "东京", ss1, tj, vr, hy, tu, wg, chain, DIRECT, REJECT] }
+  - { name: chain, type: relay, proxies: [auto, ss1, tu] }
   - { name: auto, type: url-test, proxies: ["东京", ss1], url: "https://www.gstatic.com/generate_204", interval: 300 }
 rules:
   - DOMAIN-SUFFIX,ads.example,REJECT
@@ -59,6 +63,10 @@ rules:
   - DOMAIN-KEYWORD,google,PROXY
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - DST-PORT,22,DIRECT
+  - AND,((NETWORK,udp),(DST-PORT,443)),REJECT
+  - OR,((DOMAIN,x.example.com),(DST-PORT,8443)),chain
+  - NOT,((GEOSITE,cn)),PROXY
+  - SRC-GEOIP,lan,DIRECT
   - GEOSITE,cn,DIRECT
   - GEOIP,private,DIRECT,no-resolve
   - GEOIP,CN,DIRECT

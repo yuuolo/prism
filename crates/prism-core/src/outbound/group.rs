@@ -1,14 +1,14 @@
-//! Proxy groups: select, url-test, fallback and load-balance.
+//! Proxy groups: select, url-test, fallback, load-balance and relay.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::{Outbound, RegistryCell};
+use super::{Dialer, Outbound, RegistryCell};
 use crate::common::{other, Address, BoxedStream, UdpPipe};
 use crate::config::{GroupConfig, GroupKind};
 
@@ -16,12 +16,14 @@ pub struct ProxyGroup {
     pub cfg: GroupConfig,
     selected: RwLock<String>,
     reg: RegistryCell,
+    /// Relay: the last chain built, keyed by its hop names.
+    chain: Mutex<Option<(Vec<String>, Arc<dyn Outbound>)>>,
 }
 
 impl ProxyGroup {
     pub fn new(cfg: GroupConfig, reg: RegistryCell) -> Self {
         let first = cfg.proxies.first().cloned().unwrap_or_else(|| "DIRECT".into());
-        ProxyGroup { cfg, selected: RwLock::new(first), reg }
+        ProxyGroup { cfg, selected: RwLock::new(first), reg, chain: Mutex::new(None) }
     }
 
     pub fn kind(&self) -> GroupKind {
@@ -40,6 +42,7 @@ impl ProxyGroup {
     pub fn now(&self) -> String {
         match self.cfg.kind {
             GroupKind::Select | GroupKind::UrlTest => self.selected.read().unwrap().clone(),
+            GroupKind::Relay => self.cfg.proxies.last().cloned().unwrap_or_default(),
             GroupKind::Fallback | GroupKind::LoadBalance => self
                 .cfg
                 .proxies
@@ -78,6 +81,40 @@ impl ProxyGroup {
         reg.get(&name)
     }
 
+    /// Relay: the members resolved to nodes, the last one rebuilt to dial
+    /// through the ones before it (each hop keeps its own way of reaching
+    /// its server only if it is the first).
+    fn relay(&self, target: &Address) -> io::Result<Arc<dyn Outbound>> {
+        let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
+        let mut hops = Vec::new();
+        for m in &self.cfg.proxies {
+            let (o, _) = reg.resolve(m, target)?;
+            match o.name() {
+                "DIRECT" => continue,
+                "REJECT" => return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "rejected by relay hop")),
+                _ => hops.push(o),
+            }
+        }
+        if hops.len() <= 1 {
+            return Ok(hops.pop().unwrap_or_else(|| Arc::new(super::basic::Direct)));
+        }
+        let names: Vec<String> = hops.iter().map(|h| h.name().to_string()).collect();
+        if let Some((n, o)) = self.chain.lock().unwrap().as_ref() {
+            if *n == names {
+                return Ok(o.clone());
+            }
+        }
+        let mut dialer = Dialer::Via(hops[0].clone());
+        let mut last = hops[0].clone();
+        for name in &names[1..] {
+            let cfg = reg.configs.get(name).ok_or_else(|| other(format!("relay {}: {name} can't be a later hop", self.cfg.name)))?;
+            last = super::build_proxy(cfg, dialer).map_err(|e| other(e.to_string()))?;
+            dialer = Dialer::Via(last.clone());
+        }
+        *self.chain.lock().unwrap() = Some((names, last.clone()));
+        Ok(last)
+    }
+
     /// Tests every member and, for url-test, switches to the fastest one when
     /// it beats the current member by more than `tolerance`.
     pub async fn health_check(&self) {
@@ -108,7 +145,7 @@ impl ProxyGroup {
 
     /// Periodic health checks for automatic groups, until `stop`.
     pub fn spawn_health_loop(self: Arc<Self>, stop: tokio_util::sync::CancellationToken) {
-        if self.cfg.kind == GroupKind::Select {
+        if matches!(self.cfg.kind, GroupKind::Select | GroupKind::Relay) {
             return;
         }
         tokio::spawn(async move {
@@ -141,11 +178,17 @@ impl Outbound for ProxyGroup {
         true
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
+        if self.cfg.kind == GroupKind::Relay {
+            return self.relay(target)?.connect(target).await;
+        }
         let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
         let (out, _) = reg.resolve(&self.cfg.name, target)?;
         out.connect(target).await
     }
     async fn connect_udp(&self, target: &Address) -> io::Result<UdpPipe> {
+        if self.cfg.kind == GroupKind::Relay {
+            return self.relay(target)?.connect_udp(target).await;
+        }
         let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
         let (out, _) = reg.resolve(&self.cfg.name, target)?;
         out.connect_udp(target).await

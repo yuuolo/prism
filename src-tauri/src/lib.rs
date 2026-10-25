@@ -317,23 +317,41 @@ async fn unlock_check(st: State<'_, AppState>) -> Res<Vec<unlock::Check>> {
     unlock::run_all(Some(port)).await.map_err(e)
 }
 
+/// The global 覆写 (`profile` = None) or a profile's own.
 #[tauri::command]
-fn get_patches(st: State<'_, AppState>) -> patches::Patches {
-    patches::load(&st.store.dir)
+fn get_patches(st: State<'_, AppState>, profile: Option<String>) -> patches::Patches {
+    patches::load(&st.store.dir, profile.as_deref())
 }
 
-/// Saves 覆写 after trying it on the active profile, then applies it.
+/// Profiles that have 覆写 of their own.
 #[tauri::command]
-async fn save_patches(app: AppHandle, st: State<'_, AppState>, patches: patches::Patches) -> Res<()> {
+fn patched_profiles(st: State<'_, AppState>) -> Vec<String> {
+    patches::patched_profiles(&st.store.dir)
+}
+
+/// Saves 覆写 after trying it (on the profile it belongs to, or on the
+/// active profile for the global set), then reloads the core if the
+/// active profile is affected.
+#[tauri::command]
+async fn save_patches(app: AppHandle, st: State<'_, AppState>, patches: patches::Patches, profile: Option<String>) -> Res<()> {
     let s = st.settings();
-    if let Some(id) = &s.active_profile {
+    let dir = &st.store.dir;
+    let target = profile.clone().or(s.active_profile.clone());
+    if let Some(id) = &target {
         let raw = st.store.read_content(id).map_err(e)?;
         let name = st.store.profiles().into_iter().find(|p| &p.id == id).map(|p| p.name).unwrap_or_default();
-        let out = patches::apply(&patches, &raw, &name).map_err(e)?;
+        let (global, own) = match &profile {
+            Some(_) => (patches::load(dir, None), patches.clone()),
+            None => (patches.clone(), patches::load(dir, Some(id))),
+        };
+        let out = patches::apply_both(&global, &own, &raw, &name).map_err(e)?;
         prism_core::config::parse_any(&out).map_err(|err| format!("覆写后的配置无法使用：{err:#}"))?;
     }
-    patches::save(&st.store.dir, &patches).map_err(e)?;
-    reload_core(&app, &st).await
+    patches::save(dir, profile.as_deref(), &patches).map_err(e)?;
+    if profile.is_none() || profile == s.active_profile {
+        reload_core(&app, &st).await?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -540,6 +558,7 @@ async fn delete_profile(st: State<'_, AppState>, id: String) -> Res<()> {
     st.update(|s| {
         s.selections.remove(&id);
     })?;
+    patches::delete(&st.store.dir, &id);
     st.store.delete(&id).map_err(e)
 }
 
@@ -1278,6 +1297,7 @@ pub fn run() {
             traffic_history,
             unlock_check,
             get_patches,
+            patched_profiles,
             save_patches,
             webdav_save,
             webdav_test,

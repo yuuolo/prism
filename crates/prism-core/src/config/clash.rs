@@ -59,11 +59,28 @@ pub fn parse_proxy(m: &Mapping) -> Result<ProxyConfig> {
     if kind == ProxyKind::Shadowsocks && s(m, "plugin").is_some_and(|p| !p.is_empty()) {
         bail!("proxy {name}: shadowsocks plugin {} is not supported", s(m, "plugin").unwrap_or_default());
     }
+    if kind == ProxyKind::Tuic && s(m, "token").is_some() && s(m, "uuid").is_none() {
+        bail!("proxy {name}: TUIC v4 (token) is not supported, only v5 (uuid + password)");
+    }
+    if kind == ProxyKind::WireGuard && m.contains_key("amnezia-wg-option") {
+        bail!("proxy {name}: AmneziaWG is not supported");
+    }
+    // WireGuard nodes may keep their server in a single-entry `peers` list.
+    let peer = match m.get("peers") {
+        Some(Value::Sequence(peers)) if kind == ProxyKind::WireGuard => {
+            if peers.len() > 1 {
+                bail!("proxy {name}: WireGuard with more than one peer is not supported");
+            }
+            peers.first().and_then(|p| p.as_mapping())
+        }
+        _ => None,
+    };
+    let pm = peer.unwrap_or(m);
     let mut p = ProxyConfig {
         name,
         kind: Some(kind),
-        server: s(m, "server").unwrap_or_default(),
-        port: n(m, "port").unwrap_or(0) as u16,
+        server: s(pm, "server").or_else(|| s(m, "server")).unwrap_or_default(),
+        port: n(pm, "port").or_else(|| n(m, "port")).unwrap_or(0) as u16,
         username: s(m, "username"),
         password: s(m, "password"),
         uuid: s(m, "uuid"),
@@ -79,10 +96,28 @@ pub fn parse_proxy(m: &Mapping) -> Result<ProxyConfig> {
         obfs: s(m, "obfs"),
         obfs_password: s(m, "obfs-password"),
         udp: b(m, "udp"),
+        dialer_proxy: s(m, "dialer-proxy").filter(|x| !x.is_empty()),
+        congestion: s(m, "congestion-controller"),
+        udp_relay_mode: s(m, "udp-relay-mode"),
+        private_key: s(m, "private-key"),
+        public_key: s(pm, "public-key"),
+        pre_shared_key: s(pm, "pre-shared-key").filter(|x| !x.is_empty()),
+        ip: s(m, "ip"),
+        ipv6: s(m, "ipv6"),
+        reserved: match pm.get("reserved") {
+            Some(Value::Sequence(v)) => v.iter().filter_map(|x| x.as_u64()).map(|x| x as u8).collect(),
+            Some(Value::String(v)) => parse_reserved(v),
+            _ => Vec::new(),
+        },
+        mtu: n(m, "mtu").map(|x| x as u16),
+        allowed_ips: list(pm, "allowed-ips"),
         ..Default::default()
     };
-    if matches!(kind, ProxyKind::Trojan | ProxyKind::AnyTls | ProxyKind::Hysteria2) {
+    if matches!(kind, ProxyKind::Trojan | ProxyKind::AnyTls | ProxyKind::Hysteria2 | ProxyKind::Tuic) {
         p.tls = true;
+    }
+    if kind == ProxyKind::Tuic && b(m, "disable-sni") {
+        p.sni = None;
     }
     if let Some(ws) = sub(m, "ws-opts") {
         p.ws_path = s(ws, "path");
@@ -178,6 +213,7 @@ pub fn parse(v: &Value) -> Result<Profile> {
                 "url-test" => GroupKind::UrlTest,
                 "fallback" => GroupKind::Fallback,
                 "load-balance" => GroupKind::LoadBalance,
+                "relay" => GroupKind::Relay,
                 other => {
                     p.warnings.push(format!("group {name}: unsupported type {other}, treated as select"));
                     GroupKind::Select
@@ -354,6 +390,25 @@ pub fn emit_proxy(p: &ProxyConfig) -> Value {
     put_opt(&mut m, "obfs", &p.obfs);
     put_opt(&mut m, "obfs-password", &p.obfs_password);
     put(&mut m, "udp", p.udp);
+    put_opt(&mut m, "dialer-proxy", &p.dialer_proxy);
+    put_opt(&mut m, "congestion-controller", &p.congestion);
+    put_opt(&mut m, "udp-relay-mode", &p.udp_relay_mode);
+    if kind == ProxyKind::WireGuard {
+        put_opt(&mut m, "private-key", &p.private_key);
+        put_opt(&mut m, "public-key", &p.public_key);
+        put_opt(&mut m, "pre-shared-key", &p.pre_shared_key);
+        put_opt(&mut m, "ip", &p.ip);
+        put_opt(&mut m, "ipv6", &p.ipv6);
+        if !p.reserved.is_empty() {
+            put(&mut m, "reserved", Value::Sequence(p.reserved.iter().map(|x| Value::from(*x as u64)).collect()));
+        }
+        if let Some(mtu) = p.mtu {
+            put(&mut m, "mtu", mtu as u64);
+        }
+        if !p.allowed_ips.is_empty() {
+            put(&mut m, "allowed-ips", Value::Sequence(p.allowed_ips.iter().cloned().map(Value::String).collect()));
+        }
+    }
     Value::Mapping(m)
 }
 
@@ -374,7 +429,7 @@ pub fn emit(p: &Profile) -> Value {
             put(&mut m, "name", gc.name.clone());
             put(&mut m, "type", gc.kind.clash_type());
             put(&mut m, "proxies", Value::Sequence(gc.proxies.iter().cloned().map(Value::String).collect()));
-            if gc.kind != GroupKind::Select {
+            if !matches!(gc.kind, GroupKind::Select | GroupKind::Relay) {
                 put(&mut m, "url", gc.url.clone());
                 put(&mut m, "interval", gc.interval);
                 if gc.kind == GroupKind::UrlTest {
@@ -422,6 +477,53 @@ pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
         }
     }
     warnings
+}
+
+/// Current mihomo refuses `relay` groups (replaced by `dialer-proxy`), so
+/// each one becomes copies of its nodes chained with `dialer-proxy`, the
+/// last copy taking the group's name. The first hop may be a group; a relay
+/// whose later hops aren't nodes becomes a select group.
+pub fn relays_to_dialer_proxy(v: &mut Value) {
+    let Some(root) = v.as_mapping_mut() else { return };
+    let nodes: Vec<Mapping> = match root.get("proxies") {
+        Some(Value::Sequence(seq)) => seq.iter().filter_map(|x| x.as_mapping().cloned()).collect(),
+        _ => Vec::new(),
+    };
+    let Some(Value::Sequence(groups)) = root.get_mut("proxy-groups") else { return };
+    let mut copies = Vec::new();
+    groups.retain_mut(|g| {
+        let Some(m) = g.as_mapping_mut() else { return true };
+        if s(m, "type").as_deref() != Some("relay") {
+            return true;
+        }
+        let name = s(m, "name").unwrap_or_default();
+        let hops: Vec<String> = list(m, "proxies").into_iter().filter(|h| h != "DIRECT").collect();
+        let later: Option<Vec<&Mapping>> = hops.iter().skip(1).map(|h| nodes.iter().find(|n| s(n, "name").as_deref() == Some(h))).collect();
+        match later {
+            Some(later) if !later.is_empty() => {
+                let mut prev = hops[0].clone();
+                for (i, node) in later.iter().enumerate() {
+                    let mut c = (*node).clone();
+                    let cname = if i + 1 == later.len() { name.clone() } else { format!("{name} · {}", i + 1) };
+                    put(&mut c, "name", cname.clone());
+                    put(&mut c, "dialer-proxy", prev);
+                    prev = cname;
+                    copies.push(Value::Mapping(c));
+                }
+                false
+            }
+            _ => {
+                put(m, "type", "select");
+                true
+            }
+        }
+    });
+    if copies.is_empty() {
+        return;
+    }
+    if let Some(Value::Sequence(seq)) = root.get_mut("proxies") {
+        seq.extend(copies);
+    }
 }
 
 /// Runtime settings the GUI forces onto every generated config.
@@ -551,6 +653,68 @@ rules:
         // round trip
         let again = parse(&emit(&p)).unwrap();
         assert_eq!(again.proxies[0].password.as_deref(), Some("pw"));
+        assert_eq!(again.rules, p.rules);
+    }
+
+    #[test]
+    fn relays_become_dialer_proxy_chains() {
+        let mut v: Value = serde_yaml::from_str(
+            "proxies:
+  - {name: a, type: ss, server: 1.1.1.1, port: 1, cipher: aes-128-gcm, password: x}
+  - {name: b, type: ss, server: 2.2.2.2, port: 2, cipher: aes-128-gcm, password: y}
+proxy-groups:
+  - {name: PROXY, type: select, proxies: [a, b]}
+  - {name: chain, type: relay, proxies: [PROXY, a, b]}
+  - {name: odd, type: relay, proxies: [a, PROXY]}
+rules: ['MATCH,chain']
+",
+        )
+        .unwrap();
+        relays_to_dialer_proxy(&mut v);
+        let p = parse(&v).unwrap();
+        assert_eq!(p.groups.iter().map(|g| (g.name.as_str(), g.kind)).collect::<Vec<_>>(), [("PROXY", GroupKind::Select), ("odd", GroupKind::Select)]);
+        let hop = |n: &str| p.proxies.iter().find(|x| x.name == n).unwrap();
+        assert_eq!((hop("chain · 1").server.as_str(), hop("chain · 1").dialer_proxy.as_deref()), ("1.1.1.1", Some("PROXY")));
+        assert_eq!((hop("chain").server.as_str(), hop("chain").dialer_proxy.as_deref()), ("2.2.2.2", Some("chain · 1")));
+        assert_eq!(hop("a").dialer_proxy, None, "the original nodes are untouched");
+    }
+
+    #[test]
+    fn tuic_wireguard_relay_round_trip() {
+        let y = r#"
+proxies:
+  - {name: t, type: tuic, server: t.example.com, port: 443, uuid: 0b6a0b4e-0000-4000-8000-000000000000, password: pw, congestion-controller: bbr, udp-relay-mode: native, alpn: [h3], dialer-proxy: w}
+  - name: w
+    type: wireguard
+    private-key: cGsAAA=
+    ip: 172.16.0.2
+    ipv6: fd01::2
+    mtu: 1280
+    udp: true
+    peers:
+      - {server: 162.159.192.1, port: 2408, public-key: pub=, reserved: [1, 2, 3], allowed-ips: ['0.0.0.0/0']}
+  - {name: v4, type: tuic, server: a, port: 1, token: x}
+proxy-groups:
+  - {name: chain, type: relay, proxies: [w, t]}
+rules:
+  - AND,((NETWORK,udp),(DST-PORT,443)),REJECT
+  - MATCH,chain
+"#;
+        let p = parse(&serde_yaml::from_str(y).unwrap()).unwrap();
+        assert_eq!(p.proxies.len(), 2, "{:?}", p.warnings);
+        assert!(p.warnings[0].contains("TUIC v4"));
+        let (t, w) = (&p.proxies[0], &p.proxies[1]);
+        assert!(t.tls);
+        assert_eq!(t.dialer_proxy.as_deref(), Some("w"));
+        assert_eq!((w.server.as_str(), w.port), ("162.159.192.1", 2408));
+        assert_eq!(w.reserved, vec![1, 2, 3]);
+        assert_eq!(p.groups[0].kind, GroupKind::Relay);
+        assert_eq!(p.rules[0].payload, "((NETWORK,udp),(DST-PORT,443))");
+        let again = parse(&emit(&p)).unwrap();
+        assert_eq!(again.proxies[1].public_key.as_deref(), Some("pub="));
+        assert_eq!(again.proxies[1].reserved, vec![1, 2, 3]);
+        assert_eq!(again.proxies[0].congestion.as_deref(), Some("bbr"));
+        assert_eq!(again.groups[0].kind, GroupKind::Relay);
         assert_eq!(again.rules, p.rules);
     }
 }

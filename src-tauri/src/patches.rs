@@ -1,5 +1,7 @@
-//! 覆写: global changes applied to every profile before Prism generates the
-//! core's config, like Clash Verge Rev's Merge and Script profiles.
+//! 覆写: changes applied before Prism generates the core's config, like
+//! Clash Verge Rev's Merge and Script profiles. The global set
+//! (`overrides.json`) applies to every profile, then the profile's own set
+//! (`overrides/<id>.json`).
 //!
 //! - Merge (YAML): `prepend-` / `append-` + `rules` / `proxies` /
 //!   `proxy-groups` add list entries; any other key is merged in (mappings
@@ -47,6 +49,8 @@ function main(config, profileName) {
 ";
 
 const FILE: &str = "overrides.json";
+/// Folder of the per-profile sets.
+pub const DIR: &str = "overrides";
 
 impl Patches {
     pub fn active(&self) -> bool {
@@ -54,17 +58,49 @@ impl Patches {
     }
 }
 
-pub fn load(dir: &Path) -> Patches {
-    std::fs::read_to_string(dir.join(FILE)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| Patches {
-        merge: MERGE_TEMPLATE.into(),
-        script: SCRIPT_TEMPLATE.into(),
-        ..Default::default()
+fn path(dir: &Path, profile: Option<&str>) -> std::path::PathBuf {
+    match profile {
+        None => dir.join(FILE),
+        Some(id) => dir.join(DIR).join(format!("{id}.json")),
+    }
+}
+
+/// The global set (`None`) or a profile's own set; templates when unset.
+pub fn load(dir: &Path, profile: Option<&str>) -> Patches {
+    std::fs::read_to_string(path(dir, profile)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| {
+        let scope = |t: &str| if profile.is_some() { t.replace("对所有订阅生效的", "只对这个订阅生效的") } else { t.to_string() };
+        Patches { merge: scope(MERGE_TEMPLATE), script: scope(SCRIPT_TEMPLATE), ..Default::default() }
     })
 }
 
-pub fn save(dir: &Path, p: &Patches) -> Result<()> {
-    std::fs::write(dir.join(FILE), serde_json::to_vec_pretty(p)?)?;
+pub fn save(dir: &Path, profile: Option<&str>, p: &Patches) -> Result<()> {
+    let file = path(dir, profile);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(file, serde_json::to_vec_pretty(p)?)?;
     Ok(())
+}
+
+pub fn delete(dir: &Path, profile: &str) {
+    let _ = std::fs::remove_file(path(dir, Some(profile)));
+}
+
+/// Ids of the profiles that have an active set of their own.
+pub fn patched_profiles(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir.join(DIR)) else { return Vec::new() };
+    rd.flatten()
+        .filter_map(|e| {
+            let id = e.file_name().to_string_lossy().strip_suffix(".json")?.to_string();
+            load(dir, Some(&id)).active().then_some(id)
+        })
+        .collect()
+}
+
+/// A profile with the global set, then its own set, applied.
+pub fn apply_both(global: &Patches, own: &Patches, raw: &str, profile_name: &str) -> Result<String> {
+    let out = apply(global, raw, profile_name)?;
+    apply(own, &out, profile_name)
 }
 
 /// The profile with the patches applied: Clash YAML when anything is
@@ -178,7 +214,34 @@ rules:
     fn inactive_leaves_the_profile_alone() {
         let p = Patches { merge: "rules: []".into(), script: "garbage(".into(), ..Default::default() };
         assert_eq!(apply(&p, PROFILE, "x").unwrap(), PROFILE);
-        assert!(!load(Path::new("Z:/nowhere")).active(), "templates are off by default");
+        assert!(!load(Path::new("Z:/nowhere"), None).active(), "templates are off by default");
+        assert!(load(Path::new("Z:/nowhere"), Some("p1")).merge.contains("只对这个订阅生效"));
+    }
+
+    #[test]
+    fn profile_set_runs_after_the_global_one() {
+        let dir = std::env::temp_dir().join(format!("prism-patches-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let global = Patches { merge_enabled: true, merge: "prepend-rules: ['DOMAIN,g.com,DIRECT']".into(), ..Default::default() };
+        let own = Patches {
+            script_enabled: true,
+            script: "function main(c) { c.rules.unshift('DOMAIN,own.com,REJECT'); return c; }".into(),
+            ..Default::default()
+        };
+        save(&dir, None, &global).unwrap();
+        save(&dir, Some("p1"), &own).unwrap();
+        save(&dir, Some("p2"), &Patches::default()).unwrap();
+        assert_eq!(patched_profiles(&dir), vec!["p1".to_string()]);
+        let out = doc(&apply_both(&load(&dir, None), &load(&dir, Some("p1")), PROFILE, "x").unwrap());
+        let rules: Vec<&str> = out["rules"].as_sequence().unwrap().iter().map(|r| r.as_str().unwrap()).collect();
+        assert_eq!(rules[..2], ["DOMAIN,own.com,REJECT", "DOMAIN,g.com,DIRECT"]);
+        // Other profiles only get the global set.
+        let out = doc(&apply_both(&load(&dir, None), &load(&dir, Some("p2")), PROFILE, "x").unwrap());
+        assert_eq!(out["rules"][0].as_str(), Some("DOMAIN,g.com,DIRECT"));
+        delete(&dir, "p1");
+        assert!(patched_profiles(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

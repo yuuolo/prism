@@ -171,6 +171,7 @@ export function installDevMock() {
       script: "function main(config, profileName) {\n  return config;\n}\n",
     }),
     save_patches: () => null,
+    patched_profiles: () => ["demo"],
     unlock_check: async () => {
       await new Promise((r) => setTimeout(r, 900));
       return [

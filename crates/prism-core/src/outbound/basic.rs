@@ -7,7 +7,7 @@ use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::tls::Tls;
-use super::Outbound;
+use super::{Dialer, Outbound};
 use crate::common::{invalid, other, tcp_connect, udp_pump, Address, BoxedStream, UdpPipe};
 use crate::config::ProxyConfig;
 
@@ -71,8 +71,8 @@ impl Outbound for Reject {
     }
 }
 
-async fn dial(server: &str, port: u16, tls: &Option<Tls>) -> io::Result<BoxedStream> {
-    let tcp = tcp_connect(server, port).await?;
+async fn dial(dialer: &Dialer, server: &str, port: u16, tls: &Option<Tls>) -> io::Result<BoxedStream> {
+    let tcp = dialer.tcp(server, port).await?;
     Ok(match tls {
         Some(t) => Box::new(t.wrap(tcp).await?),
         None => Box::new(tcp),
@@ -92,16 +92,18 @@ pub struct Socks5 {
     port: u16,
     auth: Option<(String, String)>,
     tls: Option<Tls>,
+    dialer: Dialer,
 }
 
 impl Socks5 {
-    pub fn new(p: &ProxyConfig) -> io::Result<Self> {
+    pub fn new(p: &ProxyConfig, dialer: Dialer) -> io::Result<Self> {
         Ok(Socks5 {
             name: p.name.clone(),
             server: p.server.clone(),
             port: p.port,
             auth: p.username.clone().map(|u| (u, p.password.clone().unwrap_or_default())),
             tls: tls_of(p)?,
+            dialer,
         })
     }
 }
@@ -124,15 +126,11 @@ impl Outbound for Socks5 {
         // UDP ASSOCIATE; the relay address comes back in the reply.
         let unspecified = Address::Ip("0.0.0.0:0".parse().unwrap());
         let (mut ctrl, bound) = self.request(3, &unspecified).await?;
-        let relay = match bound {
-            Address::Ip(sa) if !sa.ip().is_unspecified() => sa,
-            other_addr => {
-                let ip = crate::net::resolve(&self.server, other_addr.port()).await?[0].ip();
-                std::net::SocketAddr::new(ip, other_addr.port())
-            }
+        let (relay_host, relay_port) = match &bound {
+            Address::Ip(sa) if !sa.ip().is_unspecified() => (sa.ip().to_string(), sa.port()),
+            other_addr => (self.server.clone(), other_addr.port()),
         };
-        let sock = crate::net::udp_socket(relay).await?;
-        sock.connect(relay).await?;
+        let (tx, mut rx) = self.dialer.udp(&relay_host, relay_port).await?.split();
         let target = target.clone();
         Ok(udp_pump(move |mut out, inc| async move {
             let mut buf = vec![0u8; 65535];
@@ -144,11 +142,11 @@ impl Outbound for Socks5 {
                             let mut pkt = vec![0, 0, 0];
                             target.write_socks(&mut pkt);
                             pkt.extend_from_slice(&p);
-                            sock.send(&pkt).await?;
+                            tx.send(&pkt).await?;
                         }
                         None => return Ok(()),
                     },
-                    r = sock.recv(&mut buf) => {
+                    r = rx.recv(&mut buf) => {
                         let n = r?;
                         let mut cur = &buf[3.min(n)..n];
                         if Address::read_socks(&mut cur).await.is_err() {
@@ -174,7 +172,7 @@ impl Socks5 {
     /// Handshake + request (`cmd` 1 = CONNECT, 3 = UDP ASSOCIATE); returns
     /// the stream and the bound address from the reply.
     async fn request(&self, cmd: u8, target: &Address) -> io::Result<(BoxedStream, Address)> {
-        let mut s = dial(&self.server, self.port, &self.tls).await?;
+        let mut s = dial(&self.dialer, &self.server, self.port, &self.tls).await?;
         let method = if self.auth.is_some() { 2u8 } else { 0u8 };
         s.write_all(&[5, 1, method]).await?;
         let mut rep = [0u8; 2];
@@ -212,10 +210,11 @@ pub struct Http {
     port: u16,
     auth: Option<String>,
     tls: Option<Tls>,
+    dialer: Dialer,
 }
 
 impl Http {
-    pub fn new(p: &ProxyConfig) -> io::Result<Self> {
+    pub fn new(p: &ProxyConfig, dialer: Dialer) -> io::Result<Self> {
         Ok(Http {
             name: p.name.clone(),
             server: p.server.clone(),
@@ -225,6 +224,7 @@ impl Http {
                     .encode(format!("{u}:{}", p.password.clone().unwrap_or_default()))
             }),
             tls: tls_of(p)?,
+            dialer,
         })
     }
 }
@@ -238,7 +238,7 @@ impl Outbound for Http {
         "Http"
     }
     async fn connect(&self, target: &Address) -> io::Result<BoxedStream> {
-        let mut s = dial(&self.server, self.port, &self.tls).await?;
+        let mut s = dial(&self.dialer, &self.server, self.port, &self.tls).await?;
         let host = match target {
             Address::Ip(sa) => sa.to_string(),
             Address::Domain(d, p) => format!("{d}:{p}"),

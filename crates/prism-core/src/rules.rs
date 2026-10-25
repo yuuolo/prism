@@ -10,7 +10,7 @@ use ipnet::IpNet;
 use regex::Regex;
 
 use crate::common::{is_private_ip, Address};
-use crate::config::RuleConfig;
+use crate::config::{logical_parts, RuleConfig};
 use crate::domain::DomainMatcher;
 use crate::geo::{self, DomainSet, IpSet};
 use crate::tunnel::{Metadata, Network};
@@ -22,7 +22,9 @@ enum Cond {
     Regex(Regex),
     GeoSite(Arc<DomainSet>),
     GeoIp(Arc<IpSet>),
+    SrcGeoIp(Arc<IpSet>),
     Private,
+    SrcPrivate,
     Cidr(IpNet),
     SrcCidr(IpNet),
     DstPort(Vec<(u16, u16)>),
@@ -34,6 +36,9 @@ enum Cond {
     ProcessNameRegex(Regex),
     ProcessPathRegex(Regex),
     RuleSet(Arc<RuleSet>),
+    And(Vec<Cond>),
+    Or(Vec<Cond>),
+    Not(Box<Cond>),
     Match,
 }
 
@@ -52,6 +57,8 @@ impl Cond {
         match self {
             Cond::GeoIp(_) | Cond::Private | Cond::Cidr(_) => true,
             Cond::RuleSet(rs) => rs.needs_ip,
+            Cond::And(c) | Cond::Or(c) => c.iter().any(Cond::needs_ip),
+            Cond::Not(c) => c.needs_ip(),
             _ => false,
         }
     }
@@ -60,6 +67,8 @@ impl Cond {
         match self {
             Cond::ProcessName(_) | Cond::ProcessPath(_) | Cond::ProcessNameRegex(_) | Cond::ProcessPathRegex(_) => true,
             Cond::RuleSet(rs) => rs.needs_process,
+            Cond::And(c) | Cond::Or(c) => c.iter().any(Cond::needs_process),
+            Cond::Not(c) => c.needs_process(),
             _ => false,
         }
     }
@@ -74,7 +83,9 @@ impl Cond {
             Cond::Regex(r) => host.is_some_and(|h| r.is_match(h)),
             Cond::GeoSite(set) => host.is_some_and(|h| set.matches(h)),
             Cond::GeoIp(set) => ip.is_some_and(|ip| set.contains(ip)),
+            Cond::SrcGeoIp(set) => set.contains(meta.src.ip()),
             Cond::Private => ip.is_some_and(is_private_ip) || host == Some("localhost"),
+            Cond::SrcPrivate => is_private_ip(meta.src.ip()),
             Cond::Cidr(net) => ip.is_some_and(|ip| net.contains(&ip)),
             Cond::SrcCidr(net) => net.contains(&meta.src.ip()),
             Cond::DstPort(v) => in_ports(v, meta.dst.port()),
@@ -90,6 +101,9 @@ impl Cond {
                 SetMatcher::IpCidr(set) => ip.is_some_and(|ip| set.contains(ip)),
                 SetMatcher::Classical(conds) => conds.iter().any(|c| c.matches(meta, ip)),
             },
+            Cond::And(c) => c.iter().all(|c| c.matches(meta, ip)),
+            Cond::Or(c) => c.iter().any(|c| c.matches(meta, ip)),
+            Cond::Not(c) => !c.matches(meta, ip),
             Cond::Match => true,
         }
     }
@@ -104,6 +118,7 @@ fn simple_cond(kind: &str, p: &str) -> Option<Option<Cond>> {
         "DOMAIN-KEYWORD" => Some(Cond::Keyword(p.to_ascii_lowercase())),
         "DOMAIN-REGEX" => Regex::new(p).ok().map(Cond::Regex),
         "GEOIP" if matches!(p.to_ascii_lowercase().as_str(), "private" | "lan") => Some(Cond::Private),
+        "SRC-GEOIP" if matches!(p.to_ascii_lowercase().as_str(), "private" | "lan") => Some(Cond::SrcPrivate),
         "IP-CIDR" | "IP-CIDR6" => parse_net(p).map(Cond::Cidr),
         "SRC-IP-CIDR" => parse_net(p).map(Cond::SrcCidr),
         "DST-PORT" => ports(p).map(Cond::DstPort),
@@ -210,6 +225,7 @@ impl Rule {
             "GEOIP" => "GeoIP".to_string(),
             "IP-CIDR" | "IP-CIDR6" => "IPCIDR".to_string(),
             "SRC-IP-CIDR" => "SrcIPCIDR".to_string(),
+            "SRC-GEOIP" => "SrcGeoIP".to_string(),
             "RULE-SET" => "RuleSet".to_string(),
             "PROCESS-NAME" => "ProcessName".to_string(),
             "PROCESS-PATH" => "ProcessPath".to_string(),
@@ -248,14 +264,77 @@ pub struct Router {
     pub rules: Vec<Rule>,
 }
 
+/// (kind, payload) of a rule and, for logical rules, of every sub-rule.
+fn walk(kind: &str, payload: &str, out: &mut Vec<(String, String)>) {
+    if matches!(kind, "AND" | "OR" | "NOT") {
+        for (k, p) in logical_parts(payload).unwrap_or_default() {
+            walk(&k, &p, out);
+        }
+    } else {
+        out.push((kind.to_string(), payload.to_string()));
+    }
+}
+
+struct GeoData<'a> {
+    sites: HashMap<String, Arc<DomainSet>>,
+    ips: HashMap<String, Arc<IpSet>>,
+    sets: &'a HashMap<String, Arc<RuleSet>>,
+}
+
+/// Why a rule can't be used.
+enum Skip {
+    /// geodata missing: already reported once, the rule is dropped quietly.
+    Quiet,
+    Warn(String),
+}
+
+impl GeoData<'_> {
+    fn cond(&self, kind: &str, p: &str) -> Result<Cond, Skip> {
+        let private = matches!(p.to_ascii_lowercase().as_str(), "private" | "lan");
+        match kind {
+            "GEOSITE" => self.sites.get(p).cloned().map(Cond::GeoSite).ok_or(Skip::Quiet),
+            "GEOIP" if !private => self.ips.get(&p.to_ascii_lowercase()).cloned().map(Cond::GeoIp).ok_or(Skip::Quiet),
+            "SRC-GEOIP" if !private => self.ips.get(&p.to_ascii_lowercase()).cloned().map(Cond::SrcGeoIp).ok_or(Skip::Quiet),
+            "RULE-SET" => self
+                .sets
+                .get(p)
+                .cloned()
+                .map(Cond::RuleSet)
+                .ok_or_else(|| Skip::Warn(format!("rule-provider {p} not available"))),
+            "AND" | "OR" | "NOT" => {
+                let parts = logical_parts(p).ok_or_else(|| Skip::Warn(format!("bad {kind} payload {p}")))?;
+                let mut conds = Vec::new();
+                for (k, sub) in &parts {
+                    conds.push(self.cond(k, sub)?);
+                }
+                Ok(match kind {
+                    "AND" => Cond::And(conds),
+                    "OR" => Cond::Or(conds),
+                    _ if conds.len() == 1 => Cond::Not(Box::new(conds.pop().unwrap())),
+                    _ => return Err(Skip::Warn("NOT takes exactly one condition".into())),
+                })
+            }
+            _ => match simple_cond(kind, p) {
+                Some(Some(c)) => Ok(c),
+                Some(None) => Err(Skip::Warn(format!("invalid payload {kind},{p}"))),
+                None => Err(Skip::Warn(format!("rule type {kind} is not supported"))),
+            },
+        }
+    }
+}
+
 impl Router {
     pub fn build(cfgs: &[RuleConfig], home: &Path, sets: &HashMap<String, Arc<RuleSet>>) -> (Router, Vec<String>) {
         let mut warnings = Vec::new();
-        let site_codes: Vec<String> = cfgs.iter().filter(|r| r.kind == "GEOSITE").map(|r| r.payload.clone()).collect();
-        let ip_codes: Vec<String> = cfgs
+        let mut leaves = Vec::new();
+        for r in cfgs {
+            walk(&r.kind, &r.payload, &mut leaves);
+        }
+        let site_codes: Vec<String> = leaves.iter().filter(|(k, _)| k == "GEOSITE").map(|(_, p)| p.clone()).collect();
+        let ip_codes: Vec<String> = leaves
             .iter()
-            .filter(|r| r.kind == "GEOIP" && !matches!(r.payload.to_ascii_lowercase().as_str(), "private" | "lan"))
-            .map(|r| r.payload.clone())
+            .filter(|(k, p)| (k == "GEOIP" || k == "SRC-GEOIP") && !matches!(p.to_ascii_lowercase().as_str(), "private" | "lan"))
+            .map(|(_, p)| p.clone())
             .collect();
         let mut sites: HashMap<String, Arc<DomainSet>> = HashMap::new();
         if !site_codes.is_empty() {
@@ -272,39 +351,19 @@ impl Router {
             }
         }
 
+        let geo = GeoData { sites, ips, sets };
         let mut rules = Vec::new();
         for r in cfgs {
-            let p = r.payload.as_str();
-            let cond = match r.kind.as_str() {
-                "GEOSITE" => sites.get(p).cloned().map(Cond::GeoSite),
-                "GEOIP" if !matches!(p.to_ascii_lowercase().as_str(), "private" | "lan") => {
-                    ips.get(&p.to_ascii_lowercase()).cloned().map(Cond::GeoIp)
-                }
-                "RULE-SET" => match sets.get(p) {
-                    Some(rs) => Some(Cond::RuleSet(rs.clone())),
-                    None => {
-                        warnings.push(format!("rule {}: rule-provider {p} not available, skipped", r.to_line()));
-                        continue;
-                    }
-                },
-                kind => match simple_cond(kind, p) {
-                    Some(c) => c,
-                    None => {
-                        warnings.push(format!("rule type {} is not supported, skipped", r.kind));
-                        continue;
-                    }
-                },
-            };
-            match cond {
-                Some(cond) => rules.push(Rule {
+            match geo.cond(&r.kind, &r.payload) {
+                Ok(cond) => rules.push(Rule {
                     kind: r.kind.clone(),
                     payload: r.payload.clone(),
                     target: r.target.clone(),
                     no_resolve: r.no_resolve,
                     cond,
                 }),
-                None if matches!(r.kind.as_str(), "GEOSITE" | "GEOIP") => {}
-                None => warnings.push(format!("invalid rule {}", r.to_line())),
+                Err(Skip::Quiet) => {}
+                Err(Skip::Warn(why)) => warnings.push(format!("rule {}: {why}, skipped", r.to_line())),
             }
         }
         (Router { rules }, warnings)
@@ -372,6 +431,41 @@ mod tests {
         let mut unknown = meta("example.com:443");
         unknown.process_checked = true;
         assert_eq!(route(unknown).await, "M");
+    }
+
+    #[tokio::test]
+    async fn logical_rules() {
+        let cfgs: Vec<RuleConfig> = [
+            "AND,((NETWORK,udp),(DST-PORT,443)),QUIC",
+            "OR,((DOMAIN-SUFFIX,a.com),(DOMAIN-KEYWORD,ads)),AD",
+            "NOT,((DST-PORT,80/443)),ODD",
+            "AND,((SRC-GEOIP,lan),(OR,((DOMAIN,x.com),(IP-CIDR,9.9.9.0/24)))),NESTED,no-resolve",
+            "AND,((NETWORK,tcp),(FOO,bar)),BAD",
+            "NOT,((NETWORK,udp),(DST-PORT,1)),BAD2",
+            "MATCH,M",
+        ]
+        .iter()
+        .map(|l| RuleConfig::parse(l).unwrap())
+        .collect();
+        let (r, w) = Router::build(&cfgs, Path::new("."), &HashMap::new());
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("FOO is not supported"), "{w:?}");
+        let route = |dst: &str, net: crate::tunnel::Network| {
+            let mut m = meta(dst);
+            m.network = net;
+            let r = &r;
+            async move { r.route(&mut m).await.unwrap().target.clone() }
+        };
+        use crate::tunnel::Network::{Tcp, Udp};
+        assert_eq!(route("1.2.3.4:443", Udp).await, "QUIC");
+        assert_eq!(route("www.a.com:443", Tcp).await, "AD");
+        assert_eq!(route("ads.example.org:80", Tcp).await, "AD");
+        assert_eq!(route("8.8.8.8:22", Tcp).await, "ODD");
+        // src 127.0.0.1 is private
+        assert_eq!(route("x.com:443", Tcp).await, "NESTED");
+        assert_eq!(route("9.9.9.9:80", Tcp).await, "NESTED");
+        assert_eq!(route("y.com:443", Tcp).await, "M");
+        assert_eq!(r.rules[0].display(), "And(((NETWORK,udp),(DST-PORT,443)))");
     }
 
     #[tokio::test]

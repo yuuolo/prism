@@ -26,7 +26,7 @@ use rand::{Rng, RngCore};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
-use super::Outbound;
+use super::{Dialer, Outbound};
 use crate::common::{other, udp_pump, Address, BoxedStream, UdpPipe};
 use crate::config::ProxyConfig;
 
@@ -252,11 +252,12 @@ pub struct Hysteria2 {
     skip_verify: bool,
     alpn: Vec<String>,
     obfs: Option<Vec<u8>>,
+    dialer: Dialer,
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
 }
 
 impl Hysteria2 {
-    pub fn new(p: &ProxyConfig) -> anyhow::Result<Self> {
+    pub fn new(p: &ProxyConfig, dialer: Dialer) -> anyhow::Result<Self> {
         let obfs = match p.obfs.as_deref() {
             None | Some("") => None,
             Some("salamander") => Some(p.obfs_password.clone().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("{}: salamander needs obfs-password", p.name))?.into_bytes()),
@@ -271,6 +272,7 @@ impl Hysteria2 {
             skip_verify: p.skip_cert_verify,
             alpn: if p.alpn.is_empty() { vec!["h3".into()] } else { p.alpn.clone() },
             obfs,
+            dialer,
             session: tokio::sync::Mutex::new(None),
         })
     }
@@ -288,12 +290,9 @@ impl Hysteria2 {
     }
 
     async fn open(&self) -> io::Result<Session> {
-        let addrs = crate::net::resolve(&self.server, self.port).await?;
-        let peer = *addrs.iter().find(|a| a.is_ipv4()).or(addrs.first()).ok_or_else(|| other("hysteria2: no server address"))?;
         // Pinned to the physical interface in TUN mode, like TCP.
-        let sock = crate::net::udp_socket(peer).await?.into_std()?;
+        let (mut socket, peer) = self.dialer.udp(&self.server, self.port).await?.into_quinn()?;
         let runtime: Arc<dyn quinn::Runtime> = Arc::new(quinn::TokioRuntime);
-        let mut socket = runtime.wrap_udp_socket(sock)?;
         if let Some(pw) = &self.obfs {
             socket = Arc::new(Salamander { inner: socket, password: pw.clone() });
         }

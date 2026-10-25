@@ -117,7 +117,7 @@ export interface UnlockCheck {
   note: string | null;
 }
 
-/** 覆写: global Merge (YAML) and Script (JS) applied to every profile. */
+/** 覆写: Merge (YAML) and Script (JS), global or for one profile. */
 export interface Patches {
   merge_enabled: boolean;
   merge: string;
@@ -216,8 +216,10 @@ export const api = {
   updateTray: () => invoke<void>("update_tray"),
   trafficHistory: () => invoke<TrafficDay[]>("traffic_history"),
   unlockCheck: () => invoke<UnlockCheck[]>("unlock_check"),
-  getPatches: () => invoke<Patches>("get_patches"),
-  savePatches: (patches: Patches) => invoke<void>("save_patches", { patches }),
+  /** `profile` = null: the global set. */
+  getPatches: (profile: string | null) => invoke<Patches>("get_patches", { profile }),
+  savePatches: (patches: Patches, profile: string | null) => invoke<void>("save_patches", { patches, profile }),
+  patchedProfiles: () => invoke<string[]>("patched_profiles"),
   webdavSave: (url: string, username: string, password: string | null) => invoke<void>("webdav_save", { url, username, password }),
   webdavTest: () => invoke<void>("webdav_test"),
   backupUpload: () => invoke<string>("backup_upload"),

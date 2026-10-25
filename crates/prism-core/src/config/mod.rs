@@ -17,6 +17,8 @@ pub enum ProxyKind {
     Vmess,
     AnyTls,
     Hysteria2,
+    Tuic,
+    WireGuard,
     Socks5,
     Http,
 }
@@ -31,6 +33,8 @@ impl ProxyKind {
             ProxyKind::Vmess => "vmess",
             ProxyKind::AnyTls => "anytls",
             ProxyKind::Hysteria2 => "hysteria2",
+            ProxyKind::Tuic => "tuic",
+            ProxyKind::WireGuard => "wireguard",
             ProxyKind::Socks5 => "socks5",
             ProxyKind::Http => "http",
         }
@@ -44,6 +48,8 @@ impl ProxyKind {
             "vmess" => ProxyKind::Vmess,
             "anytls" => ProxyKind::AnyTls,
             "hysteria2" | "hy2" => ProxyKind::Hysteria2,
+            "tuic" => ProxyKind::Tuic,
+            "wireguard" | "wg" => ProxyKind::WireGuard,
             "socks5" | "socks" => ProxyKind::Socks5,
             "http" => ProxyKind::Http,
             _ => return None,
@@ -52,6 +58,7 @@ impl ProxyKind {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProxyConfig {
     pub name: String,
     pub kind: Option<ProxyKind>,
@@ -78,12 +85,40 @@ pub struct ProxyConfig {
     pub obfs: Option<String>,
     pub obfs_password: Option<String>,
     pub udp: bool,
+    /// Outbound (proxy or group) used to reach this node's server
+    /// (Clash `dialer-proxy`).
+    pub dialer_proxy: Option<String>,
+    /// TUIC: congestion-controller (cubic / new_reno / bbr).
+    pub congestion: Option<String>,
+    /// TUIC: udp-relay-mode (native = QUIC datagrams, quic = streams).
+    pub udp_relay_mode: Option<String>,
+    /// WireGuard: this peer's private key, the server's public key and the
+    /// optional pre-shared key (base64).
+    pub private_key: Option<String>,
+    pub public_key: Option<String>,
+    pub pre_shared_key: Option<String>,
+    /// WireGuard: tunnel addresses, e.g. `172.16.0.2/32`, `fd01::2/128`.
+    pub ip: Option<String>,
+    pub ipv6: Option<String>,
+    /// WireGuard: the 3 reserved header bytes (Cloudflare WARP client id).
+    pub reserved: Vec<u8>,
+    pub mtu: Option<u16>,
+    pub allowed_ips: Vec<String>,
 }
 
 impl ProxyConfig {
     pub fn kind(&self) -> ProxyKind {
         self.kind.unwrap_or(ProxyKind::Http)
     }
+}
+
+/// WireGuard `reserved`: `1,2,3` or the base64 of the three bytes (`AQID`).
+pub fn parse_reserved(s: &str) -> Vec<u8> {
+    let s = s.trim().trim_start_matches('[').trim_end_matches(']');
+    if s.contains(',') {
+        return s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    }
+    uri::b64_decode(s).filter(|b| b.len() == 3).unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +128,8 @@ pub enum GroupKind {
     UrlTest,
     Fallback,
     LoadBalance,
+    /// Chains the members: traffic goes through the first, then the second...
+    Relay,
 }
 
 impl GroupKind {
@@ -102,6 +139,7 @@ impl GroupKind {
             GroupKind::UrlTest => "url-test",
             GroupKind::Fallback => "fallback",
             GroupKind::LoadBalance => "load-balance",
+            GroupKind::Relay => "relay",
         }
     }
 
@@ -112,6 +150,7 @@ impl GroupKind {
             GroupKind::UrlTest => "URLTest",
             GroupKind::Fallback => "Fallback",
             GroupKind::LoadBalance => "LoadBalance",
+            GroupKind::Relay => "Relay",
         }
     }
 }
@@ -163,10 +202,47 @@ pub struct RuleConfig {
     pub no_resolve: bool,
 }
 
+/// Splits on commas outside parentheses, so logical rules keep their
+/// payload together: `AND,((NETWORK,udp),(DST-PORT,443)),REJECT`.
+pub fn split_rule(line: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0i32, 0);
+    for (i, c) in line.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth <= 0 => {
+                parts.push(line[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(line[start..].trim());
+    parts
+}
+
+/// The sub-rules of a logical rule payload: `((NETWORK,udp),(DST-PORT,443))`
+/// -> [(NETWORK, udp), (DST-PORT, 443)]. None when malformed.
+pub fn logical_parts(payload: &str) -> Option<Vec<(String, String)>> {
+    let inner = payload.trim().strip_prefix('(')?.strip_suffix(')')?;
+    let mut out = Vec::new();
+    for item in split_rule(inner) {
+        let item = item.strip_prefix('(')?.strip_suffix(')')?;
+        let parts = split_rule(item);
+        let kind = parts.first()?.to_ascii_uppercase();
+        if kind.is_empty() {
+            return None;
+        }
+        out.push((kind, parts.get(1).map(|s| s.to_string()).unwrap_or_default()));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 impl RuleConfig {
     /// Parses a Clash rule line: `TYPE,payload,target[,no-resolve]` or `MATCH,target`.
     pub fn parse(line: &str) -> Option<Self> {
-        let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+        let parts = split_rule(line);
         let kind = parts.first()?.to_ascii_uppercase();
         if kind == "MATCH" || kind == "FINAL" {
             return Some(RuleConfig {
@@ -505,6 +581,18 @@ mod tests {
         assert!(r.no_resolve);
         assert_eq!(r.to_line(), "GEOIP,private,DIRECT,no-resolve");
         assert_eq!(RuleConfig::parse("FINAL,PROXY").unwrap().to_line(), "MATCH,PROXY");
+        let and = RuleConfig::parse("AND,((NETWORK,udp),(DST-PORT,443)),REJECT").unwrap();
+        assert_eq!((and.kind.as_str(), and.payload.as_str(), and.target.as_str()), ("AND", "((NETWORK,udp),(DST-PORT,443))", "REJECT"));
+        assert_eq!(and.to_line(), "AND,((NETWORK,udp),(DST-PORT,443)),REJECT");
+        let not = RuleConfig::parse("NOT,((DOMAIN-SUFFIX,cn)),PROXY,no-resolve").unwrap();
+        assert!(not.no_resolve);
+        assert_eq!(not.payload, "((DOMAIN-SUFFIX,cn))");
+        assert_eq!(
+            logical_parts("((NETWORK,udp),(OR,((DST-PORT,443),(DST-PORT,80))))").unwrap(),
+            vec![("NETWORK".to_string(), "udp".to_string()), ("OR".to_string(), "((DST-PORT,443),(DST-PORT,80))".to_string())]
+        );
+        assert!(logical_parts("(NETWORK,udp)").is_none());
+        assert!(logical_parts("").is_none());
     }
 
     #[test]

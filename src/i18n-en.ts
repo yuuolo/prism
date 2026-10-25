@@ -176,6 +176,14 @@ export const EN: Record<string, string> = {
     "function main(config, profileName) { … return config; }. config is the profile as a Clash config; scripts can't use the network or files.",
   "保存前会先用当前订阅试运行，出错不会保存。": "Saving tries it on the active profile first; nothing is saved if it fails.",
   覆写已保存并生效: "Overrides saved and applied",
+  覆写已保存: "Overrides saved",
+  全局覆写: "Global overrides",
+  "覆写 · {name}": "Overrides · {name}",
+  已覆写: "Overridden",
+  这个订阅有自己的覆写: "This profile has overrides of its own",
+  "只对这个订阅生效，在全局覆写之后应用（先 Merge，后 Script）。远程订阅更新后也会保留。":
+    "Applies to this profile only, after the global overrides (Merge first, then Script). Kept across profile updates.",
+  "保存前会先用这个订阅试运行，出错不会保存。": "Saving tries it on this profile first; nothing is saved if it fails.",
 
   // Import links
   导入订阅: "Import profile",

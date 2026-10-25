@@ -1,5 +1,6 @@
 //! Share-link subscriptions: plain or base64 lists of `anytls://`, `ss://`,
-//! `trojan://`, `vless://`, `vmess://`, `hysteria2://` and `socks5://` URIs.
+//! `trojan://`, `vless://`, `vmess://`, `hysteria2://`, `tuic://`,
+//! `wireguard://` and `socks5://` URIs.
 
 use std::collections::HashMap;
 
@@ -55,7 +56,9 @@ pub fn parse_uri(line: &str) -> Result<ProxyConfig> {
     match scheme.as_str() {
         "vmess" => parse_vmess(line),
         "ss" => parse_ss(line),
-        "anytls" | "trojan" | "vless" | "hysteria2" | "hy2" | "socks5" | "socks" => parse_generic(line, &scheme),
+        "anytls" | "trojan" | "vless" | "hysteria2" | "hy2" | "tuic" | "wireguard" | "wg" | "socks5" | "socks" => {
+            parse_generic(line, &scheme)
+        }
         _ => bail!("unsupported scheme {scheme}"),
     }
 }
@@ -88,6 +91,8 @@ fn parse_generic(line: &str, scheme: &str) -> Result<ProxyConfig> {
         "trojan" => ProxyKind::Trojan,
         "vless" => ProxyKind::Vless,
         "hysteria2" | "hy2" => ProxyKind::Hysteria2,
+        "tuic" => ProxyKind::Tuic,
+        "wireguard" | "wg" => ProxyKind::WireGuard,
         _ => ProxyKind::Socks5,
     };
     let mut p = ProxyConfig {
@@ -96,7 +101,7 @@ fn parse_generic(line: &str, scheme: &str) -> Result<ProxyConfig> {
         server,
         port,
         sni: q.get("sni").or_else(|| q.get("peer")).cloned().filter(|s| !s.is_empty()),
-        skip_cert_verify: truthy(q.get("insecure")) || truthy(q.get("allowInsecure")),
+        skip_cert_verify: truthy(q.get("insecure")) || truthy(q.get("allowInsecure")) || truthy(q.get("allow_insecure")),
         alpn: q.get("alpn").map(|a| a.split(',').map(String::from).collect()).unwrap_or_default(),
         fingerprint: q.get("fp").cloned().filter(|s| !s.is_empty()),
         udp: true,
@@ -117,6 +122,29 @@ fn parse_generic(line: &str, scheme: &str) -> Result<ProxyConfig> {
             p.username = Some(user).filter(|u| !u.is_empty());
             p.password = u.password().map(decode);
             p.udp = false;
+        }
+        ProxyKind::Tuic => {
+            p.uuid = Some(user);
+            p.password = u.password().map(decode);
+            p.tls = true;
+            p.congestion = q.get("congestion_control").or_else(|| q.get("congestion-controller")).cloned();
+            p.udp_relay_mode = q.get("udp_relay_mode").or_else(|| q.get("udp-relay-mode")).cloned();
+        }
+        ProxyKind::WireGuard => {
+            // v2rayN style: the private key is the userinfo.
+            p.private_key = Some(user).filter(|k| !k.is_empty()).or_else(|| q.get("privatekey").cloned());
+            p.public_key = q.get("publickey").or_else(|| q.get("public-key")).cloned();
+            p.pre_shared_key = q.get("presharedkey").or_else(|| q.get("pre-shared-key")).cloned().filter(|k| !k.is_empty());
+            for a in q.get("address").or_else(|| q.get("ip")).map(|a| a.split(',').map(str::trim).collect::<Vec<_>>()).unwrap_or_default() {
+                let host = a.split('/').next().unwrap_or(a);
+                match host.parse::<std::net::IpAddr>() {
+                    Ok(std::net::IpAddr::V4(_)) => p.ip = Some(a.to_string()),
+                    Ok(std::net::IpAddr::V6(_)) => p.ipv6 = Some(a.to_string()),
+                    Err(_) => {}
+                }
+            }
+            p.reserved = q.get("reserved").map(|r| super::parse_reserved(r)).unwrap_or_default();
+            p.mtu = q.get("mtu").and_then(|m| m.parse().ok());
         }
         _ => {
             // anytls / trojan / hysteria2: the userinfo is the password. Some
@@ -240,5 +268,23 @@ mod tests {
         assert_eq!(nodes[1].cipher.as_deref(), Some("aes-256-gcm"));
         assert_eq!(nodes[2].ws_path.as_deref(), Some("/ray"));
         assert!(nodes[3].skip_cert_verify);
+    }
+
+    #[test]
+    fn tuic_and_wireguard_links() {
+        let t = parse_uri("tuic://0b6a0b4e-0000-4000-8000-000000000000:p%40ss@t.example.com:443?sni=t.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=quic&allow_insecure=1#tu").unwrap();
+        assert_eq!(t.kind, Some(ProxyKind::Tuic));
+        assert_eq!(t.password.as_deref(), Some("p@ss"));
+        assert_eq!(t.congestion.as_deref(), Some("bbr"));
+        assert_eq!(t.udp_relay_mode.as_deref(), Some("quic"));
+        assert!(t.skip_cert_verify && t.tls);
+        let w = parse_uri("wireguard://cGsAAA%3D@162.159.192.1:2408?publickey=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D&reserved=1,2,3&address=172.16.0.2%2F32,2606:4700::2%2F128&mtu=1280#warp").unwrap();
+        assert_eq!(w.kind, Some(ProxyKind::WireGuard));
+        assert_eq!(w.private_key.as_deref(), Some("cGsAAA="));
+        assert_eq!(w.public_key.as_deref(), Some("bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="));
+        assert_eq!(w.reserved, vec![1, 2, 3]);
+        assert_eq!(w.ip.as_deref(), Some("172.16.0.2/32"));
+        assert_eq!(w.ipv6.as_deref(), Some("2606:4700::2/128"));
+        assert_eq!(w.mtu, Some(1280));
     }
 }

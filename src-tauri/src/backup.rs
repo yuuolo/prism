@@ -48,8 +48,10 @@ pub fn create(store: &Store, s: &Settings) -> Result<Vec<u8>> {
             zip.write_all(content.as_bytes())?;
         }
     }
-    for extra in ["overrides.json"] {
-        if let Ok(bytes) = std::fs::read(store.dir.join(extra)) {
+    let mut extras = vec!["overrides.json".to_string()];
+    extras.extend(store.profiles().iter().map(|p| format!("{}/{}.json", crate::patches::DIR, p.id)));
+    for extra in extras {
+        if let Ok(bytes) = std::fs::read(store.dir.join(&extra)) {
             zip.start_file(extra, opts)?;
             zip.write_all(&bytes)?;
         }
@@ -65,10 +67,10 @@ pub fn restore(store: &Store, current: &Settings, bytes: &[u8]) -> Result<Settin
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
         let name = f.name().to_string();
+        let safe_id = |id: &str| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         let ok = matches!(name.as_str(), "settings.json" | "profiles.json" | "overrides.json")
-            || name.strip_prefix("profiles/").and_then(|n| n.strip_suffix(".txt")).is_some_and(|id| {
-                !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            });
+            || name.strip_prefix("profiles/").and_then(|n| n.strip_suffix(".txt")).is_some_and(safe_id)
+            || name.strip_prefix("overrides/").and_then(|n| n.strip_suffix(".json")).is_some_and(safe_id);
         if !ok {
             continue;
         }
@@ -89,9 +91,14 @@ pub fn restore(store: &Store, current: &Settings, bytes: &[u8]) -> Result<Settin
     // Profiles not in the backup go away with their files.
     for p in store.profiles() {
         let _ = std::fs::remove_file(store.dir.join("profiles").join(format!("{}.txt", p.id)));
+        crate::patches::delete(&store.dir, &p.id);
     }
     for (name, data) in files.iter().filter(|(n, _)| n != "settings.json") {
-        std::fs::write(store.dir.join(name), data)?;
+        let path = store.dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, data)?;
     }
     store.save_settings(&s)?;
     Ok(s)
