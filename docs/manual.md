@@ -1,6 +1,6 @@
 # Prism 使用手册（Windows）
 
-适用版本：v0.1.5（新增 Reality / Vision / Hysteria2、TLS 指纹、覆写、解锁检测、WebDAV 备份、主题与英文界面、快捷键、流量统计）
+适用版本：v0.1.6（新增 VMess、WebSocket / HTTPUpgrade / gRPC 传输、TUIC、WireGuard、Vision 的 UDP、链式代理、组合规则、按订阅覆写、连接导出）
 
 - [1. 安装与首次使用](#1-安装与首次使用)
 - [2. 界面说明](#2-界面说明)
