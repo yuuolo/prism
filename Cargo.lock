@@ -4034,7 +4034,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "prism"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4065,7 +4065,7 @@ dependencies = [
 
 [[package]]
 name = "prism-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4123,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "prism-service"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
