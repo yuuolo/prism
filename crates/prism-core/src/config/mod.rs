@@ -387,6 +387,67 @@ impl AppRoute {
     }
 }
 
+/// A domain / IP rule added by the GUI (域名 / IP 分流): connections to the
+/// domain / address go to `target`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserRule {
+    /// DOMAIN-SUFFIX, DOMAIN, DOMAIN-KEYWORD, IP-CIDR, GEOSITE or GEOIP.
+    pub kind: String,
+    pub value: String,
+    /// Proxy / group name, DIRECT or REJECT.
+    pub target: String,
+    /// IP rules: resolve domain destinations to match them too (slower).
+    #[serde(default)]
+    pub resolve: bool,
+}
+
+pub const USER_RULE_KINDS: [&str; 6] = ["DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "IP-CIDR", "GEOSITE", "GEOIP"];
+
+impl UserRule {
+    /// The rule as the cores take it, with the value cleaned up (a pasted
+    /// URL becomes its host, a single IP a /32 or /128 network).
+    pub fn to_rule(&self) -> Result<RuleConfig, String> {
+        let kind = self.kind.trim().to_ascii_uppercase();
+        if !USER_RULE_KINDS.contains(&kind.as_str()) {
+            return Err(format!("unknown rule type {kind}"));
+        }
+        let target = self.target.trim();
+        if target.is_empty() || target.contains(',') {
+            return Err(format!("{}: bad target {target}", self.value));
+        }
+        let mut v = self.value.trim().to_string();
+        if v.is_empty() || v.contains([',', ' ', '\t']) {
+            return Err(format!("{v}: empty or contains commas / spaces"));
+        }
+        let ip = kind == "IP-CIDR" || kind == "GEOIP";
+        match kind.as_str() {
+            "DOMAIN" | "DOMAIN-SUFFIX" => {
+                if let Some(host) = v.contains("://").then(|| url::Url::parse(&v).ok().and_then(|u| u.host_str().map(String::from))).flatten() {
+                    v = host;
+                }
+                v = v.trim_start_matches("*.").trim_start_matches("+.").trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
+                if v.is_empty() || v.contains(['/', ':', '*']) {
+                    return Err(format!("{}: not a domain", self.value));
+                }
+            }
+            "DOMAIN-KEYWORD" => v = v.to_ascii_lowercase(),
+            "IP-CIDR" => {
+                let net = v
+                    .parse::<ipnet::IpNet>()
+                    .or_else(|_| v.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                    .map_err(|_| format!("{v}: not an IP address or network"))?;
+                v = net.trunc().to_string();
+            }
+            _ => {
+                if !v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@' | '!' | '.')) {
+                    return Err(format!("{v}: not a GEOSITE / GEOIP code"));
+                }
+            }
+        }
+        Ok(RuleConfig { kind, payload: v, target: target.to_string(), no_resolve: ip && !self.resolve })
+    }
+}
+
 /// Clash `dns:` section.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DnsConfig {

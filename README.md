@@ -42,6 +42,7 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 - **代理页**：全部测速、按延迟 / 名称排序、搜索节点；托盘菜单直接切换节点；**解锁检测**（Netflix、YouTube Premium、ChatGPT、Claude、Gemini 等）
 - **连接页导出**：把（过滤后的）连接导出为 Excel / CSV / JSON / HTML / Markdown
 - **覆写**：全局或按订阅的 Merge（YAML）和 Script（JavaScript，内置 Boa 引擎）
+- **域名分流**：自定义域名 / IP / GEOSITE / GEOIP 规则走指定出口，排在订阅规则之前，换订阅也保留；可从连接页一键添加
 - **合并订阅**：把其他订阅的节点加入当前订阅的代理组，规则仍用当前订阅的
 - **备份与同步**：WebDAV 云端备份 / 恢复、本地导出导入（密码用 DPAPI 加密）
 - **外观**：浅色 / 深色主题、中文 / English 界面、全局快捷键、最近 30 天流量统计

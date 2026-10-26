@@ -6,7 +6,7 @@ import { t } from "../i18n";
 const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 /** Exit picker: DIRECT / REJECT, then the profile's groups and nodes. */
-function TargetSelect({ value, outs, onChange }: { value: string; outs: Outbounds | null; onChange: (v: string) => void }) {
+export function TargetSelect({ value, outs, onChange }: { value: string; outs: Outbounds | null; onChange: (v: string) => void }) {
   const known = !outs || value === "DIRECT" || value === "REJECT" || outs.groups.includes(value) || outs.proxies.includes(value);
   return (
     <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
@@ -35,7 +35,7 @@ function TargetSelect({ value, outs, onChange }: { value: string; outs: Outbound
   );
 }
 
-function useOutbounds() {
+export function useOutbounds() {
   const { snap } = useApp();
   const [outs, setOuts] = useState<Outbounds | null>(null);
   useEffect(() => {

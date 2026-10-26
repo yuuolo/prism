@@ -99,6 +99,10 @@ fn singbox_config(store: &Store, s: &Settings) -> Result<(Value, Vec<String>)> {
         _ => singbox::emit(&config::parse_any(&raw)?, &o),
     };
     singbox::apply_overrides(&mut doc, &o);
+    // Here rather than with the app rules: the rule-sets these need must
+    // be among the ones the app downloads.
+    let mut warnings = warnings;
+    warnings.extend(route_warnings(singbox::add_user_rules(&mut doc, &user_rules(s))));
     Ok((doc, warnings))
 }
 
@@ -119,6 +123,18 @@ fn app_routes(s: &Settings) -> Vec<config::AppRoute> {
         .filter(|r| r.enabled)
         .map(|r| config::AppRoute { by_path: r.by_path, value: r.value.clone(), target: r.target.clone() })
         .collect()
+}
+
+fn user_rules(s: &Settings) -> Vec<config::UserRule> {
+    s.route_rules
+        .iter()
+        .filter(|r| r.enabled)
+        .map(|r| config::UserRule { kind: r.kind.clone(), value: r.value.clone(), target: r.target.clone(), resolve: r.resolve })
+        .collect()
+}
+
+fn route_warnings(w: Vec<String>) -> Vec<String> {
+    w.into_iter().map(|w| format!("域名 / IP 分流: {w}")).collect()
 }
 
 fn app_warnings(w: Vec<String>) -> Vec<String> {
@@ -146,6 +162,7 @@ pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig
             if s.core == CoreKind::Mihomo {
                 clash::relays_to_dialer_proxy(&mut doc);
             }
+            warnings.extend(route_warnings(clash::add_user_rules(&mut doc, &user_rules(s))));
             warnings.extend(app_warnings(clash::add_app_rules(&mut doc, &app_routes(s))));
             let path = dir.join("config.yaml");
             std::fs::write(&path, serde_yaml::to_string(&doc)?)?;

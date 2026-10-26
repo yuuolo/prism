@@ -140,6 +140,8 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
         s.mode = keep.mode;
         s.active_profile = keep.active_profile;
         s.app_rules = keep.app_rules;
+        s.route_rules = keep.route_rules;
+        s.merge_profiles = keep.merge_profiles;
         s.webdav = keep.webdav;
     })?;
     let restart = old.core != new.core
@@ -876,6 +878,20 @@ async fn set_app_rules(app: AppHandle, st: State<'_, AppState>, rules: Vec<store
     Ok(())
 }
 
+/// Saves the domain / IP rules, cleaned up (a pasted URL becomes its host)
+/// and refusing malformed ones, then reloads a running core.
+#[tauri::command]
+async fn set_route_rules(app: AppHandle, st: State<'_, AppState>, mut rules: Vec<store::RouteRule>) -> Res<()> {
+    for r in &mut rules {
+        let rule = prism_core::config::UserRule { kind: r.kind.clone(), value: r.value.clone(), target: r.target.clone(), resolve: r.resolve };
+        let rc = rule.to_rule().map_err(|err| format!("规则「{}」无效：{err}", r.value))?;
+        r.kind = rc.kind;
+        r.value = rc.payload;
+    }
+    st.update(|s| s.route_rules = rules)?;
+    reload_core(&app, &st).await
+}
+
 /// Installs the TUN service, or refreshes its copies of the cores. Shows a
 /// UAC prompt. A running TUN core is restarted inside the service.
 #[tauri::command]
@@ -1322,6 +1338,7 @@ pub fn run() {
             list_processes,
             profile_outbounds,
             set_app_rules,
+            set_route_rules,
             set_profile_interval,
             set_autostart,
             set_clash_links,

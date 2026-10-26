@@ -458,12 +458,7 @@ pub fn emit(p: &Profile) -> Value {
 pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
     let mut warnings = Vec::new();
     let Some(root) = v.as_mapping_mut() else { return warnings };
-    let mut names: std::collections::HashSet<String> = ["DIRECT", "REJECT", "GLOBAL"].iter().map(|s| s.to_string()).collect();
-    for key in ["proxies", "proxy-groups"] {
-        if let Some(Value::Sequence(seq)) = root.get(key) {
-            names.extend(seq.iter().filter_map(|x| x.as_mapping().and_then(|m| s(m, "name"))));
-        }
-    }
+    let names = target_names(root);
     let mut lines = Vec::new();
     for r in routes {
         if let Err(e) = r.valid() {
@@ -477,14 +472,49 @@ pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
         let kind = if r.by_path { "PROCESS-PATH" } else { "PROCESS-NAME" };
         lines.push(Value::String(format!("{kind},{},{}", r.process_name(), r.target)));
     }
-    if !lines.is_empty() {
-        let rules = root.entry(Value::String("rules".into())).or_insert_with(|| Value::Sequence(vec![]));
-        if let Value::Sequence(seq) = rules {
-            lines.append(seq);
-            *seq = lines;
+    prepend_rules(root, lines);
+    warnings
+}
+
+/// Puts the GUI's domain / IP rules in front of the profile's rules (app
+/// rules, added after these, end up first). Rules that are invalid or whose
+/// target doesn't exist in the profile are skipped with a warning.
+pub fn add_user_rules(v: &mut Value, rules: &[UserRule]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Some(root) = v.as_mapping_mut() else { return warnings };
+    let names = target_names(root);
+    let mut lines = Vec::new();
+    for r in rules {
+        match r.to_rule() {
+            Ok(rc) if names.contains(&rc.target) => lines.push(Value::String(rc.to_line())),
+            Ok(rc) => warnings.push(format!("rule {} skipped: {} is not in this profile", rc.payload, rc.target)),
+            Err(e) => warnings.push(format!("rule skipped: {e}")),
         }
     }
+    prepend_rules(root, lines);
     warnings
+}
+
+/// Names a rule may point at: built-ins, nodes and groups.
+fn target_names(root: &Mapping) -> std::collections::HashSet<String> {
+    let mut names: std::collections::HashSet<String> = ["DIRECT", "REJECT", "GLOBAL"].iter().map(|s| s.to_string()).collect();
+    for key in ["proxies", "proxy-groups"] {
+        if let Some(Value::Sequence(seq)) = root.get(key) {
+            names.extend(seq.iter().filter_map(|x| x.as_mapping().and_then(|m| s(m, "name"))));
+        }
+    }
+    names
+}
+
+fn prepend_rules(root: &mut Mapping, mut lines: Vec<Value>) {
+    if lines.is_empty() {
+        return;
+    }
+    let rules = root.entry(Value::String("rules".into())).or_insert_with(|| Value::Sequence(vec![]));
+    if let Value::Sequence(seq) = rules {
+        lines.append(seq);
+        *seq = lines;
+    }
 }
 
 /// Current mihomo refuses `relay` groups (replaced by `dialer-proxy`), so
@@ -647,6 +677,40 @@ rules:
         assert_eq!(p.rules[0].to_line(), "PROCESS-NAME,telegram.exe,PROXY");
         assert_eq!(p.rules[1].to_line(), "PROCESS-PATH,D:\\Steam\\steam.exe,DIRECT");
         assert_eq!(p.rules[2].to_line(), "GEOSITE,cn,DIRECT");
+    }
+
+    fn ur(kind: &str, value: &str, target: &str) -> UserRule {
+        UserRule { kind: kind.into(), value: value.into(), target: target.into(), resolve: false }
+    }
+
+    #[test]
+    fn user_rules_are_cleaned_up() {
+        let line = |r: UserRule| r.to_rule().map(|r| r.to_line());
+        assert_eq!(line(ur("domain-suffix", "https://WWW.Example.com/a?b", "P")).unwrap(), "DOMAIN-SUFFIX,www.example.com,P");
+        assert_eq!(line(ur("DOMAIN-SUFFIX", "*.google.com", "P")).unwrap(), "DOMAIN-SUFFIX,google.com,P");
+        assert_eq!(line(ur("DOMAIN-SUFFIX", "+.cn.", "DIRECT")).unwrap(), "DOMAIN-SUFFIX,cn,DIRECT");
+        assert_eq!(line(ur("DOMAIN", "a.b.com", "REJECT")).unwrap(), "DOMAIN,a.b.com,REJECT");
+        assert_eq!(line(ur("DOMAIN-KEYWORD", "YouTube", "P")).unwrap(), "DOMAIN-KEYWORD,youtube,P");
+        assert_eq!(line(ur("IP-CIDR", "8.8.8.8", "P")).unwrap(), "IP-CIDR,8.8.8.8/32,P,no-resolve");
+        assert_eq!(line(ur("IP-CIDR", "10.1.2.3/8", "DIRECT")).unwrap(), "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve");
+        assert_eq!(line(ur("IP-CIDR", "2001:db8::1", "P")).unwrap(), "IP-CIDR,2001:db8::1/128,P,no-resolve");
+        let mut resolve = ur("GEOIP", "JP", "P");
+        resolve.resolve = true;
+        assert_eq!(line(resolve).unwrap(), "GEOIP,JP,P");
+        assert_eq!(line(ur("GEOSITE", "google@cn", "DIRECT")).unwrap(), "GEOSITE,google@cn,DIRECT");
+        for bad in [ur("DOMAIN", "a,b", "P"), ur("DOMAIN", "a b", "P"), ur("IP-CIDR", "1.2.3", "P"), ur("PROCESS-NAME", "x", "P"), ur("GEOSITE", "c/n", "P"), ur("DOMAIN", "x.com", "")] {
+            assert!(bad.to_rule().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn user_rules_go_after_app_rules() {
+        let mut v: Value = serde_yaml::from_str(SBM).unwrap();
+        let w = add_user_rules(&mut v, &[ur("DOMAIN-SUFFIX", "example.com", "PROXY"), ur("IP-CIDR", "1.1.1.1", "DIRECT"), ur("DOMAIN", "x.com", "NOPE"), ur("DOMAIN", "", "DIRECT")]);
+        assert_eq!(w.len(), 2, "{w:?}");
+        add_app_rules(&mut v, &[AppRoute { by_path: false, value: "telegram".into(), target: "PROXY".into() }]);
+        let lines: Vec<String> = parse(&v).unwrap().rules.iter().map(|r| r.to_line()).collect();
+        assert_eq!(lines[..4], ["PROCESS-NAME,telegram.exe,PROXY", "DOMAIN-SUFFIX,example.com,PROXY", "IP-CIDR,1.1.1.1/32,DIRECT,no-resolve", "GEOSITE,cn,DIRECT"]);
     }
 
     #[test]

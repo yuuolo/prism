@@ -53,6 +53,8 @@ pub struct Settings {
     pub selections: HashMap<String, HashMap<String, String>>,
     /// Per-application routing (应用分流), applied before the profile's rules.
     pub app_rules: Vec<AppRule>,
+    /// Domain / IP routing (域名 / IP 分流), after the app rules.
+    pub route_rules: Vec<RouteRule>,
 }
 
 impl Default for Settings {
@@ -83,6 +85,7 @@ impl Default for Settings {
             test_url: config::DEFAULT_TEST_URL.into(),
             selections: HashMap::new(),
             app_rules: Vec::new(),
+            route_rules: Vec::new(),
         }
     }
 }
@@ -110,6 +113,20 @@ pub struct AppRule {
     pub value: String,
     /// Proxy / group name, DIRECT or REJECT.
     pub target: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RouteRule {
+    pub id: String,
+    pub enabled: bool,
+    /// DOMAIN-SUFFIX, DOMAIN, DOMAIN-KEYWORD, IP-CIDR, GEOSITE or GEOIP.
+    pub kind: String,
+    pub value: String,
+    /// Proxy / group name, DIRECT or REJECT.
+    pub target: String,
+    /// IP rules: also match domains that resolve into the range.
+    pub resolve: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

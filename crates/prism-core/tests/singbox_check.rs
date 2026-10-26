@@ -1,7 +1,23 @@
 //! Opt-in: validates generated configs with real core binaries.
 //!   SINGBOX=path/to/sing-box.exe MIHOMO=path/to/mihomo.exe cargo test -p prism-core --test singbox_check
 
-use prism_core::config::{self, clash, clash::Overrides, singbox, AppRoute, Mode};
+use prism_core::config::{self, clash, clash::Overrides, singbox, AppRoute, Mode, UserRule};
+
+/// The GUI's domain / IP rules, one of each kind.
+fn user_rules() -> Vec<UserRule> {
+    [
+        ("DOMAIN-SUFFIX", "openai.com", "PROXY"),
+        ("DOMAIN", "www.example.com", "DIRECT"),
+        ("DOMAIN-KEYWORD", "ads", "REJECT"),
+        ("IP-CIDR", "192.168.50.0/24", "DIRECT"),
+        ("IP-CIDR", "2001:db8::1", "PROXY"),
+        ("GEOSITE", "netflix", "PROXY"),
+        ("GEOIP", "telegram", "PROXY"),
+    ]
+    .into_iter()
+    .map(|(k, v, t)| UserRule { kind: k.into(), value: v.into(), target: t.into(), resolve: false })
+    .collect()
+}
 
 fn app_routes() -> Vec<AppRoute> {
     vec![
@@ -35,6 +51,9 @@ fn generated_mihomo_config_passes_check() {
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
     clash::apply_overrides(&mut doc, &o);
     clash::relays_to_dialer_proxy(&mut doc);
+    // GEO rules would make mihomo download geodata for a check.
+    let user: Vec<UserRule> = user_rules().into_iter().filter(|r| !r.kind.starts_with("GEO")).collect();
+    assert!(clash::add_user_rules(&mut doc, &user).is_empty());
     assert!(clash::add_app_rules(&mut doc, &app_routes()).is_empty());
     let path = dir.join("config.yaml");
     std::fs::write(&path, serde_yaml::to_string(&doc).unwrap()).unwrap();
@@ -111,6 +130,7 @@ fn generated_singbox_config_passes_check() {
         let mut cfg = singbox::emit(&p, &o);
         // App rules point at groups that exist in the CLASH profile.
         if name.starts_with("clash") {
+            assert!(singbox::add_user_rules(&mut cfg, &user_rules()).is_empty());
             assert!(singbox::add_app_rules(&mut cfg, &app_routes()).is_empty());
         }
         let path = dir.join(format!("{name}.json"));

@@ -9,6 +9,7 @@ import Rules from "./pages/Rules";
 import Logs from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
 import Apps from "./pages/Apps";
+import Routes from "./pages/Routes";
 import ImportDialog from "./ImportDialog";
 import { setLang, t } from "./i18n";
 
@@ -19,6 +20,7 @@ const PAGES = [
   { key: "connections", label: "连接", icon: "⌁", el: Connections },
   { key: "rules", label: "规则", icon: "≡", el: Rules },
   { key: "apps", label: "应用分流", icon: "⊞", el: Apps },
+  { key: "routes", label: "域名分流", icon: "◈", el: Routes },
   { key: "logs", label: "日志", icon: "▤", el: Logs },
   { key: "settings", label: "设置", icon: "⚙", el: SettingsPage },
 ] as const;

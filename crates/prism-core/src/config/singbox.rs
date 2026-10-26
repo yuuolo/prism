@@ -679,6 +679,90 @@ pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
     warnings
 }
 
+/// Puts the GUI's domain / IP rules in front of the routing rules, after the
+/// sniff / hijack-dns / clash_mode rules (app rules, added after these, end
+/// up first). GEOSITE / GEOIP rules add their remote rule-sets. IP rules
+/// never resolve domains here (sing-box has no per-rule resolve).
+pub fn add_user_rules(v: &mut Value, user: &[UserRule]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Some(root) = v.as_object_mut() else { return warnings };
+    let tags: Vec<(String, String)> = root
+        .get("outbounds")
+        .and_then(|o| o.as_array())
+        .map(|a| a.iter().filter_map(|o| Some((st(o, "tag")?, st(o, "type").unwrap_or_default()))).collect())
+        .unwrap_or_default();
+    let endpoints: Vec<String> = root
+        .get("endpoints")
+        .and_then(|o| o.as_array())
+        .map(|a| a.iter().filter_map(|o| st(o, "tag")).collect())
+        .unwrap_or_default();
+    let direct = tags.iter().find(|(_, t)| t == "direct").map(|(tag, _)| tag.clone());
+    let mut need_direct = false;
+    let mut sets = BTreeSet::new();
+    let mut rules = Vec::new();
+    for r in user {
+        let rc = match r.to_rule() {
+            Ok(rc) => rc,
+            Err(e) => {
+                warnings.push(format!("rule skipped: {e}"));
+                continue;
+            }
+        };
+        let Some(mut rule) = rule_cond(&rc.kind, &rc.payload, &mut sets) else {
+            warnings.push(format!("rule {} skipped: not supported by sing-box", rc.to_line()));
+            continue;
+        };
+        match rc.target.as_str() {
+            "REJECT" => rule["action"] = json!("reject"),
+            "DIRECT" => {
+                need_direct = direct.is_none();
+                rule["outbound"] = json!(direct.clone().unwrap_or_else(|| "DIRECT".into()));
+            }
+            t if tags.iter().any(|(tag, _)| tag == t) || endpoints.iter().any(|e| e == t) => rule["outbound"] = json!(t),
+            t => {
+                warnings.push(format!("rule {} skipped: {t} is not in this profile", rc.payload));
+                continue;
+            }
+        }
+        rules.push(rule);
+    }
+    if rules.is_empty() {
+        return warnings;
+    }
+    if need_direct {
+        if let Some(a) = root.entry("outbounds").or_insert_with(|| json!([])).as_array_mut() {
+            a.push(json!({ "type": "direct", "tag": "DIRECT" }));
+        }
+    }
+    let route = root.entry("route").or_insert_with(|| json!({}));
+    if let Some(r) = route.as_object_mut() {
+        let have: BTreeSet<String> = r
+            .get("rule_set")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|e| st(e, "tag")).collect())
+            .unwrap_or_default();
+        if let Some(list) = r.entry("rule_set").or_insert_with(|| json!([])).as_array_mut() {
+            for (tag, url) in sets.into_iter().filter(|(t, _)| !have.contains(t)) {
+                list.push(rule_set_entry(&tag, url));
+            }
+        }
+        let list = r.entry("rules").or_insert_with(|| json!([]));
+        if let Some(list) = list.as_array_mut() {
+            let lead = list
+                .iter()
+                .take_while(|x| {
+                    x.get("clash_mode").is_some()
+                        || matches!(x.get("action").and_then(|a| a.as_str()), Some("sniff" | "hijack-dns" | "resolve"))
+                })
+                .count();
+            for (i, rule) in rules.into_iter().enumerate() {
+                list.insert(lead + i, rule);
+            }
+        }
+    }
+    warnings
+}
+
 /// Patches a native sing-box profile: replaces inbounds (TUN needs admin
 /// rights, the GUI uses system proxy) and forces the Clash API settings.
 pub fn apply_overrides(v: &mut Value, o: &Overrides) {
@@ -1036,6 +1120,29 @@ rules:
         assert_eq!(rules[4], json!({ "process_path": ["C:\\Games\\x.exe"], "outbound": "DIRECT" }));
         assert_eq!(rules[5], json!({ "process_name": ["ads.exe"], "action": "reject" }));
         assert_eq!(sb["route"]["find_process"], true);
+    }
+
+    #[test]
+    fn user_rules_after_mode_rules_with_rule_sets() {
+        let p = parse_any("anytls://pw@jp.example.com:443/?sni=jp.example.com#jp").unwrap();
+        let mut sb = emit(&p, &overrides());
+        let ur = |kind: &str, value: &str, target: &str| UserRule { kind: kind.into(), value: value.into(), target: target.into(), resolve: false };
+        let w = add_user_rules(
+            &mut sb,
+            &[ur("DOMAIN-SUFFIX", "example.com", "jp"), ur("IP-CIDR", "1.1.1.1", "DIRECT"), ur("GEOSITE", "netflix", "jp"), ur("GEOIP", "telegram", "REJECT"), ur("DOMAIN", "x.com", "missing")],
+        );
+        assert_eq!(w.len(), 1, "{w:?}");
+        add_app_rules(&mut sb, &[AppRoute { by_path: false, value: "chrome".into(), target: "jp".into() }]);
+        let rules = sb["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[2]["clash_mode"], "Global");
+        assert_eq!(rules[3], json!({ "process_name": ["chrome.exe"], "outbound": "jp" }));
+        assert_eq!(rules[4], json!({ "domain_suffix": ["example.com"], "outbound": "jp" }));
+        assert_eq!(rules[5], json!({ "ip_cidr": ["1.1.1.1/32"], "outbound": "DIRECT" }));
+        assert_eq!(rules[6], json!({ "rule_set": ["geosite-netflix"], "outbound": "jp" }));
+        assert_eq!(rules[7], json!({ "rule_set": ["geoip-telegram"], "action": "reject" }));
+        let tags: Vec<&str> = sb["route"]["rule_set"].as_array().unwrap().iter().map(|e| e["tag"].as_str().unwrap()).collect();
+        assert!(tags.contains(&"geosite-netflix") && tags.contains(&"geoip-telegram"), "{tags:?}");
+        assert_eq!(tags.iter().filter(|t| **t == "geosite-netflix").count(), 1);
     }
 
     #[test]

@@ -33,6 +33,7 @@ export interface Settings {
   test_url: string;
   selections: Record<string, Record<string, string>>;
   app_rules: AppRule[];
+  route_rules: RouteRule[];
 }
 
 export interface Usage {
@@ -61,6 +62,19 @@ export interface AppRule {
   by_path: boolean;
   value: string;
   target: string;
+}
+
+export type RouteKind = "DOMAIN-SUFFIX" | "DOMAIN" | "DOMAIN-KEYWORD" | "IP-CIDR" | "GEOSITE" | "GEOIP";
+
+/** 域名 / IP 分流: a domain or address rule placed before the profile's rules. */
+export interface RouteRule {
+  id: string;
+  enabled: boolean;
+  kind: RouteKind;
+  value: string;
+  target: string;
+  /** IP rules: also match domains resolving into the range. */
+  resolve: boolean;
 }
 
 export interface ProcessInfo {
@@ -220,6 +234,7 @@ export const api = {
   profileOutbounds: () => invoke<Outbounds>("profile_outbounds"),
   setAppRules: (rules: AppRule[]) => invoke<void>("set_app_rules", { rules }),
   setMergeProfiles: (ids: string[]) => invoke<void>("set_merge_profiles", { ids }),
+  setRouteRules: (rules: RouteRule[]) => invoke<void>("set_route_rules", { rules }),
   setProfileInterval: (id: string, minutes: number) => invoke<void>("set_profile_interval", { id, minutes }),
   setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
   setClashLinks: (enable: boolean) => invoke<void>("set_clash_links", { enable }),

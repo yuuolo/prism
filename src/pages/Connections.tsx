@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
-import { api, errText, fmtBytes, fmtSpeed, type AppRule, type Connection, type ConnectionsResp, type ExportFormat, type ExportTable } from "../api";
+import { api, errText, fmtBytes, fmtSpeed, type AppRule, type Connection, type ConnectionsResp, type ExportFormat, type ExportTable, type RouteRule } from "../api";
 import { useApp, usePoll } from "../state";
 import { AppRuleDialog } from "./Apps";
+import { RouteRuleDialog, useSaveRouteRules } from "./Routes";
 import { t } from "../i18n";
 
 interface Row extends Connection {
@@ -77,6 +78,8 @@ export default function Connections() {
   const [filter, setFilter] = useState("");
   const [paused, setPaused] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [routeFor, setRouteFor] = useState<Partial<RouteRule> | null>(null);
+  const saveRoutes = useSaveRouteRules();
   const prev = useRef<Map<string, Connection>>(new Map());
   const running = !!snap?.running;
 
@@ -206,6 +209,15 @@ export default function Connections() {
                             {t("分流")}
                           </button>
                         )}
+                        {(m.host || m.destinationIP) && (
+                          <button
+                            className="btn sm"
+                            title={m.host ? t("为这个域名设置出口") : t("为这个 IP 设置出口")}
+                            onClick={() => setRouteFor(m.host ? { kind: "DOMAIN-SUFFIX", value: m.host } : { kind: "IP-CIDR", value: m.destinationIP })}
+                          >
+                            {m.host ? t("域名") : "IP"}
+                          </button>
+                        )}
                         <button className="btn sm danger" onClick={() => api.core("DELETE", `/connections/${c.id}`)}>
                           {t("关闭")}
                         </button>
@@ -218,6 +230,13 @@ export default function Connections() {
           </table>
           {shown.length === 0 && <div className="empty">{t("暂无连接")}</div>}
         </div>
+      )}
+      {routeFor && (
+        <RouteRuleDialog
+          initial={routeFor}
+          onClose={() => setRouteFor(null)}
+          onSave={(added) => saveRoutes([...(snap?.settings.route_rules ?? []), ...added], t("已添加 {n} 条", { n: added.length }))}
+        />
       )}
       {ruleFor && (
         <AppRuleDialog
