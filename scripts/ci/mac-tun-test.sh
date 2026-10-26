@@ -18,6 +18,8 @@ mixed-port: 17890
 external-controller: 127.0.0.1:19090
 secret: ""
 log-level: info
+# What the Prism app sets: look up the owning program of every connection.
+find-process-mode: always
 tun:
   enable: true
   auto-route: true
