@@ -61,7 +61,13 @@ pub fn wait_for_exit(pid: u32, timeout: std::time::Duration) {
     }
 }
 
-#[cfg(not(windows))]
+/// Running as root (macOS TUN otherwise goes through the TUN service).
+#[cfg(unix)]
+pub fn is_elevated() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn is_elevated() -> bool {
     false
 }

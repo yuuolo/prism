@@ -177,6 +177,15 @@ export const EN: Record<string, string> = {
   "保存前会先用当前订阅试运行，出错不会保存。": "Saving tries it on the active profile first; nothing is saved if it fails.",
   覆写已保存并生效: "Overrides saved and applied",
   覆写已保存: "Overrides saved",
+  "macOS 上 TUN 需要这个服务：开启 TUN 时内核由系统后台服务（LaunchDaemon，以 root 运行）运行，Prism 本身不需要管理员权限。安装、更新和卸载各需要输入一次 Mac 的登录密码。服务只运行安装时复制到受保护目录的内核，只接受当前用户的 Prism 的请求。Prism 或内核更新后会提示更新服务。":
+    "On macOS, TUN needs this service: with TUN on, the core runs as a system background service (a LaunchDaemon running as root), so Prism itself needs no administrator rights. Installing, updating and removing each ask for your Mac login password once. The service only runs the cores copied into its protected folder at install, and only accepts requests from this user's Prism. You'll be asked to update it after Prism or a core is updated.",
+  "prism:// 和 clash:// 链接由 Prism 打开（装有其他 Clash 客户端时，clash:// 可能由 macOS 选定的程序打开）。通过链接导入订阅前都会先弹窗确认。":
+    "prism:// and clash:// links open Prism (with another Clash client installed, macOS may open clash:// links in that one). Importing through a link always asks first.",
+  "卸载 TUN 服务？之后需要重新安装才能开启 TUN。": "Remove the TUN service? TUN won't work until you install it again.",
+  "登录 Mac 时启动 Prism（立即生效）": "Start Prism when you log in to your Mac (takes effect now)",
+  "TUN 模式需要先安装「TUN 服务」（只需输入一次 Mac 的登录密码，以后开启 TUN 不再需要）。现在安装？":
+    "TUN mode needs the TUN service (you enter your Mac login password once; turning TUN on later won't ask again). Install it now?",
+  "请在弹出的窗口中输入 Mac 的登录密码…": "Enter your Mac login password in the window that appears…",
   域名分流: "Domain rules",
   "域名 / IP 分流": "Domain / IP rules",
   添加规则: "Add rule",

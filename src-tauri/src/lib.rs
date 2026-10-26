@@ -84,6 +84,8 @@ struct Snapshot {
     clash_handler: Option<String>,
     /// TUN service: missing / stopped / running.
     tun_service: tunsvc::State,
+    /// "windows" or "macos".
+    platform: &'static str,
 }
 
 #[tauri::command]
@@ -113,6 +115,7 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
         clash_links: links::owned("clash"),
         clash_handler: links::handler("clash"),
         tun_service: tunsvc::state(),
+        platform: std::env::consts::OS,
     })
 }
 
@@ -282,6 +285,20 @@ async fn backup_import(app: AppHandle, st: State<'_, AppState>, data: String) ->
     restore_backup(&app, &st, &bytes).await
 }
 
+/// Shows a file selected in Explorer / Finder.
+fn reveal(path: &std::path::Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
+}
+
+/// Opens a folder in Explorer / Finder.
+fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
+    let cmd = if cfg!(windows) { "explorer" } else { "/usr/bin/open" };
+    std::process::Command::new(cmd).arg(path).spawn().map(|_| ())
+}
+
 /// Writes a backup to the Downloads folder and shows it in Explorer.
 #[tauri::command]
 fn backup_export(app: AppHandle, st: State<'_, AppState>) -> Res<String> {
@@ -289,7 +306,7 @@ fn backup_export(app: AppHandle, st: State<'_, AppState>) -> Res<String> {
     let dir = app.path().download_dir().map_err(e)?;
     let path = dir.join(backup::file_name());
     std::fs::write(&path, data).map_err(e)?;
-    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    reveal(&path);
     Ok(path.display().to_string())
 }
 
@@ -303,7 +320,7 @@ fn export_table(app: AppHandle, table: export::Table, format: String, what: Stri
     let data = export::render(&table, &format).map_err(e)?;
     let path = app.path().download_dir().map_err(e)?.join(export::file_name(&what, &format));
     std::fs::write(&path, data).map_err(e)?;
-    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    reveal(&path);
     Ok(path.display().to_string())
 }
 
@@ -1002,8 +1019,7 @@ fn preview_config(st: State<'_, AppState>) -> Res<String> {
 
 #[tauri::command]
 fn open_data_dir(st: State<'_, AppState>) -> Res<()> {
-    std::process::Command::new("explorer").arg(&st.store.dir).spawn().map_err(e)?;
-    Ok(())
+    open_folder(&st.store.dir).map_err(e)
 }
 
 // ------------------------------------------------------------------ tray
@@ -1174,6 +1190,13 @@ fn on_menu(app: &AppHandle, id: &str) {
     });
 }
 
+/// Plugins only some platforms use (macOS: deep links for prism://).
+fn with_platform_plugins<R: tauri::Runtime>(b: tauri::Builder<R>) -> tauri::Builder<R> {
+    #[cfg(target_os = "macos")]
+    let b = b.plugin(tauri_plugin_deep_link::init());
+    b
+}
+
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     // After "restart as administrator", let the old instance exit first: it
@@ -1185,13 +1208,15 @@ pub fn run() {
     let autostarted = args.iter().any(|a| a == autostart::ARG);
     let link = links::find(args.iter().skip(1).cloned());
 
-    let app = tauri::Builder::default()
-        // Must come first: a second launch hands its arguments (an import
-        // link, say) to the running Prism and exits.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| match links::find(argv.into_iter().skip(1)) {
-            Some(link) => handle_link(app, &link),
-            None => show_main(app),
-        }))
+    let app = with_platform_plugins(
+        tauri::Builder::default()
+            // Must come first: a second launch hands its arguments (an import
+            // link, say) to the running Prism and exits.
+            .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| match links::find(argv.into_iter().skip(1)) {
+                Some(link) => handle_link(app, &link),
+                None => show_main(app),
+            })),
+    )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1256,6 +1281,18 @@ pub fn run() {
             }
             if let Some(link) = &link {
                 handle_link(app.handle(), link);
+            }
+            // macOS delivers prism:// / clash:// links as events, not as
+            // arguments of a second launch.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let h = app.handle().clone();
+                app.deep_link().on_open_url(move |ev| {
+                    for url in ev.urls() {
+                        handle_link(&h, url.as_str());
+                    }
+                });
             }
             if !cfg!(debug_assertions) {
                 // Installed builds own prism://; dev builds leave it alone.
@@ -1372,6 +1409,11 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app, ev| {
+        // macOS: clicking the Dock icon while the window is hidden.
+        #[cfg(target_os = "macos")]
+        if let RunEvent::Reopen { .. } = ev {
+            show_main(app);
+        }
         if let RunEvent::Exit = ev {
             let st = app.state::<AppState>();
             st.traffic.save();

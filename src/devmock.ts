@@ -123,6 +123,8 @@ export function installDevMock() {
       version: "0.1.1",
       ...sys,
       clash_handler: sys.clash_links ? "prism.exe" : "FlClash.exe",
+      // ?platform=macos previews the macOS wording.
+      platform: new URLSearchParams(location.search).get("platform") ?? "windows",
     }),
     install_tun_service: async () => {
       await new Promise((r) => setTimeout(r, 800));

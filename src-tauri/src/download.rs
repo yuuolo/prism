@@ -34,29 +34,74 @@ async fn fetch(c: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     Ok(r.bytes().await?.to_vec())
 }
 
-fn pick_asset(kind: CoreKind, name: &str) -> bool {
+/// Release asset platform of this build: (os, arch) as mihomo / sing-box
+/// name them.
+fn platform() -> (&'static str, &'static str) {
+    let os = if cfg!(windows) { "windows" } else { "darwin" };
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    (os, arch)
+}
+
+fn pick_asset(kind: CoreKind, name: &str, (os, arch): (&str, &str)) -> bool {
     let n = name.to_ascii_lowercase();
-    if !n.ends_with(".zip") || !n.contains("windows-amd64") {
-        return false;
-    }
+    let plat = format!("{os}-{arch}");
     match kind {
-        // mihomo-windows-amd64-v1.19.x.zip (skip -compatible, -v1/-v2/-v3, -goXXX builds)
+        // mihomo-windows-amd64-v1.19.x.zip, mihomo-darwin-arm64-v1.19.x.gz
+        // (skip -compatible, -v1/-v2/-v3, -goXXX builds)
         CoreKind::Mihomo => {
-            n.starts_with("mihomo-windows-amd64-v")
+            let ext = if os == "windows" { ".zip" } else { ".gz" };
+            n.starts_with(&format!("mihomo-{plat}-v"))
+                && n.ends_with(ext)
                 && !["-v1-", "-v2-", "-v3-", "-go1", "compatible"].iter().any(|x| n.contains(x))
         }
-        // sing-box-1.12.x-windows-amd64.zip
-        CoreKind::Singbox => n.starts_with("sing-box-") && n.ends_with("-windows-amd64.zip"),
+        // sing-box-1.12.x-windows-amd64.zip, sing-box-1.12.x-darwin-arm64.tar.gz
+        CoreKind::Singbox => {
+            let ext = if os == "windows" { ".zip" } else { ".tar.gz" };
+            n.starts_with("sing-box-") && n.ends_with(&format!("-{plat}{ext}"))
+        }
         CoreKind::Prism => false,
     }
+}
+
+/// The core's executable from a release archive: a .zip (Windows), a
+/// .tar.gz (sing-box) or a single gzipped binary (mihomo, macOS).
+fn extract(name: &str, data: Vec<u8>, exe: &str) -> Result<Vec<u8>> {
+    let n = name.to_ascii_lowercase();
+    if n.ends_with(".zip") {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data)).context("bad zip")?;
+        for i in 0..zip.len() {
+            let mut f = zip.by_index(i)?;
+            if f.name().to_ascii_lowercase().ends_with(".exe") {
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf)?;
+                return Ok(buf);
+            }
+        }
+    } else if n.ends_with(".tar.gz") {
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(std::io::Cursor::new(data)));
+        for entry in tar.entries()? {
+            let mut e = entry?;
+            if e.path()?.file_name().is_some_and(|f| f == exe) {
+                let mut buf = Vec::new();
+                e.read_to_end(&mut buf)?;
+                return Ok(buf);
+            }
+        }
+    } else if n.ends_with(".gz") {
+        let mut buf = Vec::new();
+        flate2::read::GzDecoder::new(std::io::Cursor::new(data)).read_to_end(&mut buf).context("bad gzip")?;
+        return Ok(buf);
+    }
+    bail!("no {exe} inside {name}")
 }
 
 /// Downloads the latest release of mihomo or sing-box into `dest_dir`.
 /// Returns the version tag.
 pub async fn core(kind: CoreKind, dest_dir: &Path, proxy_port: Option<u16>) -> Result<String> {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
     let (repo, exe) = match kind {
-        CoreKind::Mihomo => ("MetaCubeX/mihomo", "mihomo.exe"),
-        CoreKind::Singbox => ("SagerNet/sing-box", "sing-box.exe"),
+        CoreKind::Mihomo => ("MetaCubeX/mihomo", format!("mihomo{ext}")),
+        CoreKind::Singbox => ("SagerNet/sing-box", format!("sing-box{ext}")),
         CoreKind::Prism => bail!("prism-core is bundled with the app"),
     };
     let c = client(proxy_port)?;
@@ -71,24 +116,24 @@ pub async fn core(kind: CoreKind, dest_dir: &Path, proxy_port: Option<u16>) -> R
     let tag = rel["tag_name"].as_str().unwrap_or_default().to_string();
     let asset = rel["assets"]
         .as_array()
-        .and_then(|a| a.iter().find(|x| x["name"].as_str().is_some_and(|n| pick_asset(kind, n))))
-        .ok_or_else(|| anyhow!("{repo} {tag}: no windows-amd64 asset found"))?;
+        .and_then(|a| a.iter().find(|x| x["name"].as_str().is_some_and(|n| pick_asset(kind, n, platform()))))
+        .ok_or_else(|| {
+            let (os, arch) = platform();
+            anyhow!("{repo} {tag}: no {os}-{arch} asset found")
+        })?;
+    let name = asset["name"].as_str().unwrap_or_default();
     let url = asset["browser_download_url"].as_str().unwrap_or_default();
-    let data = fetch(&c, url).await?;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data)).context("bad zip")?;
-    for i in 0..zip.len() {
-        let mut f = zip.by_index(i)?;
-        if f.name().to_ascii_lowercase().ends_with(".exe") {
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
-            std::fs::create_dir_all(dest_dir)?;
-            let tmp = dest_dir.join(format!("{exe}.download"));
-            std::fs::write(&tmp, buf)?;
-            std::fs::rename(&tmp, dest_dir.join(exe))?;
-            return Ok(tag);
-        }
+    let bin = extract(name, fetch(&c, url).await?, &exe)?;
+    std::fs::create_dir_all(dest_dir)?;
+    let tmp = dest_dir.join(format!("{exe}.download"));
+    std::fs::write(&tmp, bin)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
-    bail!("no executable inside {url}")
+    std::fs::rename(&tmp, dest_dir.join(&exe))?;
+    Ok(tag)
 }
 
 /// Downloads geosite.dat and geoip.dat (used by prism-core and mihomo).
@@ -223,11 +268,47 @@ mod tests {
 
     #[test]
     fn asset_names() {
-        assert!(pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-v1.19.15.zip"));
-        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-compatible-v1.19.15.zip"));
-        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-v1-v1.19.15.zip"));
-        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-go120-v1.19.15.zip"));
-        assert!(pick_asset(CoreKind::Singbox, "sing-box-1.12.9-windows-amd64.zip"));
-        assert!(!pick_asset(CoreKind::Singbox, "sing-box-1.12.9-windows-amd64-legacy-windows-7.zip"));
+        let win = ("windows", "amd64");
+        assert!(pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-v1.19.15.zip", win));
+        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-compatible-v1.19.15.zip", win));
+        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-v1-v1.19.15.zip", win));
+        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-go120-v1.19.15.zip", win));
+        assert!(pick_asset(CoreKind::Singbox, "sing-box-1.12.9-windows-amd64.zip", win));
+        assert!(!pick_asset(CoreKind::Singbox, "sing-box-1.12.9-windows-amd64-legacy-windows-7.zip", win));
+        let mac = ("darwin", "amd64");
+        assert!(pick_asset(CoreKind::Mihomo, "mihomo-darwin-amd64-v1.19.15.gz", mac));
+        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-darwin-amd64-compatible-v1.19.15.gz", mac));
+        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-darwin-arm64-v1.19.15.gz", mac));
+        assert!(!pick_asset(CoreKind::Mihomo, "mihomo-windows-amd64-v1.19.15.zip", mac));
+        assert!(pick_asset(CoreKind::Singbox, "sing-box-1.12.9-darwin-amd64.tar.gz", mac));
+        assert!(pick_asset(CoreKind::Singbox, "sing-box-1.12.9-darwin-arm64.tar.gz", ("darwin", "arm64")));
+        assert!(!pick_asset(CoreKind::Singbox, "sing-box-1.12.9-darwin-amd64-legacy-macos-10.13.tar.gz", mac));
+    }
+
+    #[test]
+    fn extracts_each_archive_kind() {
+        use std::io::Write;
+        let gz = |data: &[u8]| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            e.write_all(data).unwrap();
+            e.finish().unwrap()
+        };
+        assert_eq!(extract("mihomo-darwin-amd64-v1.gz", gz(b"BIN"), "mihomo").unwrap(), b"BIN");
+
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(4);
+        h.set_mode(0o755);
+        h.set_cksum();
+        tar.append_data(&mut h, "sing-box-1.12.9-darwin-amd64/LICENSE", &b"LICE"[..]).unwrap();
+        tar.append_data(&mut h, "sing-box-1.12.9-darwin-amd64/sing-box", &b"SBOX"[..]).unwrap();
+        let tgz = gz(&tar.into_inner().unwrap());
+        assert_eq!(extract("sing-box-1.12.9-darwin-amd64.tar.gz", tgz, "sing-box").unwrap(), b"SBOX");
+
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        z.start_file("mihomo-windows-amd64.exe", zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(b"EXE").unwrap();
+        assert_eq!(extract("m.zip", z.finish().unwrap().into_inner(), "mihomo.exe").unwrap(), b"EXE");
+        assert!(extract("x.tar.gz", gz(b"not a tar"), "sing-box").is_err());
     }
 }

@@ -43,9 +43,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "err" ? 6000 : 2500);
   }, []);
 
-  /** Installs / refreshes the TUN service (UAC prompt). */
+  const mac = snap?.platform === "macos";
+
+  /** Installs / refreshes the TUN service (UAC / administrator password prompt). */
   const installTunService = useCallback(async () => {
-    toast("请在弹出的 Windows 窗口中允许管理员授权…");
+    toast(mac ? t("请在弹出的窗口中输入 Mac 的登录密码…") : t("请在弹出的 Windows 窗口中允许管理员授权…"));
     try {
       await api.installTunService();
       toast("TUN 服务已就绪");
@@ -54,7 +56,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toast(errText(e), "err");
       return false;
     }
-  }, [toast]);
+  }, [toast, mac]);
 
   const run = useCallback(
     async (fn: () => Promise<unknown>, ok?: string) => {
@@ -66,7 +68,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           return true;
         } catch (e) {
           const msg = errText(e);
-          if (msg.startsWith("NEED_ADMIN") && !retried) {
+          if (msg.startsWith("NEED_ADMIN") && !retried && mac) {
+            // macOS: TUN only runs through the service.
+            if (confirm(t("TUN 模式需要先安装「TUN 服务」（只需输入一次 Mac 的登录密码，以后开启 TUN 不再需要）。现在安装？"))) {
+              if (await installTunService()) return attempt(true);
+            }
+          } else if (msg.startsWith("NEED_ADMIN") && !retried) {
             if (
               confirm(
                 t("TUN 模式需要管理员权限。\n\n推荐安装「TUN 服务」：只需授权一次，以后开启 TUN 无需以管理员身份运行 Prism。\n\n确定：安装 TUN 服务\n取消：查看其他选择"),
@@ -92,7 +99,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         refresh();
       }
     },
-    [toast, refresh, installTunService],
+    [toast, refresh, installTunService, mac],
   );
 
   useEffect(() => {

@@ -595,7 +595,10 @@ pub fn apply_overrides(v: &mut Value, o: &Overrides) {
         let mut t = Mapping::new();
         put(&mut t, "enable", true);
         put(&mut t, "stack", "mixed");
-        put(&mut t, "device", "Prism");
+        // macOS names TUN devices utunN itself.
+        if cfg!(windows) {
+            put(&mut t, "device", "Prism");
+        }
         put(&mut t, "auto-route", true);
         put(&mut t, "auto-detect-interface", true);
         put(&mut t, "dns-hijack", seq(&["any:53"]));
@@ -674,7 +677,8 @@ rules:
         let w = add_app_rules(&mut v, &routes);
         assert_eq!(w.len(), 2, "{w:?}");
         let p = parse(&v).unwrap();
-        assert_eq!(p.rules[0].to_line(), "PROCESS-NAME,telegram.exe,PROXY");
+        let tg = if cfg!(windows) { "PROCESS-NAME,telegram.exe,PROXY" } else { "PROCESS-NAME,telegram,PROXY" };
+        assert_eq!(p.rules[0].to_line(), tg);
         assert_eq!(p.rules[1].to_line(), "PROCESS-PATH,D:\\Steam\\steam.exe,DIRECT");
         assert_eq!(p.rules[2].to_line(), "GEOSITE,cn,DIRECT");
     }
@@ -710,7 +714,8 @@ rules:
         assert_eq!(w.len(), 2, "{w:?}");
         add_app_rules(&mut v, &[AppRoute { by_path: false, value: "telegram".into(), target: "PROXY".into() }]);
         let lines: Vec<String> = parse(&v).unwrap().rules.iter().map(|r| r.to_line()).collect();
-        assert_eq!(lines[..4], ["PROCESS-NAME,telegram.exe,PROXY", "DOMAIN-SUFFIX,example.com,PROXY", "IP-CIDR,1.1.1.1/32,DIRECT,no-resolve", "GEOSITE,cn,DIRECT"]);
+        let tg = if cfg!(windows) { "PROCESS-NAME,telegram.exe,PROXY" } else { "PROCESS-NAME,telegram,PROXY" };
+        assert_eq!(lines[..4], [tg, "DOMAIN-SUFFIX,example.com,PROXY", "IP-CIDR,1.1.1.1/32,DIRECT,no-resolve", "GEOSITE,cn,DIRECT"]);
     }
 
     #[test]

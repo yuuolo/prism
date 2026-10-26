@@ -1,8 +1,9 @@
 //! The service's pipe server, run in-process with a temporary layout: the
 //! owner-only pipe, both identity checks, data files, config sanitising and
 //! a real prism-core (without TUN, so no administrator rights needed).
-//! Needs target/debug/prism-core.exe (`cargo build -p prism-core`).
-#![cfg(windows)]
+//! Needs target/debug/prism-core(.exe) (`cargo build -p prism-core`).
+//! On macOS the same runs over a unix socket.
+#![cfg(any(windows, target_os = "macos"))]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,6 +12,17 @@ use std::time::Duration;
 use base64::Engine;
 use prism_service::client::{current_user_sid, request_at};
 use prism_service::{server, sha256_file, Layout, Owner, Request};
+
+#[cfg(windows)]
+fn test_pipe(tag: &str) -> String {
+    format!(r"\\.\pipe\prism-service-test-{tag}-{}", std::process::id())
+}
+
+/// Short: unix socket paths are limited to about 100 bytes.
+#[cfg(not(windows))]
+fn test_pipe(tag: &str) -> String {
+    format!("/tmp/prism-svc-{tag}-{}.sock", std::process::id())
+}
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
@@ -22,7 +34,7 @@ fn layout(tag: &str, gui: PathBuf) -> Layout {
     let l = Layout {
         program: root.join("program"),
         data: root.join("data"),
-        pipe: format!(r"\\.\pipe\prism-service-test-{tag}-{}", std::process::id()),
+        pipe: test_pipe(tag),
         service_exe: std::env::current_exe().unwrap(),
     };
     std::fs::create_dir_all(l.cores_dir()).unwrap();
@@ -47,14 +59,14 @@ async fn wait_ready(l: &Layout) {
 #[tokio::test(flavor = "multi_thread")]
 async fn runs_a_core_for_its_owner_only() {
     let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
-    let core = target.join("debug").join("prism-core.exe");
+    let core = target.join("debug").join(format!("prism-core{}", prism_service::EXE));
     if !core.exists() {
         eprintln!("skipped: build prism-core first ({})", core.display());
         return;
     }
     let me = std::env::current_exe().unwrap();
     let l = layout("owner", me.clone());
-    std::fs::copy(&core, l.cores_dir().join("prism-core.exe")).unwrap();
+    std::fs::copy(&core, l.cores_dir().join(format!("prism-core{}", prism_service::EXE))).unwrap();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let srv = tokio::spawn(server::serve(l.clone(), stop_rx));
     wait_ready(&l).await;
@@ -117,7 +129,8 @@ async fn runs_a_core_for_its_owner_only() {
 #[tokio::test(flavor = "multi_thread")]
 async fn refuses_other_programs() {
     // Registered for a different Prism: this test binary is turned away.
-    let l = layout("stranger", PathBuf::from(r"C:\Program Files\Prism\prism.exe"));
+    let other = if cfg!(windows) { r"C:\Program Files\Prism\prism.exe" } else { "/Applications/Prism.app/Contents/MacOS/prism" };
+    let l = layout("stranger", PathBuf::from(other));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let srv = tokio::spawn(server::serve(l.clone(), stop_rx));
     wait_ready(&l).await; // answers, if only with a refusal
@@ -126,17 +139,20 @@ async fn refuses_other_programs() {
     stop_tx.send(true).unwrap();
     srv.await.unwrap().unwrap();
 
-    // A client expecting the real service exe refuses a server that isn't it.
-    let l2 = layout("impostor", std::env::current_exe().unwrap());
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let srv = tokio::spawn(server::serve(l2.clone(), stop_rx));
-    wait_ready(&l2).await;
-    let expecting_real = Layout { service_exe: prism_service::service_exe(), ..l2.clone() };
-    let err = request_at(&expecting_real, &Request::Status).await.unwrap_err();
-    assert!(format!("{err:#}").contains("不是由 Prism 服务创建的"), "{err:#}");
-    stop_tx.send(true).unwrap();
-    srv.await.unwrap().unwrap();
-    for l in [l, l2] {
-        let _ = std::fs::remove_dir_all(l.data.parent().unwrap());
+    // A client expecting the real service exe refuses a server that isn't it
+    // (Windows; on macOS the client requires a root peer instead).
+    #[cfg(windows)]
+    {
+        let l2 = layout("impostor", std::env::current_exe().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let srv = tokio::spawn(server::serve(l2.clone(), stop_rx));
+        wait_ready(&l2).await;
+        let expecting_real = Layout { service_exe: prism_service::service_exe(), ..l2.clone() };
+        let err = request_at(&expecting_real, &Request::Status).await.unwrap_err();
+        assert!(format!("{err:#}").contains("不是由 Prism 服务创建的"), "{err:#}");
+        stop_tx.send(true).unwrap();
+        srv.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(l2.data.parent().unwrap());
     }
+    let _ = std::fs::remove_dir_all(l.data.parent().unwrap());
 }

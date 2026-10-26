@@ -249,7 +249,7 @@ pub fn parse_propfind(xml: &str) -> Vec<RemoteBackup> {
     out
 }
 
-// ------------------------------------------------------------------ DPAPI
+// ------------------------------------------- password storage (DPAPI / Keychain)
 
 /// Encrypts for the current Windows user (DPAPI), base64.
 #[cfg(windows)]
@@ -293,12 +293,38 @@ pub fn unprotect(enc: &str) -> Result<String> {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: the password lives in the login Keychain; settings keep only
+/// this marker.
+#[cfg(target_os = "macos")]
+const KEYCHAIN: &str = "keychain:webdav";
+
+#[cfg(target_os = "macos")]
+pub fn protect(plain: &str) -> Result<String> {
+    if plain.is_empty() {
+        return Ok(String::new());
+    }
+    security_framework::passwords::set_generic_password("dev.prism.client", "webdav", plain.as_bytes()).context("无法把 WebDAV 密码存入钥匙串")?;
+    Ok(KEYCHAIN.into())
+}
+
+#[cfg(target_os = "macos")]
+pub fn unprotect(enc: &str) -> Result<String> {
+    if enc.is_empty() {
+        return Ok(String::new());
+    }
+    if enc != KEYCHAIN {
+        bail!("WebDAV 密码数据来自另一台电脑，请重新填写");
+    }
+    let bytes = security_framework::passwords::get_generic_password("dev.prism.client", "webdav").context("钥匙串中没有 WebDAV 密码，请重新填写")?;
+    Ok(String::from_utf8(bytes)?)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn protect(plain: &str) -> Result<String> {
     Ok(plain.to_string())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn unprotect(enc: &str) -> Result<String> {
     Ok(enc.to_string())
 }
@@ -307,6 +333,8 @@ pub fn unprotect(enc: &str) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// Windows only: on macOS this would write to the login Keychain.
+    #[cfg(windows)]
     #[test]
     fn password_round_trip() {
         let enc = protect("p@ss 密码").unwrap();
@@ -346,7 +374,7 @@ mod tests {
         s.active_profile = Some(p.id.clone());
         s.mixed_port = 7000;
         s.mihomo_path = Some(r"C:\old\mihomo.exe".into());
-        s.webdav = WebDav { url: "https://dav.example".into(), username: "u".into(), password: protect("secret").unwrap() };
+        s.webdav = WebDav { url: "https://dav.example".into(), username: "u".into(), password: "stored-secret".into() };
         let zip = create(&store, &s).unwrap();
         let text = String::from_utf8_lossy(&zip).to_string();
         assert!(!text.contains("dav.example"), "login leaked into the backup");

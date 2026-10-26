@@ -1,0 +1,70 @@
+name: macOS
+
+# Builds and tests the macOS client: unit tests, a TUN smoke test as root,
+# the system-proxy calls, and the .app / .dmg (no updater signing here; the
+# update archive is signed locally with the release key).
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: npm ci
+
+      - name: Unit tests
+        run: |
+          cargo build -p prism-core
+          cargo test --workspace
+
+      - name: TUN smoke test (root)
+        run: |
+          cargo build --release -p prism-core
+          bash scripts/ci/mac-tun-test.sh "$PWD/target/release/prism-core"
+
+      - name: System proxy calls without sudo
+        run: bash scripts/ci/mac-sysproxy-test.sh
+
+      - name: Bundle
+        env:
+          PRISM_TARGET: ${{ matrix.target }}
+          PRISM_UPDATER_SIGN: "0"
+        run: node scripts/bundle.mjs
+
+      - name: Collect
+        run: |
+          V=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          OUT=target/${{ matrix.target }}/release
+          mkdir dist-mac
+          cp "$OUT"/bundle/dmg/*.dmg dist-mac/Prism_${V}_${{ matrix.arch }}.dmg
+          tar -czf dist-mac/Prism_${V}_${{ matrix.arch }}.app.tar.gz -C "$OUT/bundle/macos" Prism.app
+          cp "$OUT/prism-core" dist-mac/prism-core-v${V}-darwin-${{ matrix.arch }}
+          ls -la dist-mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-macos-${{ matrix.arch }}
+          path: dist-mac/

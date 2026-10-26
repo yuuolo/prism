@@ -1,6 +1,6 @@
 [package]
 name = "prism-service"
-description = "Prism TUN service: runs the proxy core as SYSTEM so TUN works without running Prism as administrator"
+description = "Prism TUN service: runs the proxy core as SYSTEM / root so TUN works without running Prism as administrator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,6 +21,9 @@ serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

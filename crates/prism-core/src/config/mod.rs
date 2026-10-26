@@ -365,10 +365,11 @@ pub struct AppRoute {
 }
 
 impl AppRoute {
-    /// Program name as the cores expect it: `chrome` -> `chrome.exe`.
+    /// Program name as the cores expect it: `chrome` -> `chrome.exe` on
+    /// Windows; macOS names have no extension.
     pub fn process_name(&self) -> String {
         let v = self.value.trim();
-        if self.by_path || v.contains('.') {
+        if self.by_path || v.contains('.') || !cfg!(windows) {
             v.to_string()
         } else {
             format!("{v}.exe")

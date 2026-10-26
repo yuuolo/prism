@@ -1,6 +1,8 @@
-//! The service side: the pipe server and the core it runs.
+//! The service side: the pipe (Windows) / unix socket (macOS) server and
+//! the core it runs.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -10,6 +12,7 @@ use std::time::SystemTime;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::process::{Child, Command};
 
@@ -172,6 +175,7 @@ impl State {
 }
 
 /// A pipe instance only the owner (plus SYSTEM / admins) can open.
+#[cfg(windows)]
 fn create_pipe(name: &str, sid: &str, first: bool) -> Result<NamedPipeServer> {
     use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -191,12 +195,17 @@ fn create_pipe(name: &str, sid: &str, first: bool) -> Result<NamedPipeServer> {
     Ok(pipe?)
 }
 
-/// Serves requests until `stop` turns true, then stops the core.
-pub async fn serve(layout: Layout, mut stop: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+fn load_state(layout: Layout) -> Result<Arc<State>> {
     let owner: Owner = serde_json::from_slice(&std::fs::read(layout.owner_file()).context("service.json missing, reinstall the service")?)?;
-    let sid = owner.user_sid.clone();
+    Ok(Arc::new(State { layout, owner, core: Default::default(), logs: Default::default(), hashes: Default::default() }))
+}
+
+/// Serves requests until `stop` turns true, then stops the core.
+#[cfg(windows)]
+pub async fn serve(layout: Layout, mut stop: tokio::sync::watch::Receiver<bool>) -> Result<()> {
     let pipe_name = layout.pipe.clone();
-    let state = Arc::new(State { layout, owner, core: Default::default(), logs: Default::default(), hashes: Default::default() });
+    let state = load_state(layout)?;
+    let sid = state.owner.user_sid.clone();
     let mut pipe = create_pipe(&pipe_name, &sid, true)?;
     loop {
         tokio::select! {
@@ -217,6 +226,7 @@ pub async fn serve(layout: Layout, mut stop: tokio::sync::watch::Receiver<bool>)
     Ok(())
 }
 
+#[cfg(windows)]
 async fn handle(conn: NamedPipeServer, st: &State) -> Result<()> {
     let mut pid = 0u32;
     if unsafe { windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId(conn.as_raw_handle() as _, &mut pid) } == 0 {
@@ -224,6 +234,51 @@ async fn handle(conn: NamedPipeServer, st: &State) -> Result<()> {
     }
     let image = process_image(pid).ok_or_else(|| anyhow!("client {pid} image unknown"))?;
     let allowed = same_path(&image, &st.owner.gui_path);
+    answer(conn, &image, allowed, st).await
+}
+
+/// Serves requests until `stop` turns true, then stops the core. The
+/// socket is open to everyone; each connection is checked by its peer's
+/// uid and executable.
+#[cfg(unix)]
+pub async fn serve(layout: Layout, mut stop: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = layout.pipe.clone();
+    let state = load_state(layout)?;
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path).with_context(|| format!("listen on {path}"))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+    loop {
+        tokio::select! {
+            r = listener.accept() => {
+                let (conn, _) = r?;
+                let st = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle(conn, &st).await {
+                        log(&st.layout, &format!("request failed: {e:#}"));
+                    }
+                });
+            }
+            _ = stop.changed() => break,
+        }
+    }
+    state.stop().await;
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn handle(conn: tokio::net::UnixStream, st: &State) -> Result<()> {
+    let cred = conn.peer_cred()?;
+    let pid = cred.pid().ok_or_else(|| anyhow!("no client pid"))?;
+    let image = process_image(pid as u32).ok_or_else(|| anyhow!("client {pid} image unknown"))?;
+    let allowed = cred.uid().to_string() == st.owner.user_sid && same_path(&image, &st.owner.gui_path);
+    answer(conn, &image, allowed, st).await
+}
+
+/// Reads one request and answers it, or refuses a client that isn't the
+/// registered Prism.
+async fn answer<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(conn: S, image: &Path, allowed: bool, st: &State) -> Result<()> {
     let (rd, mut wr) = tokio::io::split(conn);
     // Read the request even when refusing (only a little of it), so the
     // client's write doesn't hit a pipe we already closed.

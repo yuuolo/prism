@@ -33,7 +33,7 @@ pub fn file_name(path: &str) -> String {
     path.rsplit(['\\', '/']).next().unwrap_or(path).to_string()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use super::*;
     pub fn find(_: Network, _: SocketAddr) -> Option<Arc<ProcessInfo>> {
@@ -41,6 +41,146 @@ mod imp {
     }
     pub fn list() -> Vec<ProcessInfo> {
         Vec::new()
+    }
+}
+
+/// macOS: the kernel's socket lists (`net.inet.{tcp,udp}.pcblist_n`), whose
+/// `xsocket_n` records carry the last pid that used each socket; paths
+/// from proc_pidpath. The record layout follows XNU's in_pcblist.c (each
+/// part rounded up to 8 bytes), as mihomo reads it.
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn sysctl(name: &str) -> Option<Vec<u8>> {
+        let c = std::ffi::CString::new(name).ok()?;
+        unsafe {
+            let mut len = 0usize;
+            if libc::sysctlbyname(c.as_ptr(), std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0) != 0 {
+                return None;
+            }
+            // The list can grow between the two calls.
+            len += len / 4 + 4096;
+            let mut buf = vec![0u8; len];
+            if libc::sysctlbyname(c.as_ptr(), buf.as_mut_ptr() as *mut _, &mut len, std::ptr::null_mut(), 0) != 0 {
+                return None;
+            }
+            buf.truncate(len);
+            Some(buf)
+        }
+    }
+
+    /// Size of one pcblist_n record without the TCP part: darwin 22
+    /// (macOS 13) grew xsocket_n.
+    fn record_size() -> usize {
+        let release = sysctl("kern.osrelease").map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let major: u32 = release.split('.').next().and_then(|m| m.trim_matches('\0').parse().ok()).unwrap_or(0);
+        if major >= 22 {
+            408
+        } else {
+            384
+        }
+    }
+
+    pub fn owner(network: Network, local: SocketAddr) -> Option<u32> {
+        let (name, extra) = match network {
+            // rup8(sizeof(xtcpcb_n))
+            Network::Tcp => ("net.inet.tcp.pcblist_n", 208),
+            Network::Udp => ("net.inet.udp.pcblist_n", 0),
+        };
+        let buf = sysctl(name)?;
+        let item = record_size() + extra;
+        let mut wildcard = None;
+        // The list starts with an xinpgen header (24 bytes).
+        let mut i = 24;
+        while i + item <= buf.len() {
+            let (inp, so) = (i, i + 104);
+            i += item;
+            let port = u16::from_be_bytes([buf[inp + 18], buf[inp + 19]]);
+            if port != local.port() {
+                continue;
+            }
+            // xinpcb_n.inp_vflag: 1 = IPv4, 2 = IPv6
+            let flag = buf[inp + 44];
+            let ip = match local {
+                SocketAddr::V4(_) if flag & 1 != 0 => IpAddr::V4(Ipv4Addr::new(buf[inp + 76], buf[inp + 77], buf[inp + 78], buf[inp + 79])),
+                SocketAddr::V6(_) if flag & 2 != 0 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&buf[inp + 64..inp + 80]).ok()?)),
+                _ => continue,
+            };
+            // xsocket_n.so_last_pid
+            let pid = u32::from_ne_bytes(buf[so + 68..so + 72].try_into().ok()?);
+            if ip == local.ip() {
+                return Some(pid);
+            }
+            // UDP sockets are usually bound to the wildcard address.
+            if network == Network::Udp && ip.is_unspecified() {
+                wildcard = Some(pid);
+            }
+        }
+        wildcard
+    }
+
+    fn image_path(pid: u32) -> Option<String> {
+        let mut buf = vec![0u8; 4096];
+        let n = unsafe { libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
+        (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+    }
+
+    static CACHE: Mutex<Option<HashMap<u32, (Arc<ProcessInfo>, Instant)>>> = Mutex::new(None);
+
+    fn info(pid: u32) -> Option<Arc<ProcessInfo>> {
+        if let Some((p, at)) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(&pid) {
+            if at.elapsed() < Duration::from_secs(30) {
+                return Some(p.clone());
+            }
+        }
+        if pid == 0 {
+            return None;
+        }
+        let path = image_path(pid)?;
+        let info = Arc::new(ProcessInfo { pid, name: file_name(&path), path });
+        let mut cache = CACHE.lock().unwrap();
+        let map = cache.get_or_insert_with(HashMap::new);
+        if map.len() > 1024 {
+            map.clear();
+        }
+        map.insert(pid, (info.clone(), Instant::now()));
+        Some(info)
+    }
+
+    pub fn find(network: Network, local: SocketAddr) -> Option<Arc<ProcessInfo>> {
+        let local = match local {
+            SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+                Some(v4) => SocketAddr::new(v4.into(), v6.port()),
+                None => local,
+            },
+            v4 => v4,
+        };
+        info(owner(network, local)?)
+    }
+
+    pub fn list() -> Vec<ProcessInfo> {
+        let mut pids = vec![0 as libc::c_int; 8192];
+        let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut _, (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int) };
+        let mut out: Vec<ProcessInfo> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &pid in pids.iter().take(n.max(0) as usize) {
+            if pid <= 0 {
+                continue;
+            }
+            if let Some(path) = image_path(pid as u32) {
+                if seen.insert(path.clone()) {
+                    out.push(ProcessInfo { pid: pid as u32, name: file_name(&path), path });
+                }
+            }
+        }
+        out.sort_by_key(|p| p.name.to_lowercase());
+        out
     }
 }
 
@@ -213,12 +353,14 @@ mod imp {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 mod tests {
     use super::*;
 
+    /// The test binary's path; macOS reports the resolved path.
     fn me() -> String {
-        std::env::current_exe().unwrap().to_string_lossy().to_ascii_lowercase()
+        let p = std::env::current_exe().unwrap();
+        std::fs::canonicalize(&p).unwrap_or(p).to_string_lossy().trim_start_matches(r"\\?\").to_ascii_lowercase()
     }
 
     #[test]

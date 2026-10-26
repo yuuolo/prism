@@ -1,12 +1,13 @@
-//! Prism TUN service: a Windows service (LocalSystem) that runs the proxy
-//! core, so TUN mode works while the Prism window runs as a normal user.
+//! Prism TUN service: runs the proxy core with the rights TUN needs (a
+//! LocalSystem Windows service, a root LaunchDaemon on macOS), so TUN mode
+//! works while the Prism window runs as a normal user.
 //!
 //! Security model:
-//! - It only runs the cores copied into `%ProgramFiles%\Prism Service\cores`
-//!   at install time (admin-only folder); a request names a core *kind*,
+//! - It only runs the cores copied into its program folder's `cores` at
+//!   install time (admin / root only); a request names a core *kind*,
 //!   never a path.
-//! - Its pipe only admits the account that installed it, and only the
-//!   Prism executable registered at install.
+//! - Its pipe (Windows) / unix socket (macOS) only admits the account that
+//!   installed it, and only the Prism executable registered at install.
 //! - Configs and data files arrive as contents; config paths the core
 //!   would write to are forced into the service's own folder.
 //!
@@ -20,24 +21,47 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const SERVICE_NAME: &str = "PrismService";
+#[cfg(windows)]
 pub const PIPE: &str = r"\\.\pipe\prism-service";
+/// macOS: the socket the daemon listens on (a root-owned folder, so only
+/// root can create it).
+#[cfg(not(windows))]
+pub const PIPE: &str = "/var/run/prism-service.sock";
+/// macOS: launchd label and job file.
+pub const LAUNCHD_LABEL: &str = "dev.prism.service";
+pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/dev.prism.service.plist";
+/// Executable suffix on this platform.
+pub const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 /// Requests carry data files (geodata), so they can be large.
 pub const MAX_MESSAGE: usize = 128 << 20;
 
 /// `%ProgramFiles%\Prism Service`: the service and its cores (admin-only).
+#[cfg(windows)]
 pub fn program_dir() -> PathBuf {
     let base = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles")).unwrap_or_else(|| r"C:\Program Files".into());
     PathBuf::from(base).join("Prism Service")
 }
 
 /// `%ProgramData%\Prism Service`: settings and the core's working folder.
+#[cfg(windows)]
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
     PathBuf::from(base).join("Prism Service")
 }
 
+/// macOS: `/Library/Application Support/Prism Service` (root-only).
+#[cfg(not(windows))]
+pub fn program_dir() -> PathBuf {
+    PathBuf::from("/Library/Application Support/Prism Service")
+}
+
+#[cfg(not(windows))]
+pub fn data_dir() -> PathBuf {
+    program_dir().join("data")
+}
+
 pub fn service_exe() -> PathBuf {
-    program_dir().join("prism-service.exe")
+    program_dir().join(format!("prism-service{EXE}"))
 }
 
 /// Where the service keeps its files and listens. Tests use their own.
@@ -76,6 +100,7 @@ impl Layout {
 /// Written at install: who may use the service.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Owner {
+    /// The user's SID (Windows) or uid (macOS).
     pub user_sid: String,
     /// The Prism executable allowed to connect.
     pub gui_path: PathBuf,
@@ -95,7 +120,10 @@ pub fn log(layout: &Layout, msg: &str) {
 }
 
 /// Core kinds and their file names in the cores folder.
+#[cfg(windows)]
 pub const CORES: [(&str, &str); 3] = [("prism", "prism-core.exe"), ("mihomo", "mihomo.exe"), ("singbox", "sing-box.exe")];
+#[cfg(not(windows))]
+pub const CORES: [(&str, &str); 3] = [("prism", "prism-core"), ("mihomo", "mihomo"), ("singbox", "sing-box")];
 
 pub fn core_file(kind: &str) -> Option<&'static str> {
     CORES.iter().find(|(k, _)| *k == kind).map(|(_, f)| *f)
@@ -254,7 +282,10 @@ pub fn sanitize_config(kind: &str, text: &str) -> Result<String> {
 
 #[cfg(windows)]
 pub mod client;
-#[cfg(windows)]
+#[cfg(target_os = "macos")]
+#[path = "client_mac.rs"]
+pub mod client;
+#[cfg(any(windows, target_os = "macos"))]
 pub mod server;
 
 #[cfg(test)]

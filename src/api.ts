@@ -106,6 +106,7 @@ export interface Snapshot {
   clash_handler: string | null;
   /** TUN service (runs TUN cores without admin rights for Prism). */
   tun_service: "missing" | "stopped" | "running";
+  platform: "windows" | "macos" | string;
 }
 
 /** From a prism:// or clash:// install-config link. */

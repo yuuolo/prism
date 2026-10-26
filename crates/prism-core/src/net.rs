@@ -1,6 +1,7 @@
 //! Outbound sockets. While TUN mode is active every socket the core opens is
-//! pinned to the physical interface (IP_UNICAST_IF), so the core's own
-//! traffic bypasses the TUN routes instead of looping back into itself.
+//! pinned to the physical interface (IP_UNICAST_IF on Windows, IP_BOUND_IF
+//! on macOS), so the core's own traffic bypasses the TUN routes instead of
+//! looping back into itself.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -37,7 +38,22 @@ fn pin(sock: std::os::windows::io::RawSocket, v6: bool, index: u32) -> io::Resul
     Ok(())
 }
 
-#[cfg(not(windows))]
+/// macOS: IP_BOUND_IF / IPV6_BOUND_IF make the socket use that interface's
+/// scoped routes, past the tunnel's default routes.
+#[cfg(target_os = "macos")]
+fn pin(sock: i32, v6: bool, index: u32) -> io::Result<()> {
+    const IP_BOUND_IF: libc::c_int = 25;
+    const IPV6_BOUND_IF: libc::c_int = 125;
+    let (level, opt) = if v6 { (libc::IPPROTO_IPV6, IPV6_BOUND_IF) } else { (libc::IPPROTO_IP, IP_BOUND_IF) };
+    let val = index as libc::c_int;
+    let r = unsafe { libc::setsockopt(sock, level, opt, &val as *const libc::c_int as *const libc::c_void, 4) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn pin(_: i32, _: bool, _: u32) -> io::Result<()> {
     Ok(())
 }

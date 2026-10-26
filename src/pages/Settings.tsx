@@ -300,6 +300,7 @@ function TunServiceCard() {
   const [busy, setBusy] = useState(false);
   if (!snap) return null;
   const st = snap.tun_service;
+  const mac = snap.platform === "macos";
   const act = async (fn: () => Promise<unknown>, ok: string) => {
     setBusy(true);
     await run(fn, ok);
@@ -317,13 +318,22 @@ function TunServiceCard() {
           {busy ? t("处理中…") : st === "missing" ? t("安装") : t("重新安装 / 更新内核")}
         </button>
         {st !== "missing" && (
-          <button className="btn danger" disabled={busy} onClick={() => confirm(t("卸载 TUN 服务？之后开启 TUN 需要以管理员身份运行 Prism。")) && act(api.uninstallTunService, t("TUN 服务已卸载"))}>
+          <button
+            className="btn danger"
+            disabled={busy}
+            onClick={() =>
+              confirm(mac ? t("卸载 TUN 服务？之后需要重新安装才能开启 TUN。") : t("卸载 TUN 服务？之后开启 TUN 需要以管理员身份运行 Prism。")) &&
+              act(api.uninstallTunService, t("TUN 服务已卸载"))
+            }
+          >
             {t("卸载")}
           </button>
         )}
       </div>
       <div className="small muted" style={{ marginTop: 10 }}>
-        {t("安装后，开启 TUN 时内核由系统服务（Prism TUN Service）运行，Prism 本身不需要管理员权限，开机自启也能直接使用 TUN。安装、更新和卸载各需要一次管理员授权。服务只运行安装时复制到受保护目录的内核，只接受当前 Windows 用户的 Prism 的请求。Prism 或内核更新后会提示更新服务。")}
+        {mac
+          ? t("macOS 上 TUN 需要这个服务：开启 TUN 时内核由系统后台服务（LaunchDaemon，以 root 运行）运行，Prism 本身不需要管理员权限。安装、更新和卸载各需要输入一次 Mac 的登录密码。服务只运行安装时复制到受保护目录的内核，只接受当前用户的 Prism 的请求。Prism 或内核更新后会提示更新服务。")
+          : t("安装后，开启 TUN 时内核由系统服务（Prism TUN Service）运行，Prism 本身不需要管理员权限，开机自启也能直接使用 TUN。安装、更新和卸载各需要一次管理员授权。服务只运行安装时复制到受保护目录的内核，只接受当前 Windows 用户的 Prism 的请求。Prism 或内核更新后会提示更新服务。")}
       </div>
     </div>
   );
@@ -334,6 +344,7 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
   const { snap, run } = useApp();
   if (!snap) return null;
   const handler = snap.clash_handler;
+  const mac = snap.platform === "macos";
   return (
     <div className="card span-2">
       <h3>{t("启动与链接")}</h3>
@@ -344,7 +355,7 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
             className={`switch ${snap.autostart ? "on" : ""}`}
             onClick={() => run(() => api.setAutostart(!snap.autostart), snap.autostart ? t("已关闭开机自启") : t("已开启开机自启"))}
           />
-          <span className="small muted">{t("登录 Windows 时启动 Prism（立即生效）")}</span>
+          <span className="small muted">{mac ? t("登录 Mac 时启动 Prism（立即生效）") : t("登录 Windows 时启动 Prism（立即生效）")}</span>
         </div>
       </div>
       <div className="field">
@@ -354,7 +365,7 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
           <span className="small muted">{t("开机自启时只在托盘运行，不弹出主界面")}</span>
         </div>
       </div>
-      <div className="field">
+      {!mac && <div className="field">
         <label>{t("接管 clash:// 链接")}</label>
         <div className="row">
           <button
@@ -371,9 +382,11 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
                 : t("开启后机场面板的「一键导入 Clash」会打开 Prism")}
           </span>
         </div>
-      </div>
+      </div>}
       <div className="small muted" style={{ marginTop: 8 }}>
-        {t("prism:// 链接始终由 Prism 打开（安装版）。通过链接导入订阅前都会先弹窗确认。")}
+        {mac
+          ? t("prism:// 和 clash:// 链接由 Prism 打开（装有其他 Clash 客户端时，clash:// 可能由 macOS 选定的程序打开）。通过链接导入订阅前都会先弹窗确认。")
+          : t("prism:// 链接始终由 Prism 打开（安装版）。通过链接导入订阅前都会先弹窗确认。")}
       </div>
     </div>
   );
@@ -445,7 +458,9 @@ export default function SettingsPage() {
                     <input
                       className="input small"
                       style={{ width: 260 }}
-                      placeholder={t("自定义路径（默认 {exe}）", { exe: k === "mihomo" ? "mihomo.exe" : "sing-box.exe" })}
+                      placeholder={t("自定义路径（默认 {exe}）", {
+                        exe: (k === "mihomo" ? "mihomo" : "sing-box") + (snap.platform === "macos" ? "" : ".exe"),
+                      })}
                       value={(k === "mihomo" ? form.mihomo_path : form.singbox_path) ?? ""}
                       onChange={(e) => set(k === "mihomo" ? "mihomo_path" : "singbox_path", e.target.value || null)}
                     />

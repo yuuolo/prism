@@ -576,11 +576,16 @@ fn inbounds(o: &Overrides) -> Value {
     let listen = if o.allow_lan { "::" } else { "127.0.0.1" };
     let mut v = vec![json!({ "type": "mixed", "tag": "mixed-in", "listen": listen, "listen_port": o.mixed_port })];
     if o.tun {
-        v.push(json!({
-            "type": "tun", "tag": "tun-in", "interface_name": "Prism",
+        let mut tun = json!({
+            "type": "tun", "tag": "tun-in",
             "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
             "mtu": 9000, "auto_route": true, "strict_route": true, "stack": "mixed",
-        }));
+        });
+        // macOS names TUN devices utunN itself.
+        if cfg!(windows) {
+            tun["interface_name"] = json!("Prism");
+        }
+        v.push(tun);
     }
     Value::Array(v)
 }
@@ -1116,7 +1121,7 @@ rules:
         let rules = sb["route"]["rules"].as_array().unwrap();
         assert_eq!(rules[0]["action"], "sniff");
         assert_eq!(rules[2]["clash_mode"], "Global");
-        assert_eq!(rules[3], json!({ "process_name": ["chrome.exe"], "outbound": "jp" }));
+        assert_eq!(rules[3], json!({ "process_name": [if cfg!(windows) { "chrome.exe" } else { "chrome" }], "outbound": "jp" }));
         assert_eq!(rules[4], json!({ "process_path": ["C:\\Games\\x.exe"], "outbound": "DIRECT" }));
         assert_eq!(rules[5], json!({ "process_name": ["ads.exe"], "action": "reject" }));
         assert_eq!(sb["route"]["find_process"], true);
@@ -1135,7 +1140,7 @@ rules:
         add_app_rules(&mut sb, &[AppRoute { by_path: false, value: "chrome".into(), target: "jp".into() }]);
         let rules = sb["route"]["rules"].as_array().unwrap();
         assert_eq!(rules[2]["clash_mode"], "Global");
-        assert_eq!(rules[3], json!({ "process_name": ["chrome.exe"], "outbound": "jp" }));
+        assert_eq!(rules[3], json!({ "process_name": [if cfg!(windows) { "chrome.exe" } else { "chrome" }], "outbound": "jp" }));
         assert_eq!(rules[4], json!({ "domain_suffix": ["example.com"], "outbound": "jp" }));
         assert_eq!(rules[5], json!({ "ip_cidr": ["1.1.1.1/32"], "outbound": "DIRECT" }));
         assert_eq!(rules[6], json!({ "rule_set": ["geosite-netflix"], "outbound": "jp" }));

@@ -1,14 +1,178 @@
-//! prism-service.exe
-//!   install --user <SID> --gui <prism.exe> --wintun <dll> --core <kind>=<exe>...
-//!                 copy into %ProgramFiles%\Prism Service and (re)start the
-//!                 service (run elevated; also used to refresh the cores)
+//! prism-service(.exe)
+//!   install --user <SID|uid> --gui <prism> [--wintun <dll>] --core <kind>=<exe>...
+//!                 copy into the program folder and (re)start the service
+//!                 (run elevated / as root; also used to refresh the cores)
 //!   uninstall     stop and remove the service and its folders
-//!   run           service entry point (started by Windows)
+//!   run           service entry point (started by Windows / launchd)
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn main() {
-    eprintln!("prism-service only runs on Windows");
+    eprintln!("prism-service only runs on Windows and macOS");
     std::process::exit(1);
+}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let r = match args.get(1).map(String::as_str) {
+        Some("run") => mac::run(),
+        Some("install") => mac::install(&args[2..]),
+        Some("uninstall") => mac::uninstall(),
+        _ => {
+            eprintln!("usage: prism-service install --user <uid> --gui <path> --core <kind>=<exe>... | uninstall");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = r {
+        prism_service::log(&prism_service::Layout::system(), &format!("error: {e:#}"));
+        eprintln!("{e:#}");
+        std::process::exit(1);
+    }
+}
+
+/// macOS: a LaunchDaemon (root) whose program folder only root can write.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::Duration;
+
+    use anyhow::{bail, Context, Result};
+    use prism_service::*;
+
+    fn arg_values<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
+        args.windows(2).filter(|w| w[0] == name).map(|w| w[1].as_str()).collect()
+    }
+
+    fn launchctl(args: &[&str]) -> bool {
+        Command::new("/bin/launchctl").args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+
+    /// Copies an executable, dropping the quarantine flag a download left
+    /// (launchd won't start a quarantined unsigned binary).
+    fn copy_exe(from: &Path, to: &Path) -> Result<()> {
+        if prism_service::client::same_path(from, to) {
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(to);
+        std::fs::copy(from, to).with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755))?;
+        let _ = Command::new("/usr/bin/xattr").arg("-d").arg("com.apple.quarantine").arg(to).stderr(std::process::Stdio::null()).status();
+        Ok(())
+    }
+
+    fn plist(layout: &Layout) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array><string>{}</string><string>run</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>{}</string>
+</dict>
+</plist>
+"#,
+            layout.service_exe.display(),
+            layout.data.join("launchd.log").display()
+        )
+    }
+
+    fn stop_daemon() {
+        launchctl(&["bootout", &format!("system/{LAUNCHD_LABEL}")]);
+        for _ in 0..50 {
+            if std::os::unix::net::UnixStream::connect(PIPE).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    pub fn install(args: &[String]) -> Result<()> {
+        if unsafe { libc::geteuid() } != 0 {
+            bail!("install needs root");
+        }
+        let layout = Layout::system();
+        let uid = *arg_values(args, "--user").first().context("--user <uid> missing")?;
+        if uid.is_empty() || !uid.chars().all(|c| c.is_ascii_digit()) || uid == "0" {
+            bail!("bad uid {uid}");
+        }
+        let gui = PathBuf::from(*arg_values(args, "--gui").first().context("--gui missing")?);
+        let mut cores = Vec::new();
+        for c in arg_values(args, "--core") {
+            let (kind, path) = c.split_once('=').context("--core <kind>=<exe>")?;
+            let file = core_file(kind).with_context(|| format!("unknown core {kind}"))?;
+            cores.push((file, PathBuf::from(path)));
+        }
+        if cores.is_empty() {
+            bail!("no --core given");
+        }
+
+        stop_daemon();
+        // Program folder: root-owned, others may only read and run.
+        std::fs::create_dir_all(layout.cores_dir())?;
+        for dir in [&layout.program, &layout.cores_dir()] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
+        }
+        copy_exe(&std::env::current_exe()?, &layout.service_exe)?;
+        for (_, name) in CORES {
+            if !cores.iter().any(|(f, _)| *f == name) {
+                let _ = std::fs::remove_file(layout.cores_dir().join(name));
+            }
+        }
+        for (file, from) in &cores {
+            copy_exe(from, &layout.cores_dir().join(file))?;
+        }
+        std::fs::create_dir_all(layout.run_dir())?;
+        std::fs::set_permissions(&layout.data, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::write(layout.owner_file(), serde_json::to_vec_pretty(&Owner { user_sid: uid.into(), gui_path: gui })?)?;
+
+        std::fs::write(LAUNCHD_PLIST, plist(&layout))?;
+        std::fs::set_permissions(LAUNCHD_PLIST, std::fs::Permissions::from_mode(0o644))?;
+        if !launchctl(&["bootstrap", "system", LAUNCHD_PLIST]) {
+            bail!("launchctl bootstrap failed, see {}", layout.data.join("launchd.log").display());
+        }
+        for _ in 0..50 {
+            if std::os::unix::net::UnixStream::connect(PIPE).is_ok() {
+                log(&layout, &format!("installed for uid {uid}"));
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        bail!("service did not start, see {}", layout.log_file().display())
+    }
+
+    pub fn uninstall() -> Result<()> {
+        if unsafe { libc::geteuid() } != 0 {
+            bail!("uninstall needs root");
+        }
+        stop_daemon();
+        let _ = std::fs::remove_file(LAUNCHD_PLIST);
+        let _ = std::fs::remove_file(PIPE);
+        let _ = std::fs::remove_dir_all(prism_service::program_dir());
+        Ok(())
+    }
+
+    pub fn run() -> Result<()> {
+        let layout = Layout::system();
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async move {
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::spawn(async move {
+                term.recv().await;
+                let _ = stop_tx.send(true);
+            });
+            log(&layout, "service started");
+            let r = server::serve(layout.clone(), stop_rx).await;
+            log(&layout, "service stopped");
+            r
+        })
+    }
 }
 
 #[cfg(windows)]

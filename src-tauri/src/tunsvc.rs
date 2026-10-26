@@ -29,9 +29,9 @@ pub fn state() -> State {
     prism_service::client::state()
 }
 
-/// prism-service.exe ships next to prism.exe (a Tauri sidecar).
+/// prism-service ships next to the prism executable (a Tauri sidecar).
 fn service_binary() -> Result<PathBuf> {
-    let p = std::env::current_exe()?.with_file_name("prism-service.exe");
+    let p = std::env::current_exe()?.with_file_name(format!("prism-service{}", prism_service::EXE));
     if !p.exists() {
         bail!("找不到 {}", p.display());
     }
@@ -51,16 +51,23 @@ pub async fn status() -> Result<Status> {
 }
 
 /// Copies the cores this Prism uses into the service (installing it if
-/// needed). Shows a UAC prompt.
+/// needed). Shows a UAC prompt (Windows) / the administrator password
+/// prompt (macOS).
 pub async fn install(store: &Store, s: &Settings) -> Result<()> {
     let exe = service_binary()?;
     let rt = store.runtime_dir();
-    if !rt.join("wintun.dll").exists() {
-        crate::download::wintun(&rt, None).await.context("下载 wintun.dll 失败")?;
-    }
     let sid = prism_service::client::current_user_sid()?;
+    #[cfg(windows)]
     let q = |p: &std::path::Path| format!("\"{}\"", p.display());
-    let mut args = format!("install --user {sid} --gui {} --wintun {}", q(&std::env::current_exe()?), q(&rt.join("wintun.dll")));
+    #[cfg(not(windows))]
+    let q = |p: &std::path::Path| prism_service::client::sh_quote(&p.to_string_lossy());
+    let mut args = format!("install --user {sid} --gui {}", q(&std::env::current_exe()?));
+    if cfg!(windows) {
+        if !rt.join("wintun.dll").exists() {
+            crate::download::wintun(&rt, None).await.context("下载 wintun.dll 失败")?;
+        }
+        args += &format!(" --wintun {}", q(&rt.join("wintun.dll")));
+    }
     for k in [CoreKind::Prism, CoreKind::Mihomo, CoreKind::Singbox] {
         let bin = core_binary(store, s, k);
         if bin.exists() {
@@ -90,7 +97,7 @@ pub fn stale(store: &Store, s: &Settings, st: &Status, kind: CoreKind) -> bool {
     if ours.is_none() || ours.as_ref() != st.cores.get(kind_name(kind)) {
         return true;
     }
-    kind == CoreKind::Prism && sha256_file(&store.runtime_dir().join("wintun.dll")).as_ref() != st.wintun.as_ref()
+    cfg!(windows) && kind == CoreKind::Prism && sha256_file(&store.runtime_dir().join("wintun.dll")).as_ref() != st.wintun.as_ref()
 }
 
 /// Starts `kind` in the service with `config`, sending the data files it

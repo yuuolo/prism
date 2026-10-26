@@ -55,6 +55,7 @@ export function AppRuleDialog({
   onSave: (rule: AppRule) => Promise<boolean>;
 }) {
   const outs = useOutbounds();
+  const mac = useApp().snap?.platform === "macos";
   const [procs, setProcs] = useState<ProcessInfo[] | null>(null);
   const [search, setSearch] = useState("");
   const [picked, setPicked] = useState<{ name: string; path: string } | null>(
@@ -138,7 +139,9 @@ export function AppRuleDialog({
           <label>{byPath ? t("程序路径") : t("程序名")}</label>
           <input
             className="input mono"
-            placeholder={byPath ? "C:\\Program Files\\App\\app.exe" : "app.exe"}
+            placeholder={
+              mac ? (byPath ? "/Applications/App.app/Contents/MacOS/App" : "App") : byPath ? "C:\\Program Files\\App\\app.exe" : "app.exe"
+            }
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
