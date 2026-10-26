@@ -6,6 +6,8 @@ mod patches;
 mod elevate;
 mod export;
 mod links;
+#[cfg(target_os = "macos")]
+mod macdns;
 mod merge;
 mod store;
 mod sysproxy;
@@ -1238,6 +1240,11 @@ pub fn run() {
                 None => app.path().app_data_dir()?,
             };
             let store = Store::new(dir)?;
+            // A TUN DNS override left behind by a crash.
+            #[cfg(target_os = "macos")]
+            if let Err(err) = macdns::restore_from(&store.dir) {
+                eprintln!("[prism] 恢复 DNS 设置失败: {err:#}");
+            }
             let settings = store.settings();
             let traffic = traffic::Traffic::load(store.dir.join("traffic.json"));
             let hidden = autostarted && settings.silent_start && link.is_none();

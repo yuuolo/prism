@@ -77,6 +77,14 @@ else
   bad "no DNS answer from 172.19.0.2"
 fi
 
+# The app points the system DNS at public servers while TUN runs; queries
+# to them are routed into the tunnel and answered there.
+if dig +time=3 +tries=1 @223.5.5.5 www.example.com A +short | grep -Eq '^[0-9.]+$'; then
+  ok "DNS query to 223.5.5.5 answered through the tunnel"
+else
+  bad "no DNS answer from 223.5.5.5"
+fi
+
 sudo pkill -f "$CORE" || true
 sleep 2
 ifconfig | grep -q "inet 172.19.0.1 " && bad "utun still up after exit" || ok "utun removed after exit"

@@ -237,6 +237,12 @@ impl CoreManager {
                 bail!("内核启动后立即退出，请查看「日志」页");
             }
             if api(s, "GET", "/version", None).await.is_ok() {
+                #[cfg(target_os = "macos")]
+                if s.tun {
+                    if let Err(e) = crate::macdns::override_dns(&store.dir) {
+                        self.push_log(app, format!("[prism] 设置 TUN 的系统 DNS 失败，部分域名可能不经过 TUN: {e:#}"));
+                    }
+                }
                 return Ok(());
             }
         }
@@ -299,6 +305,8 @@ impl CoreManager {
         if let Some((_, mut child)) = self.child.lock().await.take() {
             let _ = child.kill().await;
         }
+        #[cfg(target_os = "macos")]
+        crate::macdns::restore();
         if self.service.lock().await.take().is_some() {
             let _ = crate::tunsvc::stop().await;
         }

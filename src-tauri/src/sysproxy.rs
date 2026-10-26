@@ -118,7 +118,7 @@ mod mac {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{get, set};
+pub use mac::{get, services, set};
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn set(_: bool, _: &str, _: &str) -> anyhow::Result<()> {

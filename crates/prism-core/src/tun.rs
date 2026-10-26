@@ -288,13 +288,13 @@ mod win {
 }
 
 /// macOS: a utun interface (needs root), configured with ifconfig / route.
-/// DNS servers on the local network would bypass the 0/1 + 128/1 routes, so
-/// they get host routes into the tunnel too (the core still reaches them
-/// over its pinned sockets).
+/// The system resolver's DNS server is usually the router, on the local
+/// network and so outside the 0/1 + 128/1 routes (a host route for it would
+/// also capture the gateway itself); the Prism app points the system DNS at
+/// public servers while TUN runs instead.
 #[cfg(target_os = "macos")]
 mod mac {
     use std::io;
-    use std::net::Ipv4Addr;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Path;
     use std::sync::Arc;
@@ -373,18 +373,6 @@ mod mac {
         Ok((name, index))
     }
 
-    /// IPv4 DNS servers the system resolver uses (from `scutil --dns`).
-    fn system_dns() -> Vec<Ipv4Addr> {
-        let mut v: Vec<Ipv4Addr> = run("/usr/sbin/scutil", &["--dns"])
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("nameserver[").and_then(|r| r.split(':').nth(1)).and_then(|ip| ip.trim().parse().ok()))
-            .collect();
-        v.sort();
-        v.dedup();
-        v
-    }
-
     /// Strips / adds utun's 4-byte protocol family header.
     pub fn frame(p: &[u8]) -> Vec<u8> {
         let af = if p.first().is_some_and(|b| b >> 4 == 6) { libc::AF_INET6 } else { libc::AF_INET } as u32;
@@ -404,9 +392,6 @@ mod mac {
         if cfg.auto_route {
             for net in ["0.0.0.0/1", "128.0.0.0/1"] {
                 run("/sbin/route", &["-n", "add", "-net", net, "-interface", &name])?;
-            }
-            for dns in system_dns().into_iter().filter(|ip| ip.is_private() || ip.is_link_local()) {
-                let _ = run("/sbin/route", &["-n", "add", "-host", &dns.to_string(), "-interface", &name]);
             }
         }
         tracing::info!("TUN {name} up at {ADDR}, outbound bound to {phys_name} (if {phys}), auto-route={}", cfg.auto_route);

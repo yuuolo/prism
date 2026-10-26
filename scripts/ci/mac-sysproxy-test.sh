@@ -24,5 +24,15 @@ networksetup -getwebproxy "$SVC" | grep -q 'Enabled: Yes' && echo "PASS proxy re
 run networksetup -setwebproxystate "$SVC" off
 run networksetup -setsecurewebproxystate "$SVC" off
 run networksetup -setsocksfirewallproxystate "$SVC" off
+# What the app does to DNS while TUN runs, and the restore.
+dns_before=$(networksetup -getdnsservers "$SVC")
+run networksetup -setdnsservers "$SVC" 223.5.5.5 119.29.29.29
+networksetup -getdnsservers "$SVC" | grep -q '223.5.5.5' && echo "PASS DNS reads back as 223.5.5.5" || { echo "FAIL DNS not set"; fail=1; }
+if echo "$dns_before" | grep -q "aren't any"; then
+  run networksetup -setdnsservers "$SVC" Empty
+else
+  run networksetup -setdnsservers "$SVC" $dns_before
+fi
+echo "dns before: $dns_before / after restore: $(networksetup -getdnsservers "$SVC" | tr '\n' ' ')"
 echo "before: $before"
 exit $fail
