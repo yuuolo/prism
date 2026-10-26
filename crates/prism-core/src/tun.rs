@@ -358,19 +358,37 @@ mod mac {
         }
     }
 
-    /// The interface of the current default route, e.g. en0.
-    pub fn default_interface() -> Result<(String, u32)> {
+    /// The interface of the current default route (e.g. en0), its index and
+    /// gateway.
+    pub fn default_interface() -> Result<(String, u32, Option<String>)> {
         let out = run("/sbin/route", &["-n", "get", "default"])?;
-        let name = out
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("interface:").map(|n| n.trim().to_string()))
-            .ok_or_else(|| anyhow!("no default route"))?;
+        let field = |k: &str| out.lines().find_map(|l| l.trim().strip_prefix(k).map(|n| n.trim().to_string()));
+        let name = field("interface:").ok_or_else(|| anyhow!("no default route"))?;
+        let gateway = field("gateway:").filter(|g| g.parse::<std::net::IpAddr>().is_ok());
         let c = std::ffi::CString::new(name.clone())?;
         let index = unsafe { libc::if_nametoindex(c.as_ptr()) };
         if index == 0 {
             bail!("interface {name} not found");
         }
-        Ok((name, index))
+        Ok((name, index, gateway))
+    }
+
+    /// Sockets bound to an interface (IP_BOUND_IF) only see routes scoped
+    /// to it. macOS doesn't always install a scoped default route for the
+    /// primary interface; add one when it's missing (it applies to bound
+    /// sockets only, so other traffic is unaffected).
+    fn ensure_scoped_default(iface: &str, gateway: Option<&str>) {
+        if run("/sbin/route", &["-n", "get", "-ifscope", iface, "1.1.1.1"]).is_ok() {
+            return;
+        }
+        let r = match gateway {
+            Some(gw) => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", gw]),
+            None => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", "-interface", iface]),
+        };
+        match r {
+            Ok(_) => tracing::info!("added a scoped default route on {iface} for the core's own connections"),
+            Err(e) => tracing::warn!("no scoped default route on {iface}, the core's own connections may fail: {e:#}"),
+        }
     }
 
     /// Strips / adds utun's 4-byte protocol family header.
@@ -383,7 +401,8 @@ mod mac {
     }
 
     pub async fn start(cfg: &TunConfig, _home: &Path, hub: Arc<Hub>) -> Result<()> {
-        let (phys_name, phys) = default_interface()?;
+        let (phys_name, phys, gateway) = default_interface()?;
+        ensure_scoped_default(&phys_name, gateway.as_deref());
         let (fd, name) = open_utun()?;
         run("/sbin/ifconfig", &[&name, &ADDR.to_string(), &DNS.to_string(), "mtu", &MTU.to_string(), "up"])?;
         // Pin our own sockets to the physical interface before routing
