@@ -374,19 +374,19 @@ mod mac {
     }
 
     /// Sockets bound to an interface (IP_BOUND_IF) only see routes scoped
-    /// to it. macOS doesn't always install a scoped default route for the
-    /// primary interface; add one when it's missing (it applies to bound
-    /// sockets only, so other traffic is unaffected).
+    /// to it. For the primary interface macOS usually has no scoped default
+    /// route and falls back to the unscoped table, which with our 0/1 +
+    /// 128/1 routes points into the tunnel: the lookup then fails. So add
+    /// the scoped default route explicitly (it applies to bound sockets
+    /// only, so other traffic is unaffected).
     fn ensure_scoped_default(iface: &str, gateway: Option<&str>) {
-        if run("/sbin/route", &["-n", "get", "-ifscope", iface, "1.1.1.1"]).is_ok() {
-            return;
-        }
         let r = match gateway {
             Some(gw) => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", gw]),
             None => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", "-interface", iface]),
         };
         match r {
             Ok(_) => tracing::info!("added a scoped default route on {iface} for the core's own connections"),
+            Err(e) if format!("{e:#}").contains("File exists") => {}
             Err(e) => tracing::warn!("no scoped default route on {iface}, the core's own connections may fail: {e:#}"),
         }
     }
