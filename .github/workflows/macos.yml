@@ -35,26 +35,30 @@ jobs:
           key: ${{ matrix.target }}
       - run: npm ci
 
-      - name: Unit tests
-        run: |
-          cargo build -p prism-core
-          cargo test --workspace
-
       - name: TUN smoke test (root)
         run: |
           cargo build --release -p prism-core
           bash scripts/ci/mac-tun-test.sh "$PWD/target/release/prism-core"
 
+      - name: Unit tests
+        if: ${{ !cancelled() }}
+        run: |
+          cargo build -p prism-core
+          cargo test --workspace
+
       - name: System proxy calls without sudo
+        if: ${{ !cancelled() }}
         run: bash scripts/ci/mac-sysproxy-test.sh
 
       - name: Bundle
+        if: ${{ !cancelled() }}
         env:
           PRISM_TARGET: ${{ matrix.target }}
           PRISM_UPDATER_SIGN: "0"
         run: node scripts/bundle.mjs
 
       - name: Collect
+        if: ${{ !cancelled() }}
         run: |
           V=$(node -p "require('./src-tauri/tauri.conf.json').version")
           OUT=target/${{ matrix.target }}/release
@@ -65,6 +69,7 @@ jobs:
           ls -la dist-mac
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: prism-macos-${{ matrix.arch }}
           path: dist-mac/

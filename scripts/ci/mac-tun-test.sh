@@ -26,6 +26,11 @@ rules:
   - MATCH,DIRECT
 EOF
 
+echo "---- routes before"
+netstat -rn -f inet | head -25
+DEFIF=$(route -n get default | awk '/interface:/{print $2}')
+echo "default interface: $DEFIF"
+
 sudo "$CORE" -f "$W/config.yaml" -d "$W" > "$W/core.log" 2>&1 &
 for _ in $(seq 1 50); do
   curl -s -o /dev/null http://127.0.0.1:19090/version && break
@@ -38,6 +43,14 @@ IF=$(ifconfig | awk '/^utun/{name=$1} /inet 172\.19\.0\.1 /{print name}' | tr -d
 ROUTES=$(netstat -rn -f inet)
 echo "$ROUTES" | grep -Eq "^0/1 .*${IF:-utunX}" && ok "0/1 routed into $IF" || bad "0/1 route missing"
 echo "$ROUTES" | grep -Eq "^128.0/1 .*${IF:-utunX}" && ok "128.0/1 routed into $IF" || bad "128.0/1 route missing"
+
+echo "---- routes with TUN"
+netstat -rn -f inet | head -30
+echo "---- scoped lookup on $DEFIF"
+route -n get -ifscope "$DEFIF" 1.1.1.1 || true
+# curl --interface uses the same IP_BOUND_IF the core pins its sockets with.
+code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 --interface "$DEFIF" https://www.example.com/ || true)
+[ "$code" = "200" ] && ok "a socket bound to $DEFIF bypasses the tunnel: HTTP $code" || bad "socket bound to $DEFIF: HTTP $code"
 
 code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://www.example.com/ || true)
 [ "$code" = "200" ] && ok "https://www.example.com through TUN: HTTP $code" || bad "curl through TUN: HTTP $code"
