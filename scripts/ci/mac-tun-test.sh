@@ -58,8 +58,7 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://www.example
 [ "$code" = "200" ] && ok "https://www.example.com through TUN: HTTP $code" || bad "curl through TUN: HTTP $code"
 
 # A slow download keeps a connection open long enough to inspect it.
-curl -sS -o /dev/null --max-time 15 --limit-rate 50k \
-  https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat &
+curl -sS -o /dev/null --max-time 15 --limit-rate 50k "https://speed.cloudflare.com/__down?bytes=50000000" &
 DL=$!
 sleep 4
 CONNS=$(curl -s http://127.0.0.1:19090/connections)
