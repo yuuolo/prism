@@ -1,6 +1,6 @@
 # Prism 使用手册（Windows）
 
-适用版本：v0.1.8（新增域名分流；v0.1.7 新增合并订阅；v0.1.6 新增 VMess、WebSocket / HTTPUpgrade / gRPC 传输、TUIC、WireGuard、Vision 的 UDP、链式代理、组合规则、按订阅覆写、连接导出）
+适用版本：v0.1.9（新增 macOS 版；v0.1.8 新增域名分流；v0.1.7 新增合并订阅；v0.1.6 新增 VMess、WebSocket / HTTPUpgrade / gRPC 传输、TUIC、WireGuard、Vision 的 UDP、链式代理、组合规则、按订阅覆写、连接导出）
 
 - [1. 安装与首次使用](#1-安装与首次使用)
 - [2. 界面说明](#2-界面说明)
@@ -18,7 +18,9 @@
 
 ## 1. 安装与首次使用
 
-1. 从 [Releases](https://github.com/yuuolo/prism/releases) 下载 `Prism_<版本>_x64-setup.exe` 并安装。安装程序未做代码签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
+1. 从 [Releases](https://github.com/yuuolo/prism/releases) 下载并安装：
+   - **Windows**：`Prism_<版本>_x64-setup.exe`。安装程序未做代码签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
+   - **macOS**（10.15 及以上）：Apple 芯片（M1–M5）下载 `Prism_<版本>_aarch64.dmg`，Intel 芯片下载 `Prism_<版本>_x64.dmg`（「关于本机」可查看芯片）。打开 dmg，把 Prism 拖进「应用程序」。应用没有 Apple 签名，第一次打开要在 Finder 里右键 Prism → **打开** → 再点 **打开**；如果提示「已损坏，无法打开」，在终端执行 `xattr -cr /Applications/Prism.app` 后再打开。
 2. 打开 Prism，进入 **订阅** 页，粘贴订阅链接，点 **导入**。第一个导入的订阅会自动启用。
 3. 回到 **概览** 页，点 **启动内核**。
 4. 在 **流量接管** 卡片里打开 **系统代理**（或 **TUN 模式**，见第 4 节）。
@@ -255,6 +257,19 @@ append-proxies:
 - 服务运行的内核输出同样显示在「日志」页；服务自身的记录在 `C:\ProgramData\Prism Service\service.log`。
 
 一般情况下二选一即可：日常用系统代理，需要接管所有程序时用 TUN。
+
+### macOS 上的不同之处
+
+- **系统代理**：设置到所有已启用的网络服务（Wi-Fi、以太网等）的 HTTP、HTTPS 和 SOCKS 代理上，退出时关闭。绕过列表沿用设置页的「系统代理绕过」，`<local>` 换成 `*.local`。
+- **TUN 必须使用 TUN 服务**（macOS 上不能以管理员身份重启 Prism）。开启 TUN 时按提示安装，系统会要求输入一次 Mac 的登录密码；服务是以 root 运行的系统后台服务（LaunchDaemon `dev.prism.service`），程序放在 `/Library/Application Support/Prism Service/`，只接受当前用户的 Prism 的请求。
+- TUN 使用系统的 `utunN` 虚拟网卡，地址 `172.19.0.1`，路由与 Windows 相同（`0.0.0.0/1` + `128.0.0.0/1`），内核自己的连接绑定到原来的网卡（如 `en0`）绕过隧道。
+- **DNS**：Mac 的 DNS 服务器通常是路由器，不经过隧道。所以开启 TUN 期间，Prism 会把所有网络服务的 DNS 临时改成 `223.5.5.5`、`119.29.29.29`（经隧道由内核应答），关闭 TUN、停止内核或退出 Prism 时改回原来的设置；原设置备份在数据目录的 `dns-backup.json`，Prism 意外退出时下次启动会自动恢复。
+- **应用分流**：程序名就是可执行文件名，没有 `.exe`，例如 `Google Chrome`、`Telegram`；完整路径形如 `/Applications/Telegram.app/Contents/MacOS/Telegram`。
+- **开机自启**：写入 `~/Library/LaunchAgents/dev.prism.client.plist`。
+- **一键导入**：`prism://` 和 `clash://` 链接都由 Prism 打开（装有其他 Clash 客户端时，`clash://` 可能由 macOS 选定的程序打开），没有「接管 clash:// 链接」开关。
+- WebDAV 密码保存在「钥匙串」里。
+- **卸载**：先在设置页 **卸载** TUN 服务（如已安装），再把 Prism 从「应用程序」拖到废纸篓；数据在 `~/Library/Application Support/dev.prism.client/`。
+- **软件更新**：与 Windows 相同，在设置页检查并安装，下载后校验签名，安装完成后 Prism 自动重新打开。
 
 ## 5. 订阅格式
 

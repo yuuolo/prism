@@ -1,6 +1,6 @@
 # Prism
 
-类似 Clash Verge Rev 的桌面代理客户端，带**自研 Rust 代理内核**（`prism-core`），并可一键切换到 **mihomo** 或 **sing-box** 内核。
+类似 Clash Verge Rev 的桌面代理客户端（**Windows** 和 **macOS**，Intel 与 Apple 芯片），带**自研 Rust 代理内核**（`prism-core`），并可一键切换到 **mihomo** 或 **sing-box** 内核。
 
 **[使用手册](docs/manual.md)**：安装与界面说明、系统代理与 TUN、订阅格式、配置语法（Clash YAML / 分享链接 / sing-box）、命令行与常见问题。
 
@@ -35,9 +35,9 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 - 延迟测试支持 mihomo 的 `unified-delay`（只计第二次请求），设置页「统一延迟」开关
 - Clash API：`/proxies`、`/proxies/{name}/delay`、`/group/{name}/delay`、`/connections`、`/rules`、`/configs`、`/traffic`、`/providers/proxies`、`/providers/rules`、`/version`
 
-- TUN 模式（Windows，需管理员权限 + wintun.dll）：wintun 虚拟网卡 + smoltcp 用户态协议栈；自动路由 0.0.0.0/1、128.0.0.0/1，内核自身连接绑定物理网卡防回环；嗅探 TLS SNI / HTTP Host 按域名分流；DNS 由 DNS 模块应答（未启用时转发上游）；UDP 按规则分流、可经代理。命令行：`prism-core -f config.yaml --tun`
+- TUN 模式（需管理员 / root 权限）：Windows 用 wintun 虚拟网卡，macOS 用 utun；smoltcp 用户态协议栈；自动路由 0.0.0.0/1、128.0.0.0/1，内核自身连接绑定物理网卡防回环（Windows `IP_UNICAST_IF`，macOS `IP_BOUND_IF` + 网卡专属默认路由）；嗅探 TLS SNI / HTTP Host 按域名分流；DNS 由 DNS 模块应答（未启用时转发上游）；UDP 按规则分流、可经代理。命令行：`prism-core -f config.yaml --tun`
 
-- **应用分流**：PROCESS-NAME / PROCESS-PATH（含 `-REGEX`）规则，通过 Windows TCP/UDP 连接表识别程序；客户端「应用分流」页按程序选择出口，三种内核通用
+- **应用分流**：PROCESS-NAME / PROCESS-PATH（含 `-REGEX`）规则，通过系统的 TCP/UDP 连接表识别程序（Windows IP Helper，macOS `pcblist_n`）；客户端「应用分流」页按程序选择出口，三种内核通用
 - **软件更新**：启动时检查 GitHub Releases，下载后校验发布签名（minisign，版本绑定）再安装
 - **代理页**：全部测速、按延迟 / 名称排序、搜索节点；托盘菜单直接切换节点；**解锁检测**（Netflix、YouTube Premium、ChatGPT、Claude、Gemini 等）
 - **连接页导出**：把（过滤后的）连接导出为 Excel / CSV / JSON / HTML / Markdown
@@ -46,8 +46,8 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 - **合并订阅**：把其他订阅的节点加入当前订阅的代理组，规则仍用当前订阅的
 - **备份与同步**：WebDAV 云端备份 / 恢复、本地导出导入（密码用 DPAPI 加密）
 - **外观**：浅色 / 深色主题、中文 / English 界面、全局快捷键、最近 30 天流量统计
-- **TUN 服务**：`prism-service`（Windows 服务）替普通权限的 Prism 运行 TUN 内核；只运行受保护目录中的内核、只接受安装用户的 Prism 请求
-- **开机自启 / 静默启动**：登录 Windows 时启动并只显示托盘；单实例运行
+- **TUN 服务**：`prism-service`（Windows 服务 / macOS LaunchDaemon）替普通权限的 Prism 运行 TUN 内核；只运行受保护目录中的内核、只接受安装用户的 Prism 请求
+- **开机自启 / 静默启动**：登录时启动（Windows 注册表 Run / macOS LaunchAgent）并只显示托盘；单实例运行
 - **订阅定时更新**：按订阅的间隔（默认 24 小时，或机场 `profile-update-interval`）自动更新，正在使用的订阅在 prism-core / mihomo 上热重载、不断开连接
 - **一键导入**：`clash://install-config?url=…&name=…` 与 `prism://` 链接，导入前弹窗确认；`clash://` 可选接管，关闭时还原给原来的客户端
 
@@ -109,7 +109,7 @@ crates/prism-core/     自研内核（库 + prism-core 可执行文件）
   src/outbound/        anytls、shadowsocks、trojan、vless、socks5/http、代理组
   src/rules.rs geo.rs  规则匹配、geosite/geoip.dat 解码
   src/api.rs           Clash 兼容 REST API
-crates/prism-service/  TUN 服务（Windows 服务，替普通权限的 Prism 运行 TUN 内核）
+crates/prism-service/  TUN 服务（Windows 服务 / macOS LaunchDaemon，替普通权限的 Prism 运行 TUN 内核）
 src-tauri/             Tauri 后端：内核进程、订阅、系统代理、下载、托盘
 src/                   React 界面
 ```
