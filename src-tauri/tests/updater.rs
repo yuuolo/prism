@@ -44,6 +44,57 @@ fn serve(l: TcpListener, routes: HashMap<String, Vec<u8>>) {
     });
 }
 
+/// Opt-in: checks that a given update artifact (a macOS .app.tar.gz, say)
+/// and its .sig pass the real updater's verification for its version:
+///   PRISM_VERIFY_FILE=<file> PRISM_VERIFY_VERSION=0.1.9 cargo test -p prism --test updater
+/// (signature from <file>.sig).
+#[test]
+fn verifies_given_artifact() {
+    let (Ok(file), Ok(version)) = (std::env::var("PRISM_VERIFY_FILE"), std::env::var("PRISM_VERIFY_VERSION")) else {
+        eprintln!("PRISM_VERIFY_FILE / PRISM_VERIFY_VERSION not set, skipping");
+        return;
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let conf: Value = serde_json::from_str(&std::fs::read_to_string(root.join("tauri.conf.json")).unwrap()).unwrap();
+    let body = std::fs::read(&file).unwrap();
+    let signature = std::fs::read_to_string(format!("{file}.sig")).unwrap().trim().to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // The updater picks the entry for the platform it runs on; the check is
+    // the same for every platform.
+    let manifest = |v: &str| {
+        serde_json::to_vec(&json!({
+            "version": v, "notes": "test", "pub_date": "2026-10-24T00:00:00Z",
+            "platforms": { "windows-x86_64": { "signature": signature, "url": format!("http://127.0.0.1:{port}/artifact") } }
+        }))
+        .unwrap()
+    };
+    let mut routes = HashMap::new();
+    routes.insert("/artifact".to_string(), body.clone());
+    routes.insert("/good.json".to_string(), manifest(&version));
+    routes.insert("/replay.json".to_string(), manifest("9.9.9"));
+    serve(listener, routes);
+    let mut ctx = tauri::test::mock_context(tauri::test::noop_assets());
+    ctx.config_mut().plugins.0.insert("updater".into(), conf["plugins"]["updater"].clone());
+    let app = tauri::test::mock_builder().plugin(tauri_plugin_updater::Builder::new().build()).build(ctx).unwrap();
+    let handle = app.handle().clone();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async move {
+        let check = |path: &str| {
+            let url: tauri::Url = format!("http://127.0.0.1:{port}{path}").parse().unwrap();
+            let b = handle.updater_builder().no_proxy().endpoints(vec![url]).unwrap().build().unwrap();
+            async move { b.check().await }
+        };
+        let good = check("/good.json").await.unwrap().expect("update offered");
+        let bytes = good.download(|_, _| {}, || {}).await.expect("artifact verifies");
+        assert_eq!(bytes, body);
+        println!("ok: {file} verifies for v{version} ({} bytes)", bytes.len());
+        let replay = check("/replay.json").await.unwrap().expect("update offered");
+        replay.download(|_, _| {}, || {}).await.expect_err("bound to its version");
+        println!("ok: rejected when announced as 9.9.9");
+    });
+}
+
 #[test]
 fn verifies_signed_updates() {
     if std::env::var("PRISM_UPDATE_TEST").is_err() {

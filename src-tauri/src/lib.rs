@@ -873,6 +873,11 @@ async fn install_update(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
         }
         return Err(e(err));
     }
+    // Windows: the installer restarts Prism. macOS: Prism.app was replaced
+    // in place; start the new one.
+    #[cfg(not(windows))]
+    app.restart();
+    #[allow(unreachable_code)]
     Ok(())
 }
 
