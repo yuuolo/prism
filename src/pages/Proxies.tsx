@@ -220,9 +220,10 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
   };
 
   const q = query.trim().toLowerCase();
-  const membersOf = (g: ProxyItem) => {
-    // GLOBAL lists every chain's internal copies too.
-    let list = (g.all ?? []).filter((n) => chainNames.includes(n) || !isChainPart(n, chainNames));
+  const membersOf = (g: ProxyItem, ofChain = false) => {
+    // GLOBAL lists every chain's internal copies too; a chain's own groups
+    // are made of nothing else.
+    let list = (g.all ?? []).filter((n) => ofChain || chainNames.includes(n) || !isChainPart(n, chainNames));
     // A group whose own name matches shows all its members.
     if (q && !g.name.toLowerCase().includes(q)) list = list.filter((n) => n.toLowerCase().includes(q));
     if (sort === "delay") list = [...list].sort((a, b) => delayRank(lastDelay(proxies[a])) - delayRank(lastDelay(proxies[b])));
@@ -353,7 +354,7 @@ export default function Proxies({ go }: { go: (p: PageKey) => void }) {
               <DelayView d={lastDelay(proxies[c.name])} testing={!!testing[c.name]} onTest={() => testOne(c.name)} />
             </div>
           </div>
-          {chainGroups(c.name).map((g) => groupCard({ g, members: membersOf(g) }))}
+          {chainGroups(c.name).map((g) => groupCard({ g, members: membersOf(g, true) }))}
         </div>
       ))}
       {groups.length === 0 && <div className="empty">{t("没有代理组")}</div>}

@@ -55,6 +55,8 @@ fn cond(field: GUID, match_type: FWP_MATCH_TYPE, value_type: FWP_DATA_TYPE, valu
 /// A holder of the filters; dropping it removes them.
 pub struct KillSwitch {
     engine: HANDLE,
+    /// Programs with permit filters.
+    allowed: Vec<PathBuf>,
 }
 
 // The handle isn't tied to a thread, and it is only used through `&mut`/drop.
@@ -67,11 +69,32 @@ impl KillSwitch {
         let mut engine: HANDLE = std::ptr::null_mut();
         check("FwpmEngineOpen0", unsafe { FwpmEngineOpen0(std::ptr::null(), RPC_C_AUTHN_DEFAULT, std::ptr::null(), &session, &mut engine) })?;
         // From here on, dropping closes the session and undoes everything.
-        let ks = KillSwitch { engine };
+        let mut ks = KillSwitch { engine, allowed: Vec::new() };
         check("FwpmTransactionBegin0", unsafe { FwpmTransactionBegin0(engine, 0) })?;
         ks.add_filters(allowed)?;
         check("FwpmTransactionCommit0", unsafe { FwpmTransactionCommit0(engine) })?;
+        ks.allowed = allowed.to_vec();
         Ok(ks)
+    }
+
+    /// Lets programs not allowed yet connect too (a core installed while
+    /// the block is up), all or none.
+    pub fn allow(&mut self, programs: &[PathBuf]) -> Result<()> {
+        let new: Vec<PathBuf> = programs.iter().filter(|p| !self.allowed.contains(p)).cloned().collect();
+        if new.is_empty() {
+            return Ok(());
+        }
+        check("FwpmTransactionBegin0", unsafe { FwpmTransactionBegin0(self.engine, 0) })?;
+        let r = [FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6]
+            .into_iter()
+            .try_for_each(|layer| new.iter().try_for_each(|path| self.permit_app(layer, path)));
+        if let Err(e) = r.and_then(|()| check("FwpmTransactionCommit0", unsafe { FwpmTransactionCommit0(self.engine) })) {
+            // The engine must not stay in a transaction, or every later one fails.
+            unsafe { FwpmTransactionAbort0(self.engine) };
+            return Err(e);
+        }
+        self.allowed.extend(new);
+        Ok(())
     }
 
     fn add(&self, layer: GUID, action: FWP_ACTION_TYPE, weight: u8, conds: &mut [FWPM_FILTER_CONDITION0]) -> Result<()> {
@@ -91,6 +114,17 @@ impl KillSwitch {
         self.add(layer, FWP_ACTION_PERMIT, PERMIT_WEIGHT, conds)
     }
 
+    /// A program, wherever it connects.
+    fn permit_app(&self, layer: GUID, path: &PathBuf) -> Result<()> {
+        let p = wide(&path.to_string_lossy());
+        let mut blob: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
+        check("FwpmGetAppIdFromFileName0", unsafe { FwpmGetAppIdFromFileName0(p.as_ptr(), &mut blob) })?;
+        let r = self.permit(layer, &mut [cond(FWPM_CONDITION_ALE_APP_ID, FWP_MATCH_EQUAL, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0_0 { byteBlob: blob })]);
+        let mut raw = blob.cast::<core::ffi::c_void>();
+        unsafe { FwpmFreeMemory0(&mut raw) };
+        r
+    }
+
     fn add_filters(&self, allowed: &[PathBuf]) -> Result<()> {
         let mut name = wide("Prism kill switch");
         let mut sub: FWPM_SUBLAYER0 = unsafe { std::mem::zeroed() };
@@ -108,13 +142,7 @@ impl KillSwitch {
             )?;
             // The cores, wherever they connect.
             for path in allowed {
-                let p = wide(&path.to_string_lossy());
-                let mut blob: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
-                check("FwpmGetAppIdFromFileName0", unsafe { FwpmGetAppIdFromFileName0(p.as_ptr(), &mut blob) })?;
-                let r = self.permit(layer, &mut [cond(FWPM_CONDITION_ALE_APP_ID, FWP_MATCH_EQUAL, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0_0 { byteBlob: blob })]);
-                let mut raw = blob.cast::<core::ffi::c_void>();
-                unsafe { FwpmFreeMemory0(&mut raw) };
-                r?;
+                self.permit_app(layer, path)?;
             }
             // DHCP keeps the physical link usable.
             self.permit(

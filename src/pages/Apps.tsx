@@ -65,7 +65,7 @@ export function useOutbounds() {
   const [outs, setOuts] = useState<Outbounds | null>(null);
   useEffect(() => {
     api.profileOutbounds().then(setOuts).catch(() => setOuts(null));
-  }, [snap?.settings.active_profile, JSON.stringify(snap?.settings.chains)]);
+  }, [snap?.settings.active_profile, snap?.settings.core, JSON.stringify(snap?.settings.chains)]);
   return outs;
 }
 

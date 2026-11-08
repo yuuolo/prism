@@ -208,7 +208,8 @@ pub fn custom_rule_set(r: &prism_core::config::singbox::RemoteRuleSet, s: &crate
     [("geosite-", GEOSITE_URL, &s.geosite_srs_url), ("geoip-", GEOIP_URL, &s.geoip_srs_url)].into_iter().find_map(|(prefix, builtin, custom)| {
         let category = r.tag.strip_prefix(prefix)?;
         let custom = custom.trim();
-        (!custom.is_empty() && r.url == builtin.replace("{}", category)).then(|| custom.replace("{}", category))
+        // Without {} every category would get the same file.
+        (custom.contains("{}") && r.url == builtin.replace("{}", category)).then(|| custom.replace("{}", category))
     })
 }
 
@@ -309,6 +310,8 @@ mod tests {
         assert_eq!(custom_rule_set(&set("geosite-cn", GEOSITE_URL.replace("{}", "cn")), &s).as_deref(), Some("https://my.test/site-cn.srs"));
         assert_eq!(custom_rule_set(&set("geoip-cn", GEOIP_URL.replace("{}", "cn")), &s), None, "no custom geoip set");
         assert_eq!(custom_rule_set(&set("geosite-cn", "https://profile.test/own.srs".into()), &s), None, "the profile's own URL stays");
+        let s = crate::store::Settings { geosite_srs_url: "https://my.test/geosite.srs".into(), ..Default::default() };
+        assert_eq!(custom_rule_set(&set("geosite-cn", GEOSITE_URL.replace("{}", "cn")), &s), None, "no {{}}, no category");
     }
 
     /// One local answer to any request.

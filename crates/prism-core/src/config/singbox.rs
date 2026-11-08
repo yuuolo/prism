@@ -648,7 +648,14 @@ fn clash_api(o: &Overrides) -> Value {
 /// `default_domain_resolver`, not the DNS rules. Returns warnings.
 pub fn add_real_ip_dns(v: &mut Value, domains: &[RealIpDomain]) -> Vec<String> {
     let mut warnings = Vec::new();
-    let Some(dns) = v.get_mut("dns").and_then(|d| d.as_object_mut()) else { return warnings };
+    let Some(dns) = v.get_mut("dns").and_then(|d| d.as_object_mut()) else {
+        // The system resolver answers, with real addresses, but not the
+        // server the user named.
+        for d in domains.iter().filter(|d| !d.dns.trim().is_empty()) {
+            warnings.push(format!("{}: the profile has no DNS section, DNS server {} not used", d.domain, d.dns));
+        }
+        return warnings;
+    };
     let servers: Vec<Value> = dns.get("servers").and_then(|s| s.as_array()).cloned().unwrap_or_default();
     let first = servers.first().and_then(|s| st(s, "tag")).unwrap_or_default();
     let final_tag = dns.get("final").and_then(|f| f.as_str()).map(String::from).unwrap_or(first);
@@ -693,6 +700,11 @@ pub fn add_real_ip_dns(v: &mut Value, domains: &[RealIpDomain]) -> Vec<String> {
 pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
     let mut warnings = Vec::new();
     let Some(root) = v.as_object_mut() else { return warnings };
+    let endpoints: Vec<String> = root
+        .get("endpoints")
+        .and_then(|o| o.as_array())
+        .map(|a| a.iter().filter_map(|o| st(o, "tag")).collect())
+        .unwrap_or_default();
     let outbounds = root.entry("outbounds").or_insert_with(|| json!([]));
     let tags: Vec<(String, String)> = outbounds
         .as_array()
@@ -721,7 +733,7 @@ pub fn add_app_rules(v: &mut Value, routes: &[AppRoute]) -> Vec<String> {
                 });
                 rule["outbound"] = json!(tag);
             }
-            t if tags.iter().any(|(tag, _)| tag == t) => rule["outbound"] = json!(t),
+            t if tags.iter().any(|(tag, _)| tag == t) || endpoints.iter().any(|e| e == t) => rule["outbound"] = json!(t),
             t if r.strict => {
                 warnings.push(format!("app rule {}: {t} is not in this profile, rejecting its connections", r.value));
                 rule["action"] = json!("reject");
@@ -1090,6 +1102,22 @@ mod tests {
         let rules = &sb["route"]["rules"];
         assert_eq!(rules[0], json!({ "process_name": ["x.exe"], "action": "reject" }));
         assert_eq!(rules[1], json!({ "domain": ["a.test"], "action": "reject" }));
+    }
+
+    #[test]
+    fn app_rules_reach_endpoints() {
+        let mut sb = json!({ "outbounds": [], "endpoints": [{ "type": "wireguard", "tag": "wg" }], "route": { "rules": [] } });
+        let w = add_app_rules(&mut sb, &[AppRoute { by_path: false, value: "x.exe".into(), target: "wg".into(), strict: true }]);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(sb["route"]["rules"][0], json!({ "process_name": ["x.exe"], "outbound": "wg" }));
+    }
+
+    #[test]
+    fn real_ip_server_without_dns_section_warns() {
+        let mut sb = json!({ "route": { "rules": [] } });
+        let w = add_real_ip_dns(&mut sb, &[RealIpDomain { domain: "corp.test".into(), subdomains: true, dns: "10.1.1.1".into() }]);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(add_real_ip_dns(&mut sb, &[RealIpDomain { domain: "one.test".into(), subdomains: false, dns: String::new() }]).is_empty());
     }
 
     #[test]
