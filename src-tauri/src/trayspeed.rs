@@ -102,6 +102,45 @@ pub fn render(up: u64, down: u64) -> Vec<u8> {
     rgba
 }
 
+/// Pixels of the menu bar icon: 18 pt, the height macOS gives it, at 2×.
+#[cfg(any(target_os = "macos", test))]
+pub const MENU_SIZE: usize = 36;
+
+/// macOS menu bar icon: the logo's prism (a triangle with the light ray
+/// cut out), black on transparent, for a template image that macOS tints
+/// for light and dark menu bars. Coordinates are the 1024 px app icon's;
+/// 4×4 samples per pixel for smooth edges.
+#[cfg(any(target_os = "macos", test))]
+pub fn menu_bar_icon() -> Vec<u8> {
+    type P = (f64, f64);
+    const PRISM: [P; 3] = [(512.0, 230.0), (269.0, 770.0), (755.0, 770.0)];
+    const RAY: [P; 3] = [(516.0, 500.0), (634.0, 500.0), (677.0, 598.0)];
+    let inside = |p: P, t: &[P; 3]| {
+        let side = |a: P, b: P| (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+        let (d1, d2, d3) = (side(t[0], t[1]), side(t[1], t[2]), side(t[2], t[0]));
+        !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+    };
+    // The prism's height (540) fills the icon less a 2 px margin, centred.
+    let scale = (MENU_SIZE - 4) as f64 / 540.0;
+    let (x0, y0) = (512.0 - MENU_SIZE as f64 / 2.0 / scale, 230.0 - 2.0 / scale);
+    let mut rgba = vec![0u8; MENU_SIZE * MENU_SIZE * 4];
+    for y in 0..MENU_SIZE {
+        for x in 0..MENU_SIZE {
+            let mut hits = 0;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let p = (x0 + (x as f64 + (sx as f64 + 0.5) / 4.0) / scale, y0 + (y as f64 + (sy as f64 + 0.5) / 4.0) / scale);
+                    if inside(p, &PRISM) && !inside(p, &RAY) {
+                        hits += 1;
+                    }
+                }
+            }
+            rgba[(y * MENU_SIZE + x) * 4 + 3] = (hits * 255 / 16) as u8;
+        }
+    }
+    rgba
+}
+
 fn tooltip(up: u64, down: u64) -> String {
     format!("Prism\n↑ {}/s  ↓ {}/s", compact(up), compact(down))
 }
@@ -181,6 +220,23 @@ mod tests {
             let c = compact(n);
             assert!(c.len() <= 4, "{c}");
             assert!(c.chars().all(|ch| glyph(ch).is_some()), "{c}");
+        }
+    }
+
+    #[test]
+    fn menu_bar_icon_is_the_prism() {
+        let px = menu_bar_icon();
+        assert_eq!(px.len(), MENU_SIZE * MENU_SIZE * 4);
+        let a = |x: usize, y: usize| px[(y * MENU_SIZE + x) * 4 + 3];
+        assert!(px.chunks(4).all(|p| p[..3] == [0, 0, 0]), "black only: macOS tints a template");
+        assert_eq!((a(0, 0), a(MENU_SIZE - 1, 0), a(0, MENU_SIZE - 1)), (0, 0, 0), "corners are clear");
+        assert_eq!(a(MENU_SIZE / 2, MENU_SIZE * 3 / 4), 255, "body is solid");
+        assert_eq!(a(MENU_SIZE / 2, 0), 0, "a margin above the apex");
+        // The ray is cut out: clear inside the wedge, solid left of it.
+        assert_eq!(a(23, 18), 0, "ray");
+        assert_eq!(a(14, 18), 255, "left of the ray");
+        if let Some(path) = std::env::var_os("PRISM_DUMP_MENU_ICON") {
+            std::fs::write(path, &px).unwrap();
         }
     }
 

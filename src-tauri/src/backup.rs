@@ -106,12 +106,34 @@ pub fn restore(store: &Store, current: &Settings, bytes: &[u8]) -> Result<Settin
 
 /// `prism-<computer>-<YYYYmmdd-HHMMSS>.zip`
 pub fn file_name() -> String {
-    let host: String = std::env::var("COMPUTERNAME")
-        .unwrap_or_else(|_| "pc".into())
+    let host: String = computer_name()
+        .unwrap_or_else(|| "pc".into())
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
     format!("prism-{host}-{}.zip", chrono::Local::now().format("%Y%m%d-%H%M%S"))
+}
+
+#[cfg(windows)]
+fn computer_name() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok()
+}
+
+/// The host name without its domain (`mac-mini` for `mac-mini.local`).
+#[cfg(unix)]
+fn computer_name() -> Option<String> {
+    let mut buf = [0u8; 256];
+    if unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..len]);
+    name.split('.').next().filter(|n| !n.is_empty()).map(String::from)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn computer_name() -> Option<String> {
+    None
 }
 
 // ------------------------------------------------------------------ WebDAV
@@ -331,6 +353,14 @@ pub fn unprotect(enc: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn backup_named_after_this_computer() {
+        let host = super::computer_name().expect("host name");
+        assert!(!host.contains('.'), "{host}");
+        assert!(super::file_name().starts_with(&format!("prism-{}-", host.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>())));
+    }
+
     use super::*;
 
     /// Windows only: on macOS this would write to the login Keychain.

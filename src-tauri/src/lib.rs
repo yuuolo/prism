@@ -234,9 +234,7 @@ fn on_hotkey(app: &AppHandle, action: &str) {
     if action == "toggle_window" {
         let visible = app.get_webview_window("main").map(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false));
         if visible == Some(true) {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.hide();
-            }
+            hide_main(app);
         } else {
             show_main(app);
         }
@@ -1224,11 +1222,29 @@ fn open_data_dir(st: State<'_, AppState>) -> Res<()> {
 // ------------------------------------------------------------------ tray
 
 fn show_main(app: &AppHandle) {
+    set_dock_icon(app, true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+/// Hides the window; Prism stays in the tray / menu bar.
+fn hide_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    set_dock_icon(app, false);
+}
+
+/// macOS: a Dock icon only while the window shows, like the taskbar
+/// button on Windows; the menu bar icon stays either way.
+fn set_dock_icon(app: &AppHandle, visible: bool) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(if visible { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory });
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, visible);
 }
 
 /// A selectable group in the tray: its members with their last delay
@@ -1476,22 +1492,33 @@ pub fn run() {
             tauri::async_runtime::spawn(trayspeed::run(app.handle().clone()));
 
             let menu = build_tray_menu(app.handle(), &[])?;
-            TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("Prism")
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, ev| on_menu(app, ev.id().as_ref()))
+            let tray = TrayIconBuilder::with_id("main").tooltip("Prism").menu(&menu);
+            // macOS: a monochrome template icon, which the menu bar tints for
+            // its light / dark look, and the menu on a left click like other
+            // menu bar items ("Show Prism" is its first entry). Windows: the
+            // app icon, and a left click opens the window.
+            #[cfg(target_os = "macos")]
+            let tray = tray
+                .icon(tauri::image::Image::new_owned(trayspeed::menu_bar_icon(), trayspeed::MENU_SIZE as u32, trayspeed::MENU_SIZE as u32))
+                .icon_as_template(true)
+                .show_menu_on_left_click(true);
+            #[cfg(not(target_os = "macos"))]
+            let tray = tray.icon(app.default_window_icon().unwrap().clone()).show_menu_on_left_click(false);
+            tray.on_menu_event(|app, ev| on_menu(app, ev.id().as_ref()))
                 .on_tray_icon_event(|tray, ev| {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-                        show_main(tray.app_handle());
+                        if !cfg!(target_os = "macos") {
+                            show_main(tray.app_handle());
+                        }
                     }
                 })
                 .build(app)?;
 
             // The window starts hidden (tauri.conf.json) so a start with
             // Windows can stay in the tray.
-            if !hidden {
+            if hidden {
+                set_dock_icon(app.handle(), false);
+            } else {
                 show_main(app.handle());
             }
             if let Some(link) = &link {
@@ -1563,7 +1590,7 @@ pub fn run() {
             // Closing the window keeps the app in the tray.
             if let WindowEvent::CloseRequested { api, .. } = ev {
                 api.prevent_close();
-                let _ = w.hide();
+                hide_main(w.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1658,6 +1685,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The settings page records Mac key names on macOS.
+    #[test]
+    fn mac_key_names_are_the_same_hotkey() {
+        use tauri_plugin_global_shortcut::Shortcut;
+        assert_eq!("Cmd+Option+P".parse::<Shortcut>().unwrap(), "Super+Alt+P".parse::<Shortcut>().unwrap());
+        assert_eq!("Ctrl+Shift+Cmd+F1".parse::<Shortcut>().unwrap(), "Ctrl+Shift+Super+F1".parse::<Shortcut>().unwrap());
+    }
 
     #[test]
     fn subscription_headers() {

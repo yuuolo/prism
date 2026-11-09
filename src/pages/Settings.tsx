@@ -97,14 +97,20 @@ const HOTKEY_ACTIONS: [string, string][] = [
   ["mode_direct", "切换到直连模式"],
 ];
 
-/** Turns a key press into an accelerator such as "Ctrl+Alt+P". */
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+
+/** Mac key names for an accelerator saved with the generic ones (the
+ * hotkey parser takes both). */
+const macKeys = (acc: string) => (isMac ? acc.replace(/\bSuper\b/g, "Cmd").replace(/\bAlt\b/g, "Option") : acc);
+
+/** Turns a key press into an accelerator such as "Ctrl+Alt+P" ("Cmd+Option+P" on a Mac). */
 function accelerator(e: React.KeyboardEvent): string | null {
   const code = e.code;
   if (/^(Control|Shift|Alt|Meta)(Left|Right)$/.test(code)) return null;
   let key = code;
   if (/^Key[A-Z]$/.test(code)) key = code.slice(3);
   else if (/^Digit\d$/.test(code)) key = code.slice(5);
-  const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super"].filter(Boolean);
+  const mods = [e.ctrlKey && "Ctrl", e.altKey && (isMac ? "Option" : "Alt"), e.shiftKey && "Shift", e.metaKey && (isMac ? "Cmd" : "Super")].filter(Boolean);
   // Without a modifier only function keys make sense as global hotkeys.
   if (!mods.length && !/^F\d{1,2}$/.test(key)) return null;
   return [...mods, key].join("+");
@@ -116,7 +122,7 @@ function HotkeyInput({ value, onChange }: { value: string; onChange: (v: string)
     <input
       className="input mono hotkey"
       readOnly
-      value={recording ? t("请按下组合键…") : value || t("未设置")}
+      value={recording ? t("请按下组合键…") : macKeys(value) || t("未设置")}
       onFocus={() => setRecording(true)}
       onBlur={() => setRecording(false)}
       onKeyDown={(e) => {

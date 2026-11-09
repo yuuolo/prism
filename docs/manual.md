@@ -1,4 +1,4 @@
-# Prism 使用手册（Windows）
+# Prism 使用手册（Windows / macOS）
 
 适用版本：v0.2.7（v0.2.7 新增真实 IP 页面（内网域名不走假 IP、指定 DNS、直连）；v0.2.6 新增 AnyTLS 填充和失效会话检测；v0.2.5 新增链式代理可选代理组；v0.2.4 新增自定义 GeoSite / GeoIP 地址；v0.2.3 新增链式代理、出口异常时拒绝、断网保护；v0.2.0 新增 Shadowsocks 2022、xhttp / HTTP/2 传输、mrs 规则集、DNS fallback / DoQ / DoH3、TUN 接管 IPv6、规则测试、节点质量、带宽测速、连接地图、应用流量、局域网共享、托盘网速、命令面板；v0.1.9 新增 macOS 版；v0.1.8 新增域名分流；v0.1.7 新增合并订阅；v0.1.6 新增 VMess、WebSocket / HTTPUpgrade / gRPC 传输、TUIC、WireGuard、Vision 的 UDP、链式代理、组合规则、按订阅覆写、连接导出）
 
@@ -183,7 +183,7 @@
 
 ### 快捷键
 - **命令面板**：在 Prism 窗口中按 `Ctrl+K`（macOS 为 `⌘K`），或点侧栏的「搜索 / 命令」。可搜索并跳转页面、切换规则 / 全局 / 直连模式、开关 TUN 和系统代理、启动 / 停止内核；内核运行时输入节点名即可直接切换到该节点（只列出可手动选择的组）。用 ↑↓ 选择、Enter 执行、Esc 关闭。
-- 在设置页「外观与快捷键」中点击某个动作的输入框，按下组合键（如 `Ctrl+Alt+P`）即可设置，按 Backspace 清除；点 **保存** 后生效。
+- 在设置页「外观与快捷键」中点击某个动作的输入框，按下组合键（如 `Ctrl+Alt+P`，macOS 上显示为 `Cmd+Option+P` 这样的 Mac 键名）即可设置，按 Backspace 清除；点 **保存** 后生效。
 - 快捷键是全局的，Prism 最小化到托盘时也有效。
 - 组合键需包含 Ctrl / Alt / Shift / Win 中的至少一个（F1–F12 可单独使用）。格式不对或已被其他程序占用时，保存后会提示哪一个没有注册成功。
 
@@ -214,7 +214,7 @@ append-proxies:
 - **导出到文件 / 从文件恢复**：备份保存到「下载」文件夹，或从一个备份文件恢复，不需要 WebDAV。
 - **备份不包含**：WebDAV 密码、本机的 Mihomo / sing-box 路径。
 - **恢复时保留**：本机的内核路径、系统代理和 TUN 开关、WebDAV 登录信息；其余设置和全部订阅（含覆写）换成备份中的，内核按备份重新启动。
-- WebDAV 密码用 Windows 账户加密（DPAPI）保存在本机，换电脑或换 Windows 用户后需要重新填写。
+- WebDAV 密码只保存在本机（Windows 用账户加密 DPAPI，macOS 存在「钥匙串」），换电脑或换用户后需要重新填写。
 
 ### 开机自启与一键导入
 - **开机自启**：在当前用户的「启动」项中登记 Prism（任务管理器的「启动应用」里能看到，名为 Prism）。开机后 Prism 自动启动内核并恢复系统代理；开着 **静默启动** 时不弹出窗口，只显示托盘图标。卸载 Prism 时会自动移除这一项。
@@ -273,7 +273,7 @@ append-proxies:
 - 需要**管理员权限**，两种方式任选：
   - **TUN 服务（推荐）**：在设置页「TUN 服务」点 **安装**（或开启 TUN 时按提示安装），授权一次即可。之后开启 TUN 时，内核由系统服务 `Prism TUN Service` 运行，Prism 本身保持普通权限，开机自启也能直接用 TUN。
   - **以管理员身份运行 Prism**：开启 TUN 时选择「以管理员身份重新启动」。以管理员身份运行时 TUN 不经过服务。
-- Prism 内核首次使用 TUN 时会自动下载官方签名的 `wintun.dll`（校验 SHA-256）。
+- Windows 上 Prism 内核首次使用 TUN 时会自动下载官方签名的 `wintun.dll`（校验 SHA-256）；macOS 用系统自带的 `utun`，不需要它。
 - Prism 内核的 TUN：
   - 通过 TLS SNI / HTTP Host 识别域名，按域名规则分流；
   - 接管发往 53 端口的 DNS 请求：启用了 DNS 模块（见 6.6）时由它应答（包括 fake-ip）；否则发给某个 DNS 服务器的查询原样转发给该服务器（绕过虚拟网卡），发给虚拟网卡自身 DNS 地址的查询转发到 `dns.default-nameserver`（默认 `223.5.5.5`、`119.29.29.29`）；
@@ -283,10 +283,10 @@ append-proxies:
 - sing-box 内核的 TUN：订阅启用了 `dns` 时沿用它的 `nameserver`（包括 `#代理` 写法）、fake-ip 地址段和 `fake-ip-filter`；没有启用时，国内域名用 `223.5.5.5`、其他域名经代理组用 `1.1.1.1` 查询（即使订阅最后一条规则是直连）。
 - 节点地址是本机（`127.0.0.1`，例如串联本机的另一个代理程序）时，Prism 内核的 TUN 也能连上（v0.1.3 及更早版本会失败）。
 - 不要同时开启其他客户端（如 FlClash、Clash Verge）的 TUN，两个虚拟网卡会互相抢路由。
-- 按设计，内核退出时虚拟网卡和路由会随进程一起删除，异常退出也不会残留。
+- 按设计，内核退出时虚拟网卡和路由会随进程一起删除，异常退出也不会残留（macOS 上内核给物理网卡加的一条专属默认路由会保留，它只影响内核自己的连接）。
 - 开着 TUN 时如果以普通权限启动 Prism 且没有安装 TUN 服务（例如开机自启），内核会先不开 TUN 启动，TUN 开关随之关闭，日志中会说明原因。
 
-**TUN 服务说明**
+**TUN 服务说明**（Windows；macOS 见下一节）
 - 服务以 SYSTEM 身份运行，只做一件事：替 Prism 运行内核。为了安全：
   - 只运行安装时复制到 `C:\Program Files\Prism Service\` 的内核（只有管理员能修改这个目录），不会运行其他程序；
   - 只接受安装它的 Windows 用户、且是安装时登记的那个 `prism.exe` 发来的请求，网页或其他用户无法使用它；
@@ -300,13 +300,15 @@ append-proxies:
 ### macOS 上的不同之处
 
 - **系统代理**：设置到所有已启用的网络服务（Wi-Fi、以太网等）的 HTTP、HTTPS 和 SOCKS 代理上，退出时关闭。绕过列表沿用设置页的「系统代理绕过」，`<local>` 换成 `*.local`。
-- **TUN 必须使用 TUN 服务**（macOS 上不能以管理员身份重启 Prism）。开启 TUN 时按提示安装，系统会要求输入一次 Mac 的登录密码；服务是以 root 运行的系统后台服务（LaunchDaemon `dev.prism.service`），程序放在 `/Library/Application Support/Prism Service/`，只接受当前用户的 Prism 的请求。
+- **TUN 必须使用 TUN 服务**（macOS 上不能以管理员身份重启 Prism）。开启 TUN 时按提示安装，系统会要求输入一次 Mac 的登录密码；服务是以 root 运行的系统后台服务（LaunchDaemon `dev.prism.service`），程序放在 `/Library/Application Support/Prism Service/`，只接受当前用户的 Prism 的请求。服务自身的记录在 `/Library/Application Support/Prism Service/data/service.log`。
 - TUN 使用系统的 `utunN` 虚拟网卡，地址 `172.19.0.1`，路由与 Windows 相同（`0.0.0.0/1` + `128.0.0.0/1`），内核自己的连接绑定到原来的网卡（如 `en0`）绕过隧道。
 - **DNS**：Mac 的 DNS 服务器通常是路由器，不经过隧道。所以开启 TUN 期间，Prism 会把所有网络服务的 DNS 临时改成 `223.5.5.5`、`119.29.29.29`（经隧道由内核应答），关闭 TUN、停止内核或退出 Prism 时改回原来的设置；原设置备份在数据目录的 `dns-backup.json`，Prism 意外退出时下次启动会自动恢复。
 - **应用分流**：程序名就是可执行文件名，没有 `.exe`，例如 `Google Chrome`、`Telegram`；完整路径形如 `/Applications/Telegram.app/Contents/MacOS/Telegram`。
 - **开机自启**：写入 `~/Library/LaunchAgents/dev.prism.client.plist`。
 - **一键导入**：`prism://` 和 `clash://` 链接都由 Prism 打开（装有其他 Clash 客户端时，`clash://` 可能由 macOS 选定的程序打开），没有「接管 clash:// 链接」开关。
 - WebDAV 密码保存在「钥匙串」里。
+- **菜单栏图标**：单色棱镜图标，随菜单栏的浅色 / 深色自动变色；左键点击弹出菜单，第一项「显示主界面」打开窗口。
+- **Dock 图标**：关闭窗口后 Prism 留在菜单栏，Dock 图标同时隐藏；从菜单栏菜单、快捷键或再次打开 Prism 显示窗口时，Dock 图标重新出现。
 - **卸载**：先在设置页 **卸载** TUN 服务（如已安装），再把 Prism 从「应用程序」拖到废纸篓；数据在 `~/Library/Application Support/dev.prism.client/`。
 - **软件更新**：与 Windows 相同，在设置页检查并安装，下载后校验签名，安装完成后 Prism 自动重新打开。
 
@@ -952,7 +954,7 @@ prism-core -f config.yaml -d 目录
 对应规则已被跳过，其余规则正常。网络恢复后在设置页点 **更新 GeoSite / GeoIP** 重新下载，再重启内核。
 
 **TUN 打不开**
-确认已安装 TUN 服务（设置页显示「已安装，运行中」）或以管理员身份运行，并关闭其他客户端的 TUN 模式。设置页显示「已安装，未运行」时点 **重新安装 / 更新内核**。Prism 内核需要 `wintun.dll`，首次使用会自动下载；下载失败时可手动从 [wintun.net](https://www.wintun.net/) 下载，把 `wintun/bin/amd64/wintun.dll` 放到数据目录的 `runtime\` 下。
+确认已安装 TUN 服务（设置页显示「已安装，运行中」）或以管理员身份运行，并关闭其他客户端的 TUN 模式。设置页显示「已安装，未运行」时点 **重新安装 / 更新内核**。Windows 上 Prism 内核需要 `wintun.dll`（macOS 不需要），首次使用会自动下载；下载失败时可手动从 [wintun.net](https://www.wintun.net/) 下载，把 `wintun/bin/amd64/wintun.dll` 放到数据目录的 `runtime\` 下。
 
 **应用分流不生效**
 确认处于**规则模式**；在「连接」页看该程序的连接是否出现、「程序」列是否识别正确。没有出现说明该程序没走系统代理，请开启 TUN 模式。按程序名匹配时，名字需与「程序」列一致（如 `Telegram.exe`）。
