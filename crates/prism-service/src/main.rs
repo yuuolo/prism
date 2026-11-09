@@ -49,14 +49,17 @@ mod mac {
         Command::new("/bin/launchctl").args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
     }
 
-    /// Copies an executable, dropping the quarantine flag a download left
-    /// (launchd won't start a quarantined unsigned binary).
+    /// Copies an executable, owned by root (the copy keeps the source's
+    /// owner, the user, who could then replace what the daemon runs as
+    /// root), dropping the quarantine flag a download left (launchd won't
+    /// start a quarantined unsigned binary).
     fn copy_exe(from: &Path, to: &Path) -> Result<()> {
-        if prism_service::client::same_path(from, to) {
-            return Ok(());
+        if !prism_service::client::same_path(from, to) {
+            let _ = std::fs::remove_file(to);
+            std::fs::copy(from, to).with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
         }
-        let _ = std::fs::remove_file(to);
-        std::fs::copy(from, to).with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+        // Also for a file already in place: fixes installs made before this.
+        std::os::unix::fs::chown(to, Some(0), Some(0)).with_context(|| format!("chown {}", to.display()))?;
         std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755))?;
         let _ = Command::new("/usr/bin/xattr").arg("-d").arg("com.apple.quarantine").arg(to).stderr(std::process::Stdio::null()).status();
         Ok(())

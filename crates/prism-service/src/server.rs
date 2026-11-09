@@ -332,7 +332,11 @@ pub async fn serve(layout: Layout, mut stop: tokio::sync::watch::Receiver<bool>)
 
 #[cfg(unix)]
 async fn handle(conn: tokio::net::UnixStream, st: &State) -> Result<()> {
-    let cred = conn.peer_cred()?;
+    // Prism's "is the service up" check connects and closes at once.
+    let cred = match conn.peer_cred() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => return Ok(()),
+        r => r?,
+    };
     let pid = cred.pid().ok_or_else(|| anyhow!("no client pid"))?;
     let image = process_image(pid as u32).ok_or_else(|| anyhow!("client {pid} image unknown"))?;
     let allowed = cred.uid().to_string() == st.owner.user_sid && same_path(&image, &st.owner.gui_path);
@@ -348,6 +352,10 @@ async fn answer<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(conn: S, image:
     let limit = if allowed { MAX_MESSAGE as u64 } else { 64 << 10 };
     let mut buf = Vec::new();
     BufReader::new(rd).take(limit).read_until(b'\n', &mut buf).await?;
+    if buf.is_empty() {
+        // Closed without asking anything: a liveness check, nothing to answer.
+        return Ok(());
+    }
     let reply = if !allowed {
         log(&st.layout, &format!("rejected client {}", image.display()));
         Response::err(format!("{} 不是安装服务时登记的 Prism", image.display()))
