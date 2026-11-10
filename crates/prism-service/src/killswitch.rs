@@ -34,6 +34,9 @@ const LAN_V6: [([u8; 2], u8); 3] = [([0xfe, 0x80], 10), ([0xfc, 0x00], 7), ([0xf
 const SUBLAYER: GUID = GUID::from_u128(0x7f3a_91c2_5d44_4e1b_9a06_2b7c_e1d0_4a55);
 const PERMIT_WEIGHT: u8 = 10;
 const BLOCK_WEIGHT: u8 = 1;
+// UINT8 weights are range indices (0..=15), not literal priorities.
+const TAIL_SCOPE_WEIGHT: u8 = 12;
+const TAIL_PERMIT_WEIGHT: u8 = 14;
 const IPPROTO_UDP: u8 = 17;
 const RPC_C_AUTHN_DEFAULT: u32 = 0xFFFF_FFFF;
 
@@ -134,9 +137,9 @@ impl KillSwitch {
         // offline these ranges cannot fall through to a physical interface.
         if !self.tail_scope {
         let mut range4 = FWP_V4_ADDR_AND_MASK {addr: u32::from_be_bytes([100,64,0,0]),mask:u32::MAX<<22};
-        ids.push(self.add_id(v4,FWP_ACTION_BLOCK,20,&mut [cond(FWPM_CONDITION_IP_REMOTE_ADDRESS,FWP_MATCH_EQUAL,FWP_V4_ADDR_MASK,FWP_CONDITION_VALUE0_0{v4AddrMask:&mut range4})])?);
+        ids.push(self.add_id(v4,FWP_ACTION_BLOCK,TAIL_SCOPE_WEIGHT,&mut [cond(FWPM_CONDITION_IP_REMOTE_ADDRESS,FWP_MATCH_EQUAL,FWP_V4_ADDR_MASK,FWP_CONDITION_VALUE0_0{v4AddrMask:&mut range4})])?);
         let mut range6 = FWP_V6_ADDR_AND_MASK {addr:[0xfd,0x7a,0x11,0x5c,0xa1,0xe0,0,0,0,0,0,0,0,0,0,0],prefixLength:48};
-        ids.push(self.add_id(v6,FWP_ACTION_BLOCK,20,&mut [cond(FWPM_CONDITION_IP_REMOTE_ADDRESS,FWP_MATCH_EQUAL,FWP_V6_ADDR_MASK,FWP_CONDITION_VALUE0_0{v6AddrMask:&mut range6})])?);
+        ids.push(self.add_id(v6,FWP_ACTION_BLOCK,TAIL_SCOPE_WEIGHT,&mut [cond(FWPM_CONDITION_IP_REMOTE_ADDRESS,FWP_MATCH_EQUAL,FWP_V6_ADDR_MASK,FWP_CONDITION_VALUE0_0{v6AddrMask:&mut range6})])?);
         }
         let Some(permit) = permit else { return Ok(()); };
         let path = wide(&permit.identity.daemon.to_string_lossy());
@@ -153,7 +156,7 @@ impl KillSwitch {
                 for protocol in [6u8,17u8] {
                     let mut conditions=vec![cond(FWPM_CONDITION_ALE_USER_ID,FWP_MATCH_EQUAL,FWP_SECURITY_DESCRIPTOR_TYPE,FWP_CONDITION_VALUE0_0{sd:&mut sd_blob}),cond(FWPM_CONDITION_ALE_APP_ID,FWP_MATCH_EQUAL,FWP_BYTE_BLOB_TYPE,FWP_CONDITION_VALUE0_0{byteBlob:blob}),cond(FWPM_CONDITION_IP_PROTOCOL,FWP_MATCH_EQUAL,FWP_UINT8,FWP_CONDITION_VALUE0_0{uint8:protocol})];
                     if protocol==6 {conditions.push(cond(FWPM_CONDITION_IP_REMOTE_PORT,FWP_MATCH_EQUAL,FWP_UINT16,FWP_CONDITION_VALUE0_0{uint16:443}));}
-                    ids.push(self.add_id(layer,FWP_ACTION_PERMIT,30,&mut conditions)?);
+                    ids.push(self.add_id(layer,FWP_ACTION_PERMIT,TAIL_PERMIT_WEIGHT,&mut conditions)?);
                 }
             }
             Ok(())
@@ -166,12 +169,12 @@ impl KillSwitch {
             match ip {
                 std::net::IpAddr::V4(ip)=>{
                     conditions.push(cond(FWPM_CONDITION_IP_REMOTE_ADDRESS,FWP_MATCH_EQUAL,FWP_UINT32,FWP_CONDITION_VALUE0_0{uint32:u32::from_be_bytes(ip.octets())}));
-                    ids.push(self.add_id(v4,FWP_ACTION_PERMIT,30,&mut conditions)?);
+                    ids.push(self.add_id(v4,FWP_ACTION_PERMIT,TAIL_PERMIT_WEIGHT,&mut conditions)?);
                 }
                 std::net::IpAddr::V6(ip)=>{
                     let mut addr=FWP_BYTE_ARRAY16{byteArray16:ip.octets()};
                     conditions.push(cond(FWPM_CONDITION_IP_REMOTE_ADDRESS,FWP_MATCH_EQUAL,FWP_BYTE_ARRAY16_TYPE,FWP_CONDITION_VALUE0_0{byteArray16:&mut addr}));
-                    ids.push(self.add_id(v6,FWP_ACTION_PERMIT,30,&mut conditions)?);
+                    ids.push(self.add_id(v6,FWP_ACTION_PERMIT,TAIL_PERMIT_WEIGHT,&mut conditions)?);
                 }
             }
         }
