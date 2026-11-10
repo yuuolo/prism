@@ -33,6 +33,9 @@ pub use mac::start;
 /// The adapter's address. DNS on port 53 is always intercepted.
 #[cfg(any(windows, target_os = "macos"))]
 const ADDR: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 1);
+/// Peer address required by macOS point-to-point utun configuration.
+#[cfg(target_os = "macos")]
+const DNS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 2);
 /// The adapter's IPv6 address (unique local, /126).
 #[cfg(any(windows, target_os = "macos"))]
 const ADDR6: &str = "fdfe:dcba:9876::1";
