@@ -746,7 +746,8 @@ pub fn apply_overrides(v: &mut Value, o: &Overrides) {
         }
         put(&mut t, "auto-route", true);
         put(&mut t, "auto-detect-interface", true);
-        put(&mut t, "dns-hijack", seq(&["any:53"]));
+        put(&mut t, "dns-hijack", seq(&["any:53", "tcp://any:53"]));
+        put(&mut t, "strict-route", true);
         put(&mut t, "mtu", 9000u64);
         // IPv6 is routed into the TUN too, so it can't bypass the rules.
         put(&mut t, "inet6-address", seq(&["fdfe:dcba:9876::1/126"]));
@@ -875,6 +876,8 @@ rules: [MATCH,DIRECT]
         apply_overrides(&mut v, &o);
         let p = parse(&v).unwrap();
         assert!(p.general.tun.enable && p.general.tun.auto_route && p.general.tun.ipv6);
+        assert_eq!(v["tun"]["strict-route"].as_bool(), Some(true));
+        assert_eq!(v["tun"]["dns-hijack"], seq(&["any:53", "tcp://any:53"]));
         let plain: Value = serde_yaml::from_str("tun: {enable: true}
 proxies: []
 ").unwrap();

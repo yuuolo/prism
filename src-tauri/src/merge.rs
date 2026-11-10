@@ -2,8 +2,8 @@
 //! so its rules and groups get more nodes to choose from.
 //!
 //! The merged nodes go into the active profile's `proxies` (renamed
-//! `名字 [订阅名]` on a clash) and into every group that lists nodes of the
-//! active profile (respecting the group's `filter` / `exclude-filter`).
+//! `名字 [订阅名]` on a clash) and only into node-selection and automatic
+//! selection entry groups (respecting `filter` / `exclude-filter`).
 //! Groups made only of other groups / DIRECT (国内直连 and such) are left
 //! alone. Runs before 覆写, so overrides see the merged nodes.
 
@@ -31,7 +31,7 @@ fn names(seq: Option<&Value>) -> Vec<String> {
     }
 }
 
-const NODE_GROUPS: [&str; 4] = ["select", "url-test", "fallback", "load-balance"];
+
 
 /// The profile with the parts' nodes merged in (Clash YAML), plus warnings.
 /// Without parts the profile is returned unchanged.
@@ -115,22 +115,33 @@ pub fn merge(raw: &str, parts: &[Part]) -> Result<(String, Vec<String>)> {
 
     let mut hit = 0;
     if let Some(Value::Sequence(groups)) = root.get_mut("proxy-groups") {
-        let node_group = |m: &Mapping| {
-            NODE_GROUPS.contains(&s(m, "type").unwrap_or_default().as_str())
-                && (names(m.get("proxies")).iter().any(|n| own_nodes.contains(n)) || m.contains_key("use"))
-        };
-        let wants: Vec<bool> = groups.iter().map(|g| g.as_mapping().is_some_and(node_group)).collect();
-        // A profile whose groups only reference other groups: give the nodes
-        // to its select / url-test groups instead.
-        let fallback = !wants.contains(&true);
-        for (g, want) in groups.iter_mut().zip(wants) {
+        for g in groups.iter_mut() {
             let Some(m) = g.as_mapping_mut() else { continue };
+            let name = s(m, "name").unwrap_or_default();
+            let canonical = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
             let ty = s(m, "type").unwrap_or_default();
-            if !(want || (fallback && (ty == "select" || ty == "url-test"))) {
+            let target = (ty == "select" && ["节点选择", "手动选择", "proxy", "proxyselect", "nodeselect", "节点", "选择"].contains(&canonical.as_str()))
+                || (ty == "url-test" && ["自动选择", "自动测速", "自动优选", "auto", "autoselect", "urltest"].contains(&canonical.as_str()));
+            if !target {
+                // Freeze implicit all-node membership, otherwise added nodes would
+                // still leak into service/region groups through include-all.
+                let all = m.get("include-all").and_then(Value::as_bool) == Some(true);
+                let all_nodes = m.get("include-all-proxies").and_then(Value::as_bool) == Some(true);
+                if all || all_nodes {
+                    m.remove("include-all");
+                    m.remove("include-all-proxies");
+                    if all { m.insert(Value::from("include-all-providers"), Value::Bool(true)); }
+                    let mut members = names(m.get("proxies"));
+                    let mut own: Vec<_> = own_nodes.iter().cloned().collect();
+                    own.sort();
+                    for name in own { if !members.contains(&name) { members.push(name); } }
+                    m.insert(Value::from("proxies"), Value::Sequence(members.into_iter().map(Value::from).collect()));
+                }
                 continue;
             }
             // These pick up every node by themselves in mihomo.
             if m.get("include-all").or(m.get("include-all-proxies")).and_then(|v| v.as_bool()) == Some(true) {
+                hit += 1;
                 continue;
             }
             let keep = s(m, "filter").and_then(|f| Regex::new(&f).ok());
@@ -192,6 +203,15 @@ rules:
     }
 
     #[test]
+    fn never_falls_back_to_service_groups() {
+        let raw = "proxy-groups: [{name: Netflix, type: select, proxies: [DIRECT]}]\nrules: ['MATCH,Netflix']";
+        let (out, warnings) = merge(raw, &[part("B", "ss://YWVzLTI1Ni1nY206cHc@3.3.3.3:8388#new")]).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(group(&doc, "Netflix"), ["DIRECT"]);
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
     fn nodes_join_node_groups() {
         let b = "proxies:
   - {name: 东京, type: trojan, server: 2.2.2.1, port: 443, password: p}
@@ -209,7 +229,7 @@ proxy-groups:
         let doc: Value = serde_yaml::from_str(&out).unwrap();
         assert_eq!(group(&doc, "节点选择"), ["自动选择", "东京", "香港", "DIRECT", "东京 [机场B]", "HK 02", "美国", "新加坡"]);
         assert_eq!(group(&doc, "自动选择"), ["东京", "香港", "东京 [机场B]", "HK 02", "美国", "新加坡"]);
-        assert_eq!(group(&doc, "香港组"), ["香港", "HK 02"], "the group's filter applies");
+        assert_eq!(group(&doc, "香港组"), ["香港"], "regional groups remain unchanged");
         assert_eq!(group(&doc, "国内"), ["DIRECT", "节点选择"], "groups of groups are left alone");
         let p = config::parse_any(&out).unwrap();
         assert_eq!(p.proxies.len(), 6);
@@ -227,7 +247,7 @@ proxy-groups:
     }
 
     #[test]
-    fn groups_of_groups_only_fall_back_to_select_groups() {
+    fn only_recognized_entry_groups_receive_nodes() {
         let main = "proxy-providers:
   p: {type: http, url: 'https://a.example/sub', interval: 3600}
 proxy-groups:
@@ -238,7 +258,7 @@ rules: ['MATCH,选择']
         let (out, w) = merge(main, &[part("B", "ss://YWVzLTI1Ni1nY206cHc@3.3.3.3:8388#x")]).unwrap();
         let doc: Value = serde_yaml::from_str(&out).unwrap();
         assert_eq!(group(&doc, "选择"), ["DIRECT", "x"]);
-        assert!(doc["proxy-groups"][1].get("proxies").is_none(), "include-all groups take nodes by themselves");
+        assert!(group(&doc, "全部").is_empty(), "non-entry include-all groups must not pick up merged nodes");
         assert!(w.is_empty(), "{w:?}");
     }
 }

@@ -1,5 +1,23 @@
 // English for the interface (keys: the Chinese text used in the components).
 export const EN: Record<string, string> = {
+  "事件类型": "Event type",
+  "全部事件": "All events",
+  "异常拒绝": "Rejected connections",
+  "运行记录": "Runtime history",
+  "节点独立保存到本地，并加入当前订阅的节点选择和自动选择组。": "The node is saved locally and merged into the active profile’s node selection and automatic selection groups.",
+  "粘贴单个节点分享链接，或只含一个节点的 Clash / sing-box 配置": "Paste one node share link or a Clash / sing-box config containing one node",
+  "节点已添加": "Node added",
+  "名称（可选）": "Name (optional)",
+  "添加单个节点": "Add single node",
+  "内核日志": "Core logs",
+  "安全事件": "Security events",
+  "持续运行": "Uptime",
+  "降序": "Descending",
+  "升序": "Ascending",
+  "全部出口": "All outbounds",
+  "出口筛选": "Filter outbound",
+  "全部网络": "All networks",
+  "网络筛选": "Filter network",
   // Navigation
   概览: "Overview",
   代理: "Proxies",

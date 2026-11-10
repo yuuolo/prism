@@ -136,6 +136,7 @@ export function installDevMock() {
       settings,
       profiles,
       running: "prism",
+      uptime_secs: 3661,
       system_proxy: true,
       elevated: false,
       core_paths: { prism: { path: "", exists: true }, mihomo: { path: "", exists: true }, singbox: { path: "", exists: false } },
@@ -163,6 +164,18 @@ export function installDevMock() {
       const l = pendingLinks;
       pendingLinks = [];
       return l;
+    },
+    security_events: () => [
+      `${Math.floor(Date.now() / 1000) - 120} [prism] 启动 Prism 内核`,
+      `${Math.floor(Date.now() / 1000) - 60} [prism] 断网保护已触发：内核已退出，网络被拦截`,
+      `${Math.floor(Date.now() / 1000)} [TCP] example.com match Domain using REJECT failed: rejected by rule`,
+    ],
+    add_single_node: (a) => {
+      if (!String(a.content).trim()) throw "请输入一个有效节点";
+      const p = { id: `node-${Date.now()}`, name: String(a.name).trim() || "本地节点", url: null, format: "clash", nodes: 1, updated_at: Date.now() / 1000, usage: null, interval: 0 };
+      profiles.push(p);
+      settings.merge_profiles.push(p.id);
+      return p;
     },
     import_profile: (a) => {
       const args = a.args as { url: string; name?: string };

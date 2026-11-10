@@ -108,6 +108,8 @@ impl State {
         let mut core = self.core.lock().await;
         if let Some(r) = core.as_mut() {
             if !matches!(r.child.try_wait(), Ok(None)) {
+                push_log(&self.logs, format!("[service] {} 内核异常退出{}", r.kind,
+                    if self.kill_switch_on() { "，断网保护已触发" } else { "" }));
                 *core = None;
             }
         }

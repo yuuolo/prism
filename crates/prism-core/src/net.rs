@@ -99,8 +99,8 @@ pub fn set_resolver(r: Option<Arc<crate::dns::Resolver>>) {
     *RESOLVER.write().unwrap() = r;
 }
 
-/// Resolves `host`: DNS module when enabled, else the system resolver (in
-/// TUN mode its queries are served by the DNS hijack over pinned sockets).
+/// Resolves `host` with the configured DNS module. TUN never falls back
+/// to system resolution if its resolver becomes unavailable.
 pub async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = h.parse::<IpAddr>() {
@@ -110,6 +110,9 @@ pub async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     if let Some(r) = resolver {
         let ips = r.lookup(h).await?;
         return Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect());
+    }
+    if bind_interface() != 0 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "DNS REJECT: TUN resolver unavailable; system DNS fallback refused"));
     }
     let addrs: Vec<SocketAddr> = tokio::time::timeout(Duration::from_secs(10), tokio::net::lookup_host((h, port)))
         .await

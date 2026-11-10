@@ -202,7 +202,10 @@ impl Tunnel {
 
     pub async fn dial_udp(&self, meta: &mut Metadata) -> io::Result<DialedUdp> {
         let (target, rule, payload) = self.target(meta).await;
-        let (out, chain) = self.reg.resolve(&target, &meta.dst)?;
+        let (out, chain) = self.reg.resolve(&target, &meta.dst).map_err(|e| {
+            tracing::warn!("异常拒绝: {} --> {} match {rule} using {target}: {e}", meta.source(), meta.dst);
+            e
+        })?;
         let shown = if chain.len() > 1 { format!("{target}[{}]", chain.last().unwrap()) } else { target.clone() };
         let res = tokio::time::timeout(Duration::from_secs(10), out.connect_udp(&meta.dst)).await;
         let pipe = match res {
@@ -240,7 +243,10 @@ impl Tunnel {
 
     pub async fn dial(&self, meta: &mut Metadata) -> io::Result<Dialed> {
         let (target, rule, payload) = self.target(meta).await;
-        let (out, chain) = self.reg.resolve(&target, &meta.dst)?;
+        let (out, chain) = self.reg.resolve(&target, &meta.dst).map_err(|e| {
+            tracing::warn!("异常拒绝: {} --> {} match {rule} using {target}: {e}", meta.source(), meta.dst);
+            e
+        })?;
         let shown = if chain.len() > 1 { format!("{target}[{}]", chain.last().unwrap()) } else { target.clone() };
         let res = tokio::time::timeout(Duration::from_secs(10), out.connect(&meta.dst)).await;
         let stream = match res {

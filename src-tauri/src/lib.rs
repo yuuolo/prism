@@ -8,12 +8,14 @@ mod quality;
 mod ruletest;
 mod elevate;
 mod export;
+mod events;
 mod geomap;
 mod lan;
 mod links;
 #[cfg(target_os = "macos")]
 mod macdns;
 mod merge;
+mod node;
 mod speedtest;
 mod store;
 mod sysproxy;
@@ -99,6 +101,7 @@ struct Snapshot {
     platform: &'static str,
     /// The core is gone and the kill switch is holding the network.
     kill_switch_blocking: bool,
+    uptime_secs: u64,
 }
 
 /// Asks the service whatever the setting says now: a block outlives the setting.
@@ -115,6 +118,14 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
     }
     let (on, server) = sysproxy::get();
     let path = |k| core::core_binary(&st.store, &s, k);
+    let running = st.core.running().await;
+    let blocking = kill_switch_blocking().await;
+    static LAST_BLOCKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if blocking && !LAST_BLOCKING.swap(blocking, std::sync::atomic::Ordering::Relaxed) {
+        st.core.push_log(&app, "[prism] 断网保护已触发：内核已退出，网络被拦截".into());
+    } else if !blocking {
+        LAST_BLOCKING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     let paths = json!({
         "prism": { "path": path(CoreKind::Prism), "exists": path(CoreKind::Prism).exists() },
         "mihomo": { "path": path(CoreKind::Mihomo), "exists": path(CoreKind::Mihomo).exists() },
@@ -124,7 +135,7 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
         system_proxy: on && server == format!("127.0.0.1:{}", s.mixed_port),
         settings: s,
         profiles: st.store.profiles(),
-        running: st.core.running().await,
+        running,
         elevated: elevate::is_elevated(),
         core_paths: paths,
         data_dir: st.store.dir.display().to_string(),
@@ -134,7 +145,8 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
         clash_handler: links::handler("clash"),
         tun_service: tunsvc::state(),
         platform: std::env::consts::OS,
-        kill_switch_blocking: kill_switch_blocking().await,
+        kill_switch_blocking: blocking,
+        uptime_secs: if running.is_some() { st.core.uptime_secs() } else { 0 },
     })
 }
 
@@ -601,6 +613,26 @@ async fn import_profile(app: AppHandle, st: State<'_, AppState>, args: ImportArg
         activate_profile(app, st, meta.id.clone()).await?;
     }
     Ok(meta)
+}
+
+/// Import one validated node into a separate local profile, safe from subscription updates.
+#[tauri::command]
+async fn add_single_node(app: AppHandle, st: State<'_, AppState>, content: String, name: String) -> Res<ProfileMeta> {
+    let (node_name, raw) = node::single_node(&content, &name).map_err(e)?;
+    let meta = st.store.put(None, &node_name, None, &raw, None, None).map_err(e)?;
+    if st.settings().active_profile.is_none() {
+        activate_profile(app, st, meta.id.clone()).await?;
+    } else {
+        st.update(|s| s.merge_profiles.push(meta.id.clone()))?;
+        reload_core(&app, &st).await?;
+    }
+    Ok(meta)
+}
+
+#[tauri::command]
+fn security_events(app: AppHandle) -> Res<Vec<String>> {
+    let path = app.path().app_data_dir().map_err(e)?.join("security-events.json");
+    events::read(&path).map_err(e)
 }
 
 #[tauri::command]
@@ -1571,6 +1603,8 @@ pub fn run() {
             core_versions,
             save_settings,
             import_profile,
+            add_single_node,
+            security_events,
             update_profile,
             save_profile_content,
             rename_profile,

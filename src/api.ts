@@ -146,6 +146,7 @@ export interface Snapshot {
   tun_service: "missing" | "stopped" | "running";
   /** The core is gone and the kill switch is holding the network. */
   kill_switch_blocking: boolean;
+  uptime_secs: number;
   platform: "windows" | "macos" | string;
 }
 
@@ -314,6 +315,8 @@ export const api = {
   listProcesses: () => invoke<ProcessInfo[]>("list_processes"),
   profileOutbounds: () => invoke<Outbounds>("profile_outbounds"),
   setAppRules: (rules: AppRule[]) => invoke<void>("set_app_rules", { rules }),
+  addSingleNode: (content: string, name: string) => invoke<ProfileMeta>("add_single_node", { content, name }),
+  securityEvents: () => invoke<string[]>("security_events"),
   setMergeProfiles: (ids: string[]) => invoke<void>("set_merge_profiles", { ids }),
   setRouteRules: (rules: RouteRule[]) => invoke<void>("set_route_rules", { rules }),
   setChains: (chains: ChainRule[]) => invoke<void>("set_chains", { chains }),

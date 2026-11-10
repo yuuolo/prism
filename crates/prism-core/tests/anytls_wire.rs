@@ -269,3 +269,26 @@ async fn a_pooled_session_without_synack_is_closed() {
 async fn a_session_that_answers_stays_open() {
     assert_eq!(second_stream(true).await.unwrap(), usize::MAX, "the stream should still be open");
 }
+
+
+#[tokio::test]
+async fn dropping_outbound_releases_idle_tls_socket() {
+    let tls = acceptor();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let c = client(listener.local_addr().unwrap().port(), None);
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let socket = tls.accept(tcp).await.unwrap();
+        serve_session(socket, true).await;
+    });
+    let mut stream = c.connect(&Address::new("1.1.1.1", 80)).await.unwrap();
+    stream.write_all(b"ok").await.unwrap();
+    let mut data = [0; 2];
+    stream.read_exact(&mut data).await.unwrap();
+    assert_eq!(&data, b"ok");
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(c);
+    tokio::time::timeout(Duration::from_secs(2), server).await
+        .expect("idle TLS socket survived outbound cleanup").unwrap();
+}

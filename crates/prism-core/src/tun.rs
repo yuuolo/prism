@@ -30,12 +30,9 @@ pub use win::start;
 #[cfg(target_os = "macos")]
 pub use mac::start;
 
-/// The adapter's address, and the DNS server it advertises (queries to it
-/// are hijacked).
+/// The adapter's address. DNS on port 53 is always intercepted.
 #[cfg(any(windows, target_os = "macos"))]
 const ADDR: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 1);
-#[cfg(any(windows, target_os = "macos"))]
-const DNS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 2);
 /// The adapter's IPv6 address (unique local, /126).
 #[cfg(any(windows, target_os = "macos"))]
 const ADDR6: &str = "fdfe:dcba:9876::1";
@@ -56,10 +53,10 @@ mod stack {
     use anyhow::{anyhow, Result};
     use futures::{SinkExt, StreamExt};
     use netstack_smoltcp::{StackBuilder, UdpSocket as StackUdp};
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
-    use super::{ADDR, DNS, MTU};
+    use super::MTU;
     use crate::common::Address;
     use crate::config::TunConfig;
     use crate::hub::Hub;
@@ -68,7 +65,7 @@ mod stack {
 
     /// Runs the stack over a device: `from_dev` delivers IP packets read
     /// from the adapter, `to_dev` takes the packets to write to it.
-    pub fn run(cfg: &TunConfig, hub: Arc<Hub>, mut from_dev: mpsc::Receiver<Vec<u8>>, to_dev: mpsc::Sender<Vec<u8>>) -> Result<()> {
+    pub fn run(_cfg: &TunConfig, hub: Arc<Hub>, mut from_dev: mpsc::Receiver<Vec<u8>>, to_dev: mpsc::Sender<Vec<u8>>) -> Result<()> {
         let (stack, runner, udp, tcp) = StackBuilder::default()
             .enable_tcp(true)
             .enable_udp(true)
@@ -107,13 +104,32 @@ mod stack {
             });
         }
         if let Some(udp) = udp {
-            let upstream = cfg.dns_upstream();
-            tokio::spawn(handle_udp(udp, hub, upstream));
+            tokio::spawn(handle_udp(udp, hub));
         }
         Ok(())
     }
 
     async fn handle_tcp(mut s: netstack_smoltcp::TcpStream, src: SocketAddr, dst: SocketAddr, tunnel: Arc<Tunnel>) {
+        // Intercept DNS over TCP before sniffing or applying routing rules.
+        if dst.port() == 53 {
+            let _ = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let len = s.read_u16().await? as usize;
+                    if len < 12 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short DNS query")); }
+                    let mut query = vec![0; len];
+                    s.read_exact(&mut query).await?;
+                    let Some(resolver) = tunnel.dns.clone() else {
+                        tracing::warn!("DNS REJECT: TCP resolver unavailable; refusing direct upstream fallback");
+                        return Ok::<(), std::io::Error>(());
+                    };
+                    let Some(answer) = resolver.handle(&query).await else { return Ok(()); };
+                    let size = u16::try_from(answer.len()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "DNS response too large"))?;
+                    s.write_u16(size).await?;
+                    s.write_all(&answer).await?;
+                }
+            }).await;
+            return;
+        }
         // Sniff: wait briefly for the client's first bytes (server-first
         // protocols simply time out and are routed by IP).
         let mut buf = vec![0u8; 16 * 1024];
@@ -143,7 +159,7 @@ mod stack {
         }
     }
 
-    async fn handle_udp(udp: StackUdp, hub: Arc<Hub>, upstream: Vec<IpAddr>) {
+    async fn handle_udp(udp: StackUdp, hub: Arc<Hub>) {
         let (mut rd, mut wr) = udp.split();
         let (reply_tx, mut reply_rx) = mpsc::channel::<UdpPacket>(4096);
         tokio::spawn(async move {
@@ -157,7 +173,7 @@ mod stack {
         let nat = UdpNat::new("Tun", reply_tx.clone());
         while let Some((data, src, dst)) = rd.next().await {
             if dst.port() == 53 {
-                tokio::spawn(dns_query(hub.clone(), data, src, dst, upstream.clone(), reply_tx.clone()));
+                tokio::spawn(dns_query(hub.clone(), data, src, dst, reply_tx.clone()));
                 continue;
             }
             if dst.ip().is_multicast() || dst.ip() == IpAddr::V4(Ipv4Addr::BROADCAST) {
@@ -167,26 +183,13 @@ mod stack {
         }
     }
 
-    /// DNS hijack: the DNS module answers when enabled (fake-ip etc.);
-    /// otherwise the query is forwarded to the server the client asked (or
-    /// the default upstream for the TUN's own DNS address).
-    async fn dns_query(hub: Arc<Hub>, query: Vec<u8>, src: SocketAddr, dst: SocketAddr, upstream: Vec<IpAddr>, reply: mpsc::Sender<UdpPacket>) {
+    /// DNS hijack fails closed if the configured resolver is unavailable.
+    async fn dns_query(hub: Arc<Hub>, query: Vec<u8>, src: SocketAddr, dst: SocketAddr, reply: mpsc::Sender<UdpPacket>) {
         let resp = match hub.core().dns.clone() {
             Some(r) => r.handle(&query).await,
             None => {
-                let target = if dst.ip() == IpAddr::V4(DNS) || dst.ip() == IpAddr::V4(ADDR) {
-                    SocketAddr::new(upstream.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5))), 53)
-                } else {
-                    dst
-                };
-                match tokio::time::timeout(Duration::from_secs(5), crate::dns::upstream::udp_query(target, &query)).await {
-                    Ok(Ok(r)) => Some(r),
-                    Ok(Err(e)) => {
-                        tracing::debug!("dns {target}: {e}");
-                        None
-                    }
-                    Err(_) => None,
-                }
+                tracing::warn!("DNS REJECT: resolver unavailable; refusing direct upstream fallback");
+                None
             }
         };
         if let Some(data) = resp {
@@ -237,15 +240,37 @@ mod win {
         Ok(())
     }
 
-    /// Interface currently used for the default route (before we add ours).
-    fn default_interface() -> Result<u32> {
-        let mut index = 0u32;
-        let dest = u32::from_ne_bytes([1, 1, 1, 1]);
-        let r = unsafe { windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterface(dest, &mut index) };
-        if r != 0 {
-            bail!("no default network interface (GetBestInterface error {r})");
-        }
-        Ok(index)
+    fn monitor_uplink(hub: &Arc<Hub>, index: u32, initial: crate::network::Uplink) {
+        let weak = Arc::downgrade(hub);
+        tokio::spawn(async move {
+            let mut recovery = crate::network::Recovery::new(initial);
+            let mut previous = std::time::SystemTime::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let Some(hub) = weak.upgrade() else { break };
+                let now = std::time::SystemTime::now();
+                let resumed = now.duration_since(previous).unwrap_or_default().as_secs() > 15;
+                previous = now;
+                let next = crate::network::uplink(index).ok();
+                if !recovery.needed(next.as_ref(), resumed) { continue; }
+                let next = next.unwrap();
+                net::set_bind_interface(next.index);
+                tracing::info!("网络恢复: uplink changed or resumed, rebinding to interface {}", next.index);
+                // Rebuild protocol pools and DNS caches, keeping fake-IP mappings,
+                // selector choices, mode, API, TUN device and firewall protection.
+                match tokio::time::timeout(std::time::Duration::from_secs(30), hub.reload(None)).await {
+                    Ok(Ok(())) => {
+                        hub.core().tunnel.stats.close_all();
+                        recovery.applied(next);
+                        tracing::info!("网络恢复: DNS and outbound sessions rebuilt successfully");
+                    }
+                    result => {
+                        tracing::warn!("网络恢复: rebuild failed ({result:?}), retrying after cooldown");
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
+                }
+            }
+        });
     }
 
     fn find_wintun(home: &Path) -> Result<PathBuf> {
@@ -258,7 +283,8 @@ mod win {
     }
 
     pub async fn start(cfg: &TunConfig, home: &Path, hub: Arc<Hub>) -> Result<()> {
-        let phys = default_interface()?;
+        let initial = crate::network::uplink(0)?;
+        let phys = initial.index;
         let wintun = unsafe { wintun::load_from_path(find_wintun(home)?) }.context("load wintun.dll")?;
         let adapter = wintun::Adapter::create(&wintun, "Prism", "Prism", Some(GUID))
             .map_err(|e| anyhow!("create TUN adapter: {e} (TUN mode needs administrator rights)"))?;
@@ -308,7 +334,9 @@ mod win {
                 }
             }
         });
-        super::stack::run(cfg, hub, rx, out_tx)
+        super::stack::run(cfg, hub.clone(), rx, out_tx)?;
+        monitor_uplink(&hub, index, initial);
+        Ok(())
     }
 }
 

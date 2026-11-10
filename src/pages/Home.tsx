@@ -232,6 +232,7 @@ export default function Home({ go }: { go: (p: PageKey) => void }) {
             <span className="small muted">
               {running && <i className="core-toggle-dot" />}
               {snap.running ? t("{core} 运行中", { core: t(CORE_NAMES[snap.running]) }) : t(CORE_NAMES[s.core])}
+              {running && <span> · {t("持续运行")} {Math.floor((snap.uptime_secs ?? 0) / 3600)}h {Math.floor(((snap.uptime_secs ?? 0) % 3600) / 60)}m {(snap.uptime_secs ?? 0) % 60}s</span>}
             </span>
           </div>
           <button
