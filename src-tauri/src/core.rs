@@ -310,7 +310,7 @@ impl CoreManager {
             if api(s, "GET", "/version", None).await.is_ok() {
                 #[cfg(target_os = "macos")]
                 if s.tun {
-                    if let Err(e) = crate::macdns::override_dns(&store.dir) {
+                    if let Err(e) = crate::macdns::override_dns(&store.dir, &crate::macdns::config_servers(&cfg)) {
                         self.push_log(app, format!("[prism] 设置 TUN 的系统 DNS 失败，部分域名可能不经过 TUN: {e:#}"));
                     }
                 }
@@ -428,5 +428,9 @@ pub async fn api(s: &Settings, method: &str, path: &str, body: Option<Value>) ->
     if text.trim().is_empty() {
         return Ok(Value::Null);
     }
-    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    let mut v = serde_json::from_str(&text).unwrap_or(Value::String(text));
+    if method == "GET" && path == "/connections" {
+        crate::apptraffic::fill_process(&mut v);
+    }
+    Ok(v)
 }

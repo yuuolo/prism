@@ -406,14 +406,47 @@ mod mac {
     /// only, so other traffic is unaffected).
     fn ensure_scoped_default(iface: &str, gateway: Option<&str>) {
         let r = match gateway {
-            Some(gw) => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", gw]),
-            None => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", "-interface", iface]),
+            Some(gw) => add_or_replace(&["-ifscope", iface, "default", gw]),
+            None => add_or_replace(&["-ifscope", iface, "default", "-interface", iface]),
         };
         match r {
-            Ok(_) => tracing::info!("added a scoped default route on {iface} for the core's own connections"),
-            Err(e) if format!("{e:#}").contains("File exists") => {}
+            Ok(_) => tracing::info!("set a scoped default route on {iface} for the core's own connections"),
             Err(e) => tracing::warn!("no scoped default route on {iface}, the core's own connections may fail: {e:#}"),
         }
+    }
+
+    /// `route add`, replacing the route when it is there already: a scoped
+    /// default route stays after the core exits (it is on the physical
+    /// interface, not the utun), and the gateway may have changed since
+    /// (another Wi-Fi, say). `args` end with `default <gateway>…`; the
+    /// existing route is deleted by everything up to `default`.
+    fn add_or_replace(args: &[&str]) -> Result<()> {
+        match route_add(args) {
+            Err(e) if format!("{e:#}").ends_with("File exists") => {
+                let upto = args.iter().position(|a| *a == "default").map_or(args, |i| &args[..=i]);
+                run("/sbin/route", &[&["-n", "delete"], upto].concat())?;
+                route_add(args)
+            }
+            r => r,
+        }
+    }
+
+    /// `route -n add`, failing when route(8) printed an error.
+    fn route_add(args: &[&str]) -> Result<()> {
+        let out = run("/sbin/route", &[&["-n", "add"], args].concat())?;
+        match route_error(&out) {
+            Some(e) => bail!("route add {}: {e}", args.join(" ")),
+            None => Ok(()),
+        }
+    }
+
+    /// The error route(8) printed, if any. It exits 0 either way and prints
+    /// on stdout: `add net default: gateway 192.168.1.1` when it worked,
+    /// `…: gateway 192.168.1.1: File exists` when it didn't.
+    fn route_error(stdout: &str) -> Option<&str> {
+        let line = stdout.lines().find(|l| l.contains(": gateway "))?;
+        let after = &line[line.find(": gateway ")? + ": gateway ".len()..];
+        after.split_once(": ").map(|(_, e)| e.trim())
     }
 
     /// IPv6 address and split default routes on the utun; the physical
@@ -425,16 +458,15 @@ mod mac {
             let field = |k: &str| out.lines().find_map(|l| l.trim().strip_prefix(k).map(|n| n.trim().to_string()));
             if let (Some(gw), Some(iface)) = (field("gateway:"), field("interface:")) {
                 if iface == phys {
-                    match run("/sbin/route", &["-n", "add", "-inet6", "-ifscope", phys, "default", &gw]) {
-                        Err(e) if !format!("{e:#}").contains("File exists") => tracing::warn!("no scoped IPv6 default route on {phys}: {e:#}"),
-                        _ => {}
+                    if let Err(e) = add_or_replace(&["-inet6", "-ifscope", phys, "default", &gw]) {
+                        tracing::warn!("no scoped IPv6 default route on {phys}: {e:#}");
                     }
                 }
             }
         }
         if auto_route {
             for net in ROUTES6 {
-                run("/sbin/route", &["-n", "add", "-inet6", "-net", net, "-interface", name])?;
+                route_add(&["-inet6", "-net", net, "-interface", name])?;
             }
         }
         Ok(())
@@ -459,7 +491,7 @@ mod mac {
         net::set_bind_interface(phys);
         if cfg.auto_route {
             for net in ["0.0.0.0/1", "128.0.0.0/1"] {
-                run("/sbin/route", &["-n", "add", "-net", net, "-interface", &name])?;
+                route_add(&["-net", net, "-interface", &name])?;
             }
         }
         if cfg.ipv6 {
@@ -521,6 +553,67 @@ mod mac {
         fn utun_header() {
             assert_eq!(&super::frame(&[0x45, 0, 0, 20])[..4], &[0, 0, 0, 2]);
             assert_eq!(&super::frame(&[0x60, 0, 0, 0])[..4], &[0, 0, 0, 30]);
+        }
+
+        /// route(8)'s stdout, as printed by newroute() in Apple's route.c.
+        #[test]
+        fn route_errors_from_stdout() {
+            assert_eq!(super::route_error("add net default: gateway 172.20.15.252\n"), None);
+            assert_eq!(super::route_error("add net default: gateway 172.20.15.252: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error("add net default: gateway en0\n"), None);
+            assert_eq!(super::route_error("add net default: gateway fe80::1%en0: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error("add net default: gateway fe80::1%en0\n"), None);
+            assert_eq!(super::route_error("delete net default: gateway 10.0.0.1: not in table\n"), Some("not in table"));
+            // The split routes into the utun: `-net … -interface utunN`.
+            assert_eq!(super::route_error("add net 0.0.0.0: gateway utun4\n"), None);
+            assert_eq!(super::route_error("add net 0.0.0.0: gateway utun4: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error("add net ::/1: gateway utun4\n"), None);
+            assert_eq!(super::route_error("add net 8000::/1: gateway utun4: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error(""), None);
+        }
+
+        /// Gateway of the default route scoped to `iface` (flag I), if any.
+        fn scoped_gateway(iface: &str) -> Option<String> {
+            let out = super::run("/usr/sbin/netstat", &["-rn", "-f", "inet"]).unwrap();
+            out.lines().find_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                (f.len() >= 4 && f[0] == "default" && f[2].contains('I') && f[3] == iface).then(|| f[1].to_string())
+            })
+        }
+
+        /// A scoped default route left with an old gateway (another network)
+        /// is pointed at the current one. Changes this Mac's routes for a
+        /// moment (only sockets bound to the interface use them) and puts
+        /// them back, so root and PRISM_ROUTE_LIVE=1 only:
+        /// `cargo test -p prism-core --lib --no-run`, then
+        /// `sudo PRISM_ROUTE_LIVE=1 <test binary> scoped_default --ignored --nocapture`.
+        #[test]
+        #[ignore]
+        fn live_scoped_default_follows_the_gateway() {
+            if std::env::var_os("PRISM_ROUTE_LIVE").is_none() {
+                return;
+            }
+            let (iface, _, gw) = super::default_interface().unwrap();
+            let gw = gw.expect("default route has an IPv4 gateway");
+            let ip: std::net::Ipv4Addr = gw.parse().unwrap();
+            let [a, b, c, d] = ip.octets();
+            let old = std::net::Ipv4Addr::new(a, b, c, if d >= 254 { d - 1 } else { d + 1 }).to_string();
+            let before = scoped_gateway(&iface);
+            let _ = super::run("/sbin/route", &["-n", "delete", "-ifscope", &iface, "default"]);
+            super::run("/sbin/route", &["-n", "add", "-ifscope", &iface, "default", &old]).unwrap();
+            let stale = scoped_gateway(&iface);
+            super::ensure_scoped_default(&iface, Some(&gw));
+            let after = scoped_gateway(&iface);
+            // Put back what was there.
+            let _ = super::run("/sbin/route", &["-n", "delete", "-ifscope", &iface, "default"]);
+            if let Some(g) = &before {
+                super::run("/sbin/route", &["-n", "add", "-ifscope", &iface, "default", g]).unwrap();
+            }
+            let restored = scoped_gateway(&iface);
+            println!("{iface}: before {before:?}, stale {stale:?}, after ensure {after:?}, restored {restored:?}");
+            assert_eq!(stale.as_deref(), Some(old.as_str()));
+            assert_eq!(after.as_deref(), Some(gw.as_str()), "the old gateway was kept");
+            assert_eq!(restored, before);
         }
     }
 }

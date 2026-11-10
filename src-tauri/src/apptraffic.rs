@@ -82,7 +82,7 @@ impl AppTraffic {
                 continue;
             }
             let m = &c["metadata"];
-            // sing-box reports only the path.
+            // sing-box reports only the path (see fill_process).
             let name = match m["process"].as_str().filter(|p| !p.is_empty()) {
                 Some(p) => p.to_string(),
                 None => m["processPath"].as_str().map(prism_core::process::file_name).unwrap_or_default(),
@@ -139,10 +139,93 @@ impl AppTraffic {
     }
 }
 
+/// Gives sing-box's connections (`GET /connections`) a `process` like
+/// prism-core's and mihomo's, and a `processPath` that is just the path,
+/// so the Connections page, its app rules and app traffic see one name per
+/// program.
+pub fn fill_process(conns: &mut Value) {
+    for c in conns["connections"].as_array_mut().into_iter().flatten() {
+        let m = &mut c["metadata"];
+        if m["process"].as_str().is_some_and(|p| !p.is_empty()) {
+            continue;
+        }
+        let Some(raw) = m["processPath"].as_str() else { continue };
+        let path = singbox_path(raw).unwrap_or_default().to_string();
+        m["process"] = Value::String(prism_core::process::file_name(&path));
+        m["processPath"] = Value::String(path);
+    }
+}
+
+/// sing-box's `processPath` without what it appends: ` (<user>)` or
+/// ` (<uid>)` after the path, or only the uid when it has no path (None).
+/// Program names can end in `(...)` too (`Chrome Helper (GPU)`), so only a
+/// real account name or a number is taken off.
+fn singbox_path(p: &str) -> Option<&str> {
+    #[cfg(unix)]
+    if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    #[cfg(unix)]
+    if let Some((path, who)) = p.strip_suffix(')').and_then(|s| s.rsplit_once(" (")) {
+        if !path.is_empty() && (who.bytes().all(|b| b.is_ascii_digit()) || is_user(who)) {
+            return Some(path);
+        }
+    }
+    Some(p)
+}
+
+/// Remembered: every `GET /connections` asks, and getpwnam is a directory
+/// service lookup. Under the lock, as getpwnam isn't reentrant.
+#[cfg(unix)]
+fn is_user(name: &str) -> bool {
+    static KNOWN: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
+    let mut known = KNOWN.lock().unwrap();
+    if let Some(&k) = known.get(name) {
+        return k;
+    }
+    let Ok(c) = std::ffi::CString::new(name) else { return false };
+    let found = !name.is_empty() && unsafe { !libc::getpwnam(c.as_ptr()).is_null() };
+    if known.len() < 256 {
+        known.insert(name.to_string(), found);
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn singbox_process_paths() {
+        assert_eq!(singbox_path("/Applications/Mail.app/Contents/MacOS/Mail (root)"), Some("/Applications/Mail.app/Contents/MacOS/Mail"));
+        assert_eq!(singbox_path("/usr/libexec/NRDUpdated (501)"), Some("/usr/libexec/NRDUpdated"));
+        assert_eq!(singbox_path("/x/Google Chrome Helper (GPU)"), Some("/x/Google Chrome Helper (GPU)"));
+        assert_eq!(singbox_path("/x/Google Chrome Helper (GPU) (root)"), Some("/x/Google Chrome Helper (GPU)"));
+        assert_eq!(singbox_path("/x/Mail"), Some("/x/Mail"));
+        assert_eq!(singbox_path("503"), None);
+        assert_eq!(singbox_path(""), Some(""));
+
+        let path = std::env::temp_dir().join(format!("prism-apptraffic-sb-{}.json", std::process::id()));
+        let t = AppTraffic::load(path.clone());
+        let sb = |id: &str, p: &str, down: u64| json!({ "id": id, "upload": 0, "download": down, "chains": ["DIRECT"], "metadata": { "processPath": p } });
+        let filled = |mut v: Value| {
+            fill_process(&mut v);
+            v
+        };
+        t.record("2026-11-01", &filled(json!({ "connections": [sb("z", "/x/z", 0)] })));
+        let mut second = json!({ "connections": [sb("a", "/x/Mail (root)", 10), sb("b", "/x/Mail", 5), sb("c", "0", 1)] });
+        fill_process(&mut second);
+        let m = &second["connections"][0]["metadata"];
+        assert_eq!((m["process"].as_str(), m["processPath"].as_str()), (Some("Mail"), Some("/x/Mail")));
+        assert_eq!(second["connections"][2]["metadata"]["process"], "");
+        t.record("2026-11-01", &second);
+        let all = t.totals("2026-11-01");
+        assert_eq!(all.iter().map(|a| (a.name.as_str(), a.download)).collect::<Vec<_>>(), [("Mail", 15), ("", 1)]);
+        assert_eq!(all[0].path, "/x/Mail");
+        let _ = std::fs::remove_file(path);
+    }
 
     fn conn(id: &str, proc_: &str, up: u64, down: u64, exit: &str) -> Value {
         json!({ "id": id, "upload": up, "download": down, "chains": [exit, "节点选择"],
