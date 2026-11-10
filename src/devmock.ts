@@ -2,7 +2,7 @@
 // browser (no Tauri backend), answer the app's commands with sample data so
 // pages can be checked visually. Never included in production builds.
 
-import type { RealIpRule } from "./api";
+import { DEFAULT_DNS_PRIVACY, DEFAULT_RECOVERY, type RealIpRule } from "./api";
 
 type Handler = (args: Record<string, unknown>) => unknown;
 
@@ -28,6 +28,9 @@ export function installDevMock() {
     webdav: { url: "https://dav.jianguoyun.com/dav/", username: "me@example.com", password: "saved" },
     tun: false,
     unified_delay: true,
+    dns_privacy: DEFAULT_DNS_PRIVACY,
+    recovery: DEFAULT_RECOVERY,
+    tailscale_bypass: false,
     proxy_bypass: "localhost;127.*;<local>",
     active_profile: "demo",
     merge_profiles: [] as string[],
@@ -137,6 +140,7 @@ export function installDevMock() {
       profiles,
       running: "prism",
       uptime_secs: 3661,
+      recovery: { phase: "healthy", message: "内核监测正常", restarts: 0, checked_at: Date.now() / 1000 },
       system_proxy: true,
       elevated: false,
       core_paths: { prism: { path: "", exists: true }, mihomo: { path: "", exists: true }, singbox: { path: "", exists: false } },
@@ -165,6 +169,10 @@ export function installDevMock() {
       pendingLinks = [];
       return l;
     },
+    tailscale_status: () => ({ protection: null, installed: false, state: "NotInstalled", version: "", tailnet: "", self_node: null, peers: [], auth_url: null, error: null }),
+    tailscale_action: () => { throw "预览模式不连接真实组网"; },
+    tailscale_ping: () => "pong from sample tailnet peer via DERP in 12ms",
+    tailscale_open: () => {},
     security_events: () => [
       `${Math.floor(Date.now() / 1000) - 120} [prism] 启动 Prism 内核`,
       `${Math.floor(Date.now() / 1000) - 60} [prism] 断网保护已触发：内核已退出，网络被拦截`,

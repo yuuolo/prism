@@ -5,11 +5,10 @@
 //! * [`Resolver::handle`] answers queries from clients (the `listen` port
 //!   and TUN DNS hijack). These may use fake-ip and proxied (`#PROXY`)
 //!   servers.
-//! * [`Resolver::lookup`] resolves names for the core's own connections
-//!   (DIRECT targets, proxy servers, IP rules). It only uses direct servers
-//!   (`proxy-server-nameserver`, else direct `nameserver`s, else
-//!   `default-nameserver`), so resolving a proxy server never depends on
-//!   that proxy, and it never returns fake addresses.
+//! * [`Resolver::lookup`] resolves ordinary targets and IP-rule lookups with
+//!   the configured nameserver policy, including proxied upstreams.
+//! * [`Resolver::lookup_proxy`] resolves proxy server endpoints using only
+//!   the independent direct bootstrap servers; it never races user fallback.
 //!
 //! With `fallback:` servers, A / AAAA queries that would go to the main
 //! servers race both; the main answer is kept unless one of its addresses
@@ -109,7 +108,7 @@ pub fn build(
         policy_servers.push(parse_list(servers));
     }
     let direct_main: Vec<_> = main.iter().filter(|u| u.is_direct()).cloned().collect();
-    let lookup_servers = [proxy_ns.clone(), direct_main, defaults.clone()]
+    let lookup_servers = [proxy_ns.iter().filter(|u| u.is_direct()).cloned().collect(), direct_main, defaults.iter().filter(|u| u.is_direct()).cloned().collect()]
         .into_iter()
         .find(|l| !l.is_empty())
         .unwrap_or_default();
@@ -279,15 +278,15 @@ impl Resolver {
     pub async fn handle(&self, query: &[u8]) -> Option<Vec<u8>> {
         let (q, _) = wire::question(query)?;
         let is_addr = q.qtype == wire::TYPE_A || q.qtype == wire::TYPE_AAAA;
+        if q.qtype == wire::TYPE_AAAA && !self.ipv6 {
+            return wire::response(query, wire::RCODE_NOERROR, &[]);
+        }
         if is_addr {
             if let Some(ips) = self.hosts.get(&q.name) {
                 let want_v4 = q.qtype == wire::TYPE_A;
                 let ans: Vec<(IpAddr, u32)> = ips.iter().filter(|ip| ip.is_ipv4() == want_v4).map(|ip| (*ip, 10)).collect();
                 return wire::response(query, wire::RCODE_NOERROR, &ans);
             }
-        }
-        if q.qtype == wire::TYPE_AAAA && !self.ipv6 {
-            return wire::response(query, wire::RCODE_NOERROR, &[]);
         }
         if let Some(fake) = &self.fake {
             if is_addr && !self.fake_filter.matches(&q.name) {
@@ -314,23 +313,38 @@ impl Resolver {
 
     /// Real addresses of `host` for outgoing connections.
     pub async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+        self.lookup_inner(host, false).await
+    }
+
+    /// Only proxy server endpoints may use the independent bootstrap servers.
+    pub async fn lookup_proxy(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+        self.lookup_inner(host, true).await
+    }
+
+    async fn lookup_inner(&self, host: &str, proxy: bool) -> io::Result<Vec<IpAddr>> {
         let name = host.trim_end_matches('.').to_ascii_lowercase();
         if let Some(ips) = self.hosts.get(&name) {
-            return Ok(ips.clone());
+            return Ok(ips.iter().copied().filter(|ip| self.ipv6 || ip.is_ipv4()).collect());
         }
         let mut out = Vec::new();
         let mut qtypes = vec![wire::TYPE_A];
         if self.ipv6 {
             qtypes.push(wire::TYPE_AAAA);
         }
-        // A policy that goes straight to its servers applies here too: an
-        // internal name may be known to its own server only.
+        // Only ordinary targets follow nameserver policies. Proxy endpoints
+        // must use independent bootstrap DNS to avoid recursive dialing.
         let (policy, tag) = self.servers_for(&name);
-        let use_policy = tag != MAIN && !policy.is_empty() && policy.iter().all(|u| u.is_direct());
+        let use_policy = tag != MAIN && !proxy;
         let mut last = None;
         for qt in qtypes {
             let q = wire::query(rand::random(), &name, qt);
-            let res = if use_policy { self.exchange(&policy, tag, &name, qt, &q).await } else { self.exchange_main(&self.lookup_servers.clone(), LOOKUP, &name, qt, &q).await };
+            let res = if proxy {
+                self.exchange(&self.lookup_servers.clone(), LOOKUP, &name, qt, &q).await
+            } else if use_policy {
+                self.exchange(&policy, tag, &name, qt, &q).await
+            } else {
+                self.exchange_main(&self.main.clone(), MAIN, &name, qt, &q).await
+            };
             match res {
                 Ok(r) => {
                     if let Some((ips, _)) = wire::answers(&r) {

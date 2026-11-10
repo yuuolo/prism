@@ -208,7 +208,9 @@ fn clash_doc(store: &Store, s: &Settings) -> Result<(serde_yaml::Value, Vec<Stri
     warnings.extend(route_warnings(clash::add_user_rules(&mut doc, &user_rules(s))));
     warnings.extend(app_warnings(clash::add_app_rules(&mut doc, &app_routes(s))));
     warnings.extend(real_ip_warnings(clash::add_user_rules(&mut doc, &real_ip_rules(s))));
+    if s.core == CoreKind::Prism { crate::privacy::apply(&mut doc, &s.dns_privacy)?; }
     clash::add_real_ip_dns(&mut doc, &real_ip_domains(s));
+    if s.core == CoreKind::Prism && s.tailscale_bypass { crate::tailscale::apply(&mut doc)?; }
     Ok((doc, warnings))
 }
 
@@ -432,7 +434,7 @@ impl CoreManager {
 
 fn push_log(logs: &Mutex<VecDeque<String>>, app: &AppHandle, line: String) {
     let lower = line.to_lowercase();
-    if lower.contains("reject") || lower.contains("拒绝") || lower.contains("断网保护") || lower.contains("异常退出") || lower.contains("持续运行") || lower.contains("启动") || lower.contains("网络恢复") {
+    if lower.contains("reject") || lower.contains("拒绝") || lower.contains("断网保护") || lower.contains("异常退出") || lower.contains("持续运行") || lower.contains("启动") || lower.contains("网络恢复") || lower.contains("自动恢复") || lower.contains("tailscale 保护") {
         if let Ok(dir) = app.path().app_data_dir() {
             if let Err(e) = crate::events::record(&dir.join("security-events.json"), &line) {
                 eprintln!("[prism] 保存运行和安全记录失败: {e:#}");

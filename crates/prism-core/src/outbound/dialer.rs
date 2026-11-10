@@ -63,7 +63,7 @@ impl Dialer {
 
     pub async fn tcp(&self, host: &str, port: u16) -> io::Result<BoxedStream> {
         match self.via()? {
-            None => Ok(Box::new(crate::net::tcp_connect(host, port).await?)),
+            None => Ok(Box::new(crate::net::tcp_connect_proxy(host, port).await?)),
             Some(o) => DEPTH.scope(deeper()?, o.connect(&Address::new(host, port))).await,
         }
     }
@@ -72,7 +72,7 @@ impl Dialer {
     pub async fn udp(&self, host: &str, port: u16) -> io::Result<Datagrams> {
         match self.via()? {
             None => {
-                let addrs = crate::net::resolve(host, port).await?;
+                let addrs = crate::net::resolve_proxy(host, port).await?;
                 let peer = *addrs.iter().min_by_key(|a| a.is_ipv6()).ok_or_else(|| other("no address"))?;
                 let sock = crate::net::udp_socket(peer).await?;
                 sock.connect(peer).await?;

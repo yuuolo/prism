@@ -176,6 +176,8 @@ pub fn parse(v: &Value) -> Result<Profile> {
     if let Some(m) = s(root, "find-process-mode") {
         g.find_process_mode = m;
     }
+    g.block_ipv6 = b(root, "prism-block-ipv6");
+    g.tailscale_bypass = b(root, "prism-tailscale-bypass");
     if let Some(t) = sub(root, "tun") {
         g.tun.enable = b(t, "enable");
         g.tun.auto_route = !matches!(t.get("auto-route"), Some(Value::Bool(false)));
@@ -459,6 +461,8 @@ pub fn emit_proxy(p: &ProxyConfig) -> Value {
 pub fn emit(p: &Profile) -> Value {
     let mut root = Mapping::new();
     let g = &p.general;
+    if g.block_ipv6 { put(&mut root, "prism-block-ipv6", true); }
+    if g.tailscale_bypass { put(&mut root, "prism-tailscale-bypass", true); }
     put(&mut root, "mixed-port", g.mixed_port as u64);
     put(&mut root, "allow-lan", g.allow_lan);
     put(&mut root, "mode", g.mode.as_str());

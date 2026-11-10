@@ -309,6 +309,7 @@ mod win {
         }
         if cfg.ipv6 {
             if let Err(e) = ipv6(index, cfg.auto_route) {
+                if hub.core().general.block_ipv6 { bail!("IPv6 protection requires TUN IPv6 routes: {e:#}"); }
                 tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
             }
         }
@@ -495,6 +496,7 @@ mod mac {
         }
         if cfg.ipv6 {
             if let Err(e) = ipv6(&name, &phys_name, cfg.auto_route) {
+                if hub.core().general.block_ipv6 { anyhow::bail!("IPv6 protection requires TUN IPv6 routes: {e:#}"); }
                 tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
             }
         }

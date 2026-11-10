@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::wire;
 use crate::common::{other, Address, BoxedStream};
 use crate::outbound::tls::Tls;
-use crate::outbound::RegistryCell;
+use crate::outbound::{RegistryCell, Outbound};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const POOL: usize = 4;
@@ -48,6 +48,7 @@ pub struct Upstream {
     path: String,
     /// Outbound (proxy or group) the queries go through; None = direct.
     pub detour: Option<String>,
+    proxy_only: bool,
     tls: Option<Tls>,
     bootstrap: Arc<Vec<SocketAddr>>,
     reg: RegistryCell,
@@ -110,6 +111,7 @@ impl Upstream {
             port,
             path,
             detour,
+            proxy_only: spec.split_once('#').is_some_and(|(_, f)| f.split('&').any(|p| p == "proxy-only=true")),
             tls,
             bootstrap,
             reg,
@@ -125,6 +127,10 @@ impl Upstream {
 
     /// Sends `query` and returns the response (any rcode).
     pub async fn exchange(&self, query: &[u8]) -> io::Result<Vec<u8>> {
+        if self.proxy_only {
+            let name = self.detour.as_deref().ok_or_else(|| other("DNS REJECT: proxy-only requires an outbound"))?;
+            self.proxy_outbound(name)?;
+        }
         let res = tokio::time::timeout(TIMEOUT, async {
             match self.kind {
                 Kind::Udp => self.exchange_udp(query).await,
@@ -138,6 +144,15 @@ impl Upstream {
             return Err(other(format!("dns {}: mismatched response", self.url)));
         }
         Ok(res)
+    }
+
+    fn proxy_outbound(&self, name: &str) -> io::Result<Arc<dyn Outbound>> {
+        let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
+        let (out, _) = reg.resolve(name, &self.target())?;
+        if self.proxy_only && !reg.configs.contains_key(out.name()) {
+            return Err(other("DNS REJECT: selected outbound is not a proxy node (DIRECT/REJECT/relay forbidden)"));
+        }
+        Ok(out)
     }
 
     fn target(&self) -> Address {
@@ -162,8 +177,7 @@ impl Upstream {
 
     async fn exchange_udp(&self, query: &[u8]) -> io::Result<Vec<u8>> {
         if let Some(d) = &self.detour {
-            let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
-            let (out, _) = reg.resolve(d, &self.target())?;
+            let out = self.proxy_outbound(d)?;
             let mut pipe = out.connect_udp(&self.target()).await?;
             pipe.tx.send(query.to_vec()).await.map_err(|_| other("dns: udp session closed"))?;
             return pipe.rx.recv().await.ok_or_else(|| other("dns: no response"));
@@ -175,8 +189,7 @@ impl Upstream {
     async fn connect(&self) -> io::Result<BoxedStream> {
         let raw: BoxedStream = match &self.detour {
             Some(d) => {
-                let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
-                let (out, _) = reg.resolve(d, &self.target())?;
+                let out = self.proxy_outbound(d)?;
                 out.connect(&self.target()).await?
             }
             None => {
@@ -200,8 +213,7 @@ impl Upstream {
         }
         let datagrams = match &self.detour {
             Some(d) => {
-                let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
-                let (out, _) = reg.resolve(d, &self.target())?;
+                let out = self.proxy_outbound(d)?;
                 crate::outbound::dialer::Datagrams::Pipe(out.connect_udp(&self.target()).await?)
             }
             None => {

@@ -4,6 +4,7 @@ mod backup;
 mod core;
 mod download;
 mod patches;
+mod privacy;
 mod quality;
 mod ruletest;
 mod elevate;
@@ -24,6 +25,8 @@ mod trayspeed;
 mod tunsvc;
 mod unlock;
 mod updater;
+mod watchdog;
+mod tailscale;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -40,6 +43,9 @@ use crate::core::CoreManager;
 use crate::store::{CoreKind, ProfileMeta, Settings, Store};
 
 pub struct AppState {
+    lifecycle: tokio::sync::Mutex<()>,
+    core_intent: watchdog::Intent,
+    recovery_status: Mutex<watchdog::Status>,
     store: Store,
     settings: Mutex<Settings>,
     core: CoreManager,
@@ -102,6 +108,7 @@ struct Snapshot {
     /// The core is gone and the kill switch is holding the network.
     kill_switch_blocking: bool,
     uptime_secs: u64,
+    recovery: watchdog::Status,
 }
 
 /// Asks the service whatever the setting says now: a block outlives the setting.
@@ -147,8 +154,38 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
         platform: std::env::consts::OS,
         kill_switch_blocking: blocking,
         uptime_secs: if running.is_some() { st.core.uptime_secs() } else { 0 },
+        recovery: st.recovery_status.lock().unwrap().clone(),
     })
 }
+
+#[tauri::command]
+async fn tailscale_status() -> tailscale::Status {
+    let mut status=tailscale::status().await;
+    if cfg!(windows) && tunsvc::state()==tunsvc::State::Running {
+        if let Ok(Ok(service))=tokio::time::timeout(Duration::from_secs(4),tunsvc::status()).await {
+            status.protection=Some(if service.tailscale_supported {service.tailscale} else {prism_service::TailscaleProtection{phase:"unsupported".into(),detail:"请更新 TUN 服务以启用组网保护联动".into(),..Default::default()}});
+        }
+    }
+    status
+}
+#[tauri::command]
+async fn tailscale_action(st: State<'_, AppState>, action: String) -> Res<tailscale::Status> {
+    let s=st.settings();
+    let protected=cfg!(windows) && s.tun && s.kill_switch && s.tailscale_bypass
+        && tunsvc::state()==tunsvc::State::Running && tunsvc::status().await.map_err(e)?.kill_switch;
+    let protection=if protected {Some(tunsvc::tailscale_control(action=="connect").await)} else {None};
+    if action=="connect" {if let Some(Err(error))=&protection {return Err(e(error));}}
+    // A failed firewall revoke must not prevent the user's disconnect command.
+    let result=tailscale::action(&action).await;
+    if let Some(Err(error))=protection {return Err(e(error));}
+    let mut status=result.map_err(e)?;
+    if protected {status.protection=Some(tunsvc::status().await.map_err(e)?.tailscale);}
+    Ok(status)
+}
+#[tauri::command]
+async fn tailscale_ping(ip: String) -> Res<String> { tailscale::ping(&ip).await.map_err(e) }
+#[tauri::command]
+async fn tailscale_open(page: String) -> Res<()> { tailscale::open(&page).await.map_err(e) }
 
 #[tauri::command]
 async fn core_versions(st: State<'_, AppState>) -> Res<Value> {
@@ -163,6 +200,9 @@ async fn core_versions(st: State<'_, AppState>) -> Res<Value> {
 
 #[tauri::command]
 async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settings) -> Res<()> {
+    settings.dns_privacy.validate().map_err(e)?;
+    settings.recovery.validate().map_err(e)?;
+
     let old = st.settings();
     let new = st.update(|s| {
         // Fields with their own commands keep their live values.
@@ -184,7 +224,9 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
         || old.allow_lan != new.allow_lan
         || old.log_level != new.log_level
         || old.secret != new.secret
-        || old.unified_delay != new.unified_delay;
+        || old.unified_delay != new.unified_delay
+        || old.dns_privacy != new.dns_privacy
+        || old.tailscale_bypass != new.tailscale_bypass;
     if restart && st.core.running().await.is_some() {
         start(&app, &st).await?;
     }
@@ -368,6 +410,7 @@ async fn restore_backup(app: &AppHandle, st: &AppState, data: &[u8]) -> Res<()> 
         if s.active_profile.is_some() {
             start(app, st).await?;
         } else {
+            st.core_intent.stop();
             st.core.stop().await;
         }
     }
@@ -762,7 +805,18 @@ fn tun_allowed() -> bool {
 }
 
 async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
+    let ticket = st.core_intent.start();
+    let _guard = st.lifecycle.lock().await;
+    if !st.core_intent.valid(ticket) { return Err("启动已取消".into()); }
+    start_locked(app, st).await
+}
+
+async fn start_locked(app: &AppHandle, st: &AppState) -> Res<()> {
     let s = st.settings();
+    if s.tailscale_bypass && s.kill_switch && s.tun {
+        if !cfg!(windows) || tunsvc::state()!=tunsvc::State::Running { return Err(tunsvc::NEED_UPDATE.into()); }
+        if !tunsvc::status().await.map_err(e)?.tailscale_supported {return Err(tunsvc::NEED_UPDATE.into());}
+    }
     if s.tun && !tun_allowed() {
         return Err(NEED_ADMIN.into());
     }
@@ -782,8 +836,11 @@ async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
         // Errors (e.g. no profile yet) surface from core.start below.
         let _ = ensure_rule_sets(app, st, false).await;
     }
+    if st.core_intent.ticket().is_none() { return Err("启动已取消".into()); }
     st.core.start(app, &st.store, &s).await.map_err(e)?;
-    apply_selections(&s).await;
+    if tokio::time::timeout(Duration::from_secs(10), apply_selections(&s)).await.is_err() {
+        st.core.push_log(app, "[prism] 恢复节点选择超时，继续监测内核状态".into());
+    }
     if s.core == CoreKind::Singbox {
         let names = core::singbox_unsupported_nodes(&st.store, &s);
         if !names.is_empty() {
@@ -811,10 +868,11 @@ async fn apply_selections(s: &Settings) {
 /// reload API and restarts. A config the core rejects leaves it running the
 /// old one.
 async fn reload_core(app: &AppHandle, st: &AppState) -> Res<()> {
+    let _guard = st.lifecycle.lock().await;
     let s = st.settings();
     match st.core.running().await {
         None => return Ok(()),
-        Some(kind) if kind != s.core || kind == CoreKind::Singbox => return start(app, st).await,
+        Some(kind) if kind != s.core || kind == CoreKind::Singbox => return start_locked(app, st).await,
         Some(_) => {}
     }
     let cfg = core::write_runtime_config(&st.store, &s).map_err(e)?;
@@ -824,7 +882,9 @@ async fn reload_core(app: &AppHandle, st: &AppState) -> Res<()> {
     core::api(&s, "PUT", "/configs", Some(json!({ "path": cfg.path.to_string_lossy() })))
         .await
         .map_err(|err| format!("内核未能加载新配置，仍在使用旧配置: {err:#}"))?;
-    apply_selections(&s).await;
+    if tokio::time::timeout(Duration::from_secs(10), apply_selections(&s)).await.is_err() {
+        st.core.push_log(app, "[prism] 恢复节点选择超时，继续监测内核状态".into());
+    }
     note(app, st, "配置已热重载".into());
     let _ = app.emit("core-changed", ());
     refresh_tray(app);
@@ -888,8 +948,11 @@ async fn start_core(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
 
 #[tauri::command]
 async fn stop_core(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
+    st.core_intent.stop();
+    let _guard = st.lifecycle.lock().await;
     st.core.stop().await;
     st.core.push_log(&app, "[prism] 内核已停止".into());
+    drop(_guard);
     if st.settings().system_proxy {
         set_system_proxy(app.clone(), st, false).await?;
     }
@@ -1000,6 +1063,7 @@ async fn install_update(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
     let bytes = updater::download(&app, &update).await.map_err(e)?;
     note(&app, &st, format!("v{} 下载完成，签名校验通过，开始安装", update.version));
     let was_running = st.core.running().await.is_some();
+    st.core_intent.stop();
     st.core.stop().await;
     if st.settings().system_proxy {
         // The setting stays on, so the new version turns it back on.
@@ -1078,6 +1142,7 @@ async fn set_route_rules(app: AppHandle, st: State<'_, AppState>, mut rules: Vec
 /// Turns the kill switch on or off; applies to a running core at once.
 #[tauri::command]
 async fn set_kill_switch(app: AppHandle, st: State<'_, AppState>, enable: bool) -> Res<()> {
+
     if enable && (!cfg!(windows) || tunsvc::state() != tunsvc::State::Running) {
         return Err("断网保护需要 TUN 服务，请先在设置页安装".into());
     }
@@ -1156,6 +1221,7 @@ async fn install_tun_service(app: AppHandle, st: State<'_, AppState>) -> Res<()>
 async fn uninstall_tun_service(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
     let was_running = st.core.running().await.is_some();
     if was_running && core::use_service(&st.settings()) {
+        st.core_intent.stop();
         st.core.stop().await;
     }
     tunsvc::uninstall().await.map_err(e)?;
@@ -1485,6 +1551,7 @@ pub fn run() {
             let app_traffic = apptraffic::AppTraffic::load(store.dir.join("app_traffic.json"));
             let hidden = autostarted && settings.silent_start && link.is_none();
             app.manage(AppState {
+                lifecycle: Default::default(), core_intent: Default::default(), recovery_status: Default::default(),
                 store,
                 settings: Mutex::new(settings),
                 core: CoreManager::default(),
@@ -1503,6 +1570,7 @@ pub fn run() {
                     eprintln!("[prism] hotkey not registered: {f}");
                 }
             }
+            tauri::async_runtime::spawn(watchdog::run(app.handle().clone()));
             tauri::async_runtime::spawn(traffic_sampler(app.handle().clone()));
             tauri::async_runtime::spawn(quality_sampler(app.handle().clone()));
             tauri::async_runtime::spawn(trayspeed::run(app.handle().clone()));
@@ -1600,6 +1668,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            tailscale_status, tailscale_action, tailscale_ping, tailscale_open,
             core_versions,
             save_settings,
             import_profile,
@@ -1684,6 +1753,7 @@ pub fn run() {
             if st.settings().system_proxy {
                 let _ = sysproxy::set(false, "", "");
             }
+            st.core_intent.stop();
             tauri::async_runtime::block_on(st.core.stop());
         }
     });

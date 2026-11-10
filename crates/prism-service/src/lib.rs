@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 pub mod killswitch;
+#[cfg(windows)]
+pub mod tailguard;
 
 pub const SERVICE_NAME: &str = "PrismService";
 #[cfg(windows)]
@@ -154,9 +156,13 @@ pub enum Request {
         files: BTreeMap<String, String>,
         #[serde(default)]
         kill_switch: bool,
+        #[serde(default)]
+        tailscale: bool,
     },
     /// Stops the core and lifts the kill switch.
     Stop,
+    /// Explicit, bounded permission for the verified Tailscale daemon to connect.
+    TailscaleConnect { connect: bool },
     /// Core output lines after sequence number `since`.
     Logs { since: u64 },
 }
@@ -176,6 +182,22 @@ pub struct Status {
     /// The kill switch is on (blocking everything if `running` is false).
     #[serde(default)]
     pub kill_switch: bool,
+    #[serde(default)]
+    pub tailscale_supported: bool,
+    #[serde(default)]
+    pub tailscale: TailscaleProtection,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TailscaleProtection {
+    pub requested: bool,
+    pub verified: bool,
+    pub connected: bool,
+    pub phase: String,
+    pub detail: String,
+    pub interface_index: Option<u32>,
+    pub peer_addresses: usize,
+    pub lease_seconds: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

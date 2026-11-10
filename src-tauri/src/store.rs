@@ -42,6 +42,9 @@ pub struct Settings {
     pub tun: bool,
     /// Latency tests time a warm second request (mihomo unified-delay).
     pub unified_delay: bool,
+    pub dns_privacy: crate::privacy::DnsPrivacy,
+    pub recovery: crate::watchdog::Settings,
+    pub tailscale_bypass: bool,
     pub proxy_bypass: String,
     pub active_profile: Option<String>,
     /// Profiles whose nodes are added to the active one (合并订阅).
@@ -93,6 +96,9 @@ impl Default for Settings {
             webdav: Default::default(),
             tun: false,
             unified_delay: true,
+            dns_privacy: Default::default(),
+            recovery: Default::default(),
+            tailscale_bypass: false,
             proxy_bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*;<local>".into(),
             active_profile: None,
             merge_profiles: Vec::new(),

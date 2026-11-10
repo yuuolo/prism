@@ -311,6 +311,8 @@ pub async fn build(mut profile: Profile, home: &Path, env: &BuildEnv) -> Result<
         stats: env.stats.clone(),
         dns: resolver.clone(),
         find_process: tunnel::FindProcess::parse(&profile.general.find_process_mode),
+        block_ipv6: profile.general.block_ipv6,
+        tailscale_bypass: profile.general.tailscale_bypass,
     });
     Ok(Core {
         general: profile.general,
