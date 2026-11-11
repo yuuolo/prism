@@ -1,8 +1,10 @@
 # Prism 移动端方案
 
-本文定义后续开发范围，不代表已实现移动端。当前正式安装包仅支持 Windows 和 macOS。
+本文定义移动端的交付边界。稳定安装包支持 Windows 和 macOS；Android 已提供 Alpha 测试包，其他移动平台尚未发布。
 
-开发状态：已恢复 Android 精简版开发，独立工程位于 `android/`，JNI 桥位于 `crates/prism-android/`；iOS/iPadOS 与原生鸿蒙暂不开发。当前是验证阶段，构建和模拟器通过不能替代真机稳定性验证。工程说明见 [Android README](../android/README.md)。
+开发状态：Android 精简版 `0.1.0-alpha.1` 已[发布](https://github.com/yuuolo/prism/releases/tag/android-v0.1.0-alpha.1)，工程位于 `android/`，JNI 桥位于 `crates/prism-android/`。ARM64/x86_64、Debug/Release 构建、Lint，以及 Android 17 / API 37.2 / 16 KiB 内存页模拟器的系统 VPN、TCP/UDP DNS、系统解析、TCP/UDP 转发、会话重建、IPv6 阻断和立即重连[验收通过](https://github.com/yuuolo/prism/actions/runs/42991269494)。发布包使用固定本地安卓签名，私钥不上传，GitHub 资产摘要与本地校验一致。构建和模拟器通过不能替代真机稳定性验证。工程说明见 [Android README](../android/README.md)。
+
+后续顺序：Android 测试包完成后继续 iOS/iPadOS 和 HarmonyOS NEXT 原生版；不使用 APK 容器充当原生鸿蒙。iOS 分发目标为 TestFlight，当前尚未开通 Apple Developer Program，尚未具备签名和上传条件。根据 Apple 的 VPN 应用规则，分发主体需要核对组织开发者资格。HarmonyOS NEXT 需验证官方 SDK、VPN 扩展权限、签名及真机条件，尚无可用 HAP 包。
 
 ## 产品边界
 
@@ -43,12 +45,18 @@ Android、iOS/iPadOS、原生鸿蒙各自适配系统 VPN 接口和应用生命�
 
 ## 配置和发布隔离
 
-移动端使用独立设置模型和安装/更新渠道，不复用桌面 TUN 服务、系统路径或桌面安装包更新清单。共享订阅时只导入受支持的节点与规则；不支持的配置明确提示，无法保持关键路由或 DNS 语义时拒绝启用，不静默改成直连。
+移动端使用独立设置模型和安装/更新渠道，不复用桌面 TUN 服务、系统路径或桌面安装包更新清单。共享订阅时仅提取受支持的节点，手机规则独立设置；不支持的配置明确提示，无法保持关键路由或 DNS 语义时拒绝启用，不静默改成直连。
 
 桌面现有功能不因移动端精简而移除。移动端文档和界面仅展示该平台已交付能力，不能将桌面验证结果当作移动端验证结果。
 
 ## 交付门槛
 
-每个平台分别完成真机上的连接、DNS/IPv6 路由、Wi-Fi/蜂窝切换、锁屏、后台挂起、权限撤销和手动断开测试，并检查耗电与内存增长，再发布安装包。
+每个平台在稳定发行前分别完成真机上的连接、DNS/IPv6 路由、Wi-Fi/蜂窝切换、锁屏、后台挂起、权限撤销和手动断开测试，并检查耗电与内存增长。用于真机验证的 Alpha 包可在构建与模拟器验收通过后先分发，发布说明必须区分已经验证的范围和待验证项目。
 
 对于不支持或无法稳定通过验证的可选功能，直接从该平台移除。若基础联网、解析或生命周期本身不稳定，则暂不发布该平台版本，不将自动重启当作稳定性的替代品。
+
+## 官方分发与网络接口参考
+
+- [Apple TestFlight](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/)
+- [Apple VPN 应用规则](https://developer.apple.com/app-store/review/guidelines/#vpn-apps)
+- [HarmonyOS VPN 扩展](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/net-vpnextension/)
