@@ -107,7 +107,7 @@ class MainActivity : Activity() {
         }
     }
     private fun profilesPage() {
-        val state=store.load()
+        val state=try {store.load()} catch (_: Exception) {label("无法读取加密配置，请检查本机存储后重试"); return}
         label("当前保存 ${state.getJSONArray("nodes").length()} 个节点")
         label("仅导入节点。桌面规则、providers、脚本、链式代理和高级传输不会在手机端执行。单独添加的节点会保留，不被订阅更新覆盖。",13f)
         val url=field("HTTPS 订阅地址"); url.setText(state.optString("sourceUrl"))
@@ -115,16 +115,7 @@ class MainActivity : Activity() {
             if(editable()) {
                 val address=url.text.toString().trim()
                 runTask {
-                    val link=try {URL(address)} catch (_: Exception) {throw UserMessage("请输入 HTTPS 订阅地址")}
-                    if(link.protocol!="https" || link.userInfo!=null) throw UserMessage("仅接受无用户名密码的 HTTPS 订阅地址")
-                    val connection=link.openConnection() as HttpsURLConnection
-                    connection.connectTimeout=15000; connection.readTimeout=15000; connection.instanceFollowRedirects=false
-                    try {
-                        if(connection.responseCode!=200) throw UserMessage("订阅请求失败，原配置保留")
-                        val out=java.io.ByteArrayOutputStream()
-                        connection.inputStream.use { input -> val bytes=ByteArray(8192); while(true) { val n=input.read(bytes); if(n<0) break; if(out.size()+n>4*1024*1024) throw UserMessage("订阅超过 4 MiB"); out.write(bytes,0,n) } }
-                        store.import(out.toString("UTF-8"),false,address)
-                    } finally {connection.disconnect()}
+                    store.import(downloadSubscription(address),false,address)
                 }
             }
         }
@@ -146,7 +137,8 @@ class MainActivity : Activity() {
     private fun settingsPage() {
         label("基础分流",20f)
         label("默认全部经所选节点。以下域名后缀或 IPv4 CIDR 可明确设为直连；其他桌面规则不会自动迁移。",13f)
-        val state=store.load(); val rules=state.optJSONArray("direct") ?: JSONArray()
+        val state=try {store.load()} catch (_: Exception) {label("无法读取加密配置，请检查本机存储后重试"); return}
+        val rules=state.optJSONArray("direct") ?: JSONArray()
         for(i in 0 until rules.length()) {
             val rule=rules.getJSONObject(i)
             button("${rule.getString("value")}  · 删除") { if(editable()) {rules.remove(i); state.put("direct",rules); store.save(state); render()} }
@@ -170,6 +162,28 @@ class MainActivity : Activity() {
         label("本地诊断",20f)
         label(PrismVpnService.logs().joinToString("\n").ifEmpty {"暂无运行事件"},13f)
         label("节点和订阅地址使用 Android Keystore 加密存储；不记录节点密钥和订阅凭据。此版本没有云同步、局域网共享或桌面更新通道。",13f)
+    }
+    private fun downloadSubscription(address: String): String {
+        var link=try {URL(address)} catch (_: Exception) {throw UserMessage("请输入 HTTPS 订阅地址")}
+        repeat(4) { attempt ->
+            if(link.protocol!="https" || link.userInfo!=null) throw UserMessage("订阅及重定向仅接受无用户名密码的 HTTPS 地址")
+            val connection=link.openConnection() as HttpsURLConnection
+            connection.connectTimeout=15000; connection.readTimeout=15000; connection.instanceFollowRedirects=false
+            try {
+                val code=connection.responseCode
+                if(code in listOf(301,302,303,307,308)) {
+                    if(attempt==3) throw UserMessage("订阅重定向次数过多")
+                    val location=connection.getHeaderField("Location") ?: throw UserMessage("订阅重定向地址为空")
+                    link=URL(link,location)
+                } else {
+                    if(code!=200) throw UserMessage("订阅请求失败，原配置保留")
+                    val out=java.io.ByteArrayOutputStream()
+                    connection.inputStream.use { input -> val bytes=ByteArray(8192); while(true) { val n=input.read(bytes); if(n<0) break; if(out.size()+n>4*1024*1024) throw UserMessage("订阅超过 4 MiB"); out.write(bytes,0,n) } }
+                    return out.toString("UTF-8")
+                }
+            } finally {connection.disconnect()}
+        }
+        throw UserMessage("订阅请求失败，原配置保留")
     }
     private fun formatBytes(v: Long): String = when {v>=1024*1024 -> "%.1f MiB".format(v/1048576.0); v>=1024 -> "%.1f KiB".format(v/1024.0); else -> "$v B"}
     override fun onResume() {

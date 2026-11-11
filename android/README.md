@@ -25,7 +25,7 @@
 
 最低计划 Android 8.0/API 26，64 位（arm64-v8a；x86_64 用于模拟器）。主要适配和测试目标为 Android 17/API 37。尚需分别验证旧系统和具体厂商设备。
 
-依赖：JDK 17、Android SDK 37、build-tools 36.0.0、NDK 28.2.13676358、Rust stable，以及 arm64/x86_64 Android targets。Gradle Wrapper 和分发包摘要已固定；AGP 9.1.1 使用内置 Kotlin。
+依赖：JDK 17、Android SDK 平台 `37.0`、build-tools `37.0.0`、NDK 28.2.13676358、Rust stable，以及 arm64/x86_64 Android targets。Gradle Wrapper 和分发包摘要已固定；AGP 9.1.1 使用内置 Kotlin。
 
 ```sh
 rustup target add aarch64-linux-android x86_64-linux-android
@@ -37,6 +37,6 @@ bash android/gradlew -p android assembleDebug
 
 产物：`android/app/build/outputs/apk/debug/app-debug.apk`。这是调试签名 APK，不复用桌面更新密钥；正式分发前需要确定持久的 Android 发布签名。不同调试签名不能互相覆盖安装。
 
-CI：`.github/workflows/android.yml` 构建 ARM64 与 x86_64 JNI 库、APK、Lint，并在 Android 17 模拟器进行真实 VPN/DNS/TCP、IPv6 阻断、会话重建和断开测试。测试使用本地 SOCKS 服务，不使用真实订阅或远程账号。模拟器授权只作用于隔离 CI 设备，普通手机仍需要用户确认系统 VPN 对话框。
+CI：`.github/workflows/android.yml` 构建 ARM64 与 x86_64 JNI 库、APK、Lint，并在 Android 17 模拟器进行真实 VPN/DNS/TCP/UDP、IPv6 阻断、会话重建和断开测试。测试使用本地 SOCKS 服务，不使用真实订阅或远程账号。模拟器授权只作用于隔离 CI 设备，普通手机仍需要用户确认系统 VPN 对话框。
 
 在真机完成订阅节点、Wi-Fi/蜂窝切换、锁屏、后台、省电、撤权、内存和耗电验证前，不宣称已达到稳定发布标准。
