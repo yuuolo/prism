@@ -1,7 +1,8 @@
 plugins { id("com.android.application") }
 android {
     namespace = "dev.prism.android"
-    compileSdk = 37
+    compileSdk { version = release(37) { minorApiLevel = 0 } }
+    buildToolsVersion = "37.0.0"
     defaultConfig {
         applicationId = "dev.prism.android"
         minSdk = 26

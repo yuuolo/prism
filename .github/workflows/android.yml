@@ -27,10 +27,11 @@ jobs:
       - uses: gradle/actions/wrapper-validation@v4
       - uses: android-actions/setup-android@v3
         with:
+          cmdline-tools-version: 16111833
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
       - name: SDK and NDK
-        run: sdkmanager 'platforms;android-37' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;28.2.13676358'
       - name: Native build tooling
         run: cargo install cargo-ndk --version 4.0.0 --locked
       - name: Shared mobile policy tests
@@ -65,7 +66,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 37
+          api-level: '37.0'
           arch: x86_64
           target: google_apis
           disable-animations: true
