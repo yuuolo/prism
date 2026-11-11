@@ -292,6 +292,9 @@ mod win {
         let adapter = wintun::Adapter::create(&wintun, "Prism", "Prism", Some(GUID))
             .map_err(|e| anyhow!("create TUN adapter: {e} (TUN mode needs administrator rights)"))?;
         let index = adapter.get_adapter_index().map_err(|e| anyhow!("adapter index: {e}"))?;
+        // Install before publishing TUN routes/DNS. Windows may otherwise
+        // query a LAN DNS server directly through a more-specific route.
+        let dns_guard = if cfg.auto_route { Some(crate::dns_guard::DnsGuard::enable(index)?) } else { None };
         let name = format!("name={index}");
         netsh(&["interface", "ipv4", "set", "address", &name, "source=static", "address=172.19.0.1", "mask=255.255.255.252"])?;
         netsh(&["interface", "ipv4", "set", "subinterface", &index.to_string(), &format!("mtu={MTU}"), "store=active"])?;
@@ -331,6 +334,7 @@ mod win {
         let ws = session.clone();
         tokio::spawn(async move {
             let _keep = adapter; // adapter lives as long as the pump
+            let _dns_guard = dns_guard; // survives reloads, removed on TUN shutdown
             while let Some(p) = out_rx.recv().await {
                 if let Ok(mut pkt) = ws.allocate_send_packet(p.len() as u16) {
                     pkt.bytes_mut().copy_from_slice(&p);

@@ -22,7 +22,7 @@ export interface DnsPrivacy {
   bootstrap: string[];
 }
 export const DEFAULT_DNS_PRIVACY: DnsPrivacy = {
-  enabled: false, via_proxy: true, outbound: "", ipv6: false, block_ipv6: false, fake_ip: true,
+  enabled: true, via_proxy: true, outbound: "", ipv6: false, block_ipv6: false, fake_ip: true,
   nameservers: ["https://1.1.1.1/dns-query"], bootstrap: ["https://223.5.5.5/dns-query"],
 };
 

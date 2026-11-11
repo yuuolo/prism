@@ -18,7 +18,7 @@ pub struct DnsPrivacy {
 impl Default for DnsPrivacy {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             via_proxy: true,
             outbound: String::new(),
             ipv6: false,
@@ -144,6 +144,13 @@ pub fn apply(doc: &mut Value, p: &DnsPrivacy) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn missing_settings_enable_proxy_dns_but_explicit_opt_out_is_preserved() {
+        let defaults: DnsPrivacy = serde_json::from_str("{}").unwrap();
+        assert!(defaults.enabled && defaults.via_proxy);
+        assert_eq!(defaults.nameservers, ["https://1.1.1.1/dns-query"]);
+        assert!(!serde_json::from_str::<DnsPrivacy>(r#"{"enabled":false}"#).unwrap().enabled);
+    }
+    #[test]
     fn privacy_removes_subscription_direct_fallback_and_keeps_tun_ipv6() {
         let mut doc: Value = serde_yaml::from_str("proxies: [{name: test, type: socks5, server: 127.0.0.1, port: 9}]\nproxy-groups: [{name: 节点选择, type: select, proxies: [test]}]\ntun: {enable: true, inet6-address: ['fdfe:dcba:9876::1/126']}\ndns: {enable: true, fallback: [223.5.5.5], nameserver-policy: {'+.test': 119.29.29.29}}\nrules: ['MATCH,节点选择']").unwrap();
         let p = DnsPrivacy {
@@ -174,7 +181,7 @@ mod tests {
     fn disabled_preserves_config_and_invalid_bootstrap_is_rejected() {
         let mut doc: Value = serde_yaml::from_str("proxies: []").unwrap();
         let before = doc.clone();
-        apply(&mut doc, &DnsPrivacy::default()).unwrap();
+        apply(&mut doc, &DnsPrivacy { enabled: false, ..Default::default() }).unwrap();
         assert_eq!(doc, before);
         for url in [
             "http://1.1.1.1/dns-query",

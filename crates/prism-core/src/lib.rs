@@ -11,6 +11,8 @@ pub mod common;
 pub mod config;
 pub mod delay;
 pub mod dns;
+#[cfg(windows)]
+mod dns_guard;
 pub mod domain;
 pub mod geo;
 pub mod http;

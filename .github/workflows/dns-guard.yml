@@ -1,0 +1,35 @@
+name: DNS leak protection
+on:
+  workflow_dispatch:
+  push:
+    branches: [prism-codex]
+    paths:
+      - 'crates/prism-core/src/dns_guard.rs'
+      - 'crates/prism-core/src/tun.rs'
+      - 'scripts/ci/windows-dns-test.ps1'
+      - '.github/workflows/dns-guard.yml'
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dns-guard
+      - name: Build before installing filters
+        run: cargo test -p prism-core --lib --test dns_privacy_routing --no-run --locked
+      - name: Resolver and routing regressions
+        run: cargo test -p prism-core --lib --test dns_privacy_routing --locked
+      - name: Actual DNS socket blocking and cleanup on isolated Windows
+        env:
+          PRISM_DNS_GUARD_TEST: '1'
+        run: cargo test -p prism-core --lib dns_guard::tests::native_dns_blocks_other_apps_and_cleans_up --locked -- --test-threads=1 --nocapture
+      - name: Build standalone core
+        run: cargo build -p prism-core --locked
+      - name: Actual TUN DNS over UDP and TCP
+        shell: pwsh
+        run: ./scripts/ci/windows-dns-test.ps1 -Core (Resolve-Path target/debug/prism-core.exe).Path
