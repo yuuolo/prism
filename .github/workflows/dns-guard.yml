@@ -20,6 +20,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: dns-guard
+          cache-on-failure: true
       - name: Build before installing filters
         run: cargo test -p prism-core --lib --test dns_privacy_routing --no-run --locked
       - name: Resolver and routing regressions

@@ -204,7 +204,7 @@ mod tests {
             "InterNetwork"
         };
         let script = if tcp {
-            format!("$c=[Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::{family});try{{$t=$c.ConnectAsync('{host}',{port});if(!$t.Wait(3000)){{'timeout'}}else{{$t.GetAwaiter().GetResult();'allowed'}}}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};$e.NativeErrorCode}}finally{{$c.Dispose()}}")
+            format!("$c=[Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::{family});try{{$t=$c.ConnectAsync('{host}',{port});if(!$t.Wait(3000)){{'timeout'}}else{{[void]$t.GetAwaiter().GetResult();'allowed'}}}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};$e.NativeErrorCode}}finally{{$c.Dispose()}}")
         } else {
             format!("$c=[Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::{family});try{{[void]$c.Send([byte[]]@(0),1,'{host}',{port});'allowed'}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};$e.NativeErrorCode}}finally{{$c.Dispose()}}")
         };

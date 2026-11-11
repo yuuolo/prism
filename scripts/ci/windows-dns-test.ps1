@@ -44,6 +44,7 @@ try {
   if (!$ready) { throw 'TUN did not become ready' }
   if ((Get-Content -LiteralPath $stdout -Raw) -notmatch 'DNS protection: Windows IPv4/IPv6 TCP/UDP 53') { throw 'DNS enforcement was not installed' }
   foreach ($tcp in @($false, $true)) {
+    Clear-DnsClientCache
     $dnsArgs = @{ Name='dns-guard-test.invalid'; Type='A'; Server='172.19.0.2'; DnsOnly=$true; NoHostsFile=$true; QuickTimeout=$true; ErrorAction='Stop' }
     if ($tcp) { $dnsArgs.TcpOnly = $true }
     $answer = Resolve-DnsName @dnsArgs
