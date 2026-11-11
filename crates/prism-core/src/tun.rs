@@ -5,9 +5,9 @@
 //! TCP streams and UDP datagrams:
 //!   * TCP: the first bytes are sniffed (TLS SNI / HTTP Host) so rules can
 //!     match domains, then the connection goes through the normal tunnel.
-//!   * UDP 53: DNS queries are forwarded upstream over pinned sockets.
-//!   * UDP 443 (QUIC) is dropped so browsers fall back to TCP.
-//!   * Other UDP is relayed only when the rules send it to DIRECT.
+//!   * TCP/UDP 53: queries are handled by the configured DNS resolver.
+//!   * Other UDP follows the selected outbound through the UDP relay.
+//! Windows also prevents ordinary apps sending port 53 outside the TUN.
 //!
 //! auto-route adds 0.0.0.0/1 + 128.0.0.0/1 on the adapter (and ::/1 +
 //! 8000::/1 with `inet6-address`, so IPv6 can't bypass the rules); the
@@ -285,6 +285,43 @@ mod win {
             .ok_or_else(|| anyhow!("wintun.dll not found (put it in {} or next to prism-core)", home.display()))
     }
 
+    fn ready_addresses(index: u32) -> Result<(bool, bool)> {
+        use windows_sys::Win32::{NetworkManagement::IpHelper::*, Networking::WinSock::*};
+        let v6 = ADDR6.parse::<std::net::Ipv6Addr>().unwrap().octets();
+        unsafe {
+            let mut table = std::ptr::null_mut();
+            let code = GetUnicastIpAddressTable(AF_UNSPEC, &mut table);
+            if code != 0 { bail!("read TUN address state: Windows error {code}"); }
+            let mut ready = (false, false);
+            let mut duplicate = false;
+            for row in std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) {
+                if row.InterfaceIndex != index { continue; }
+                let target = match row.Address.si_family {
+                    AF_INET if row.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() == ADDR.octets() => Some(&mut ready.0),
+                    AF_INET6 if row.Address.Ipv6.sin6_addr.u.Byte == v6 => Some(&mut ready.1),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    duplicate |= row.DadState == IpDadStateDuplicate;
+                    *target = row.DadState == IpDadStatePreferred;
+                }
+            }
+            FreeMibTable(table.cast());
+            if duplicate { bail!("TUN address conflict detected on interface {index}"); }
+            Ok(ready)
+        }
+    }
+
+    async fn wait_addresses(index: u32, ipv6: bool) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (v4_ready, v6_ready) = ready_addresses(index)?;
+            if v4_ready && (!ipv6 || v6_ready) { return Ok(()); }
+            if tokio::time::Instant::now() >= deadline { bail!("TUN addresses not ready after 10s (IPv4={v4_ready}, IPv6={v6_ready})"); }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn start(cfg: &TunConfig, home: &Path, hub: Arc<Hub>) -> Result<()> {
         let initial = crate::network::uplink(0)?;
         let phys = initial.index;
@@ -295,6 +332,9 @@ mod win {
         // Install before publishing TUN routes/DNS. Windows may otherwise
         // query a LAN DNS server directly through a more-specific route.
         let dns_guard = if cfg.auto_route { Some(crate::dns_guard::DnsGuard::enable(index)?) } else { None };
+        // Bring the link up before configuring addresses so Windows can
+        // perform duplicate-address detection while configuration proceeds.
+        let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY).map_err(|e| anyhow!("TUN session: {e}"))?);
         let name = format!("name={index}");
         netsh(&["interface", "ipv4", "set", "address", &name, "source=static", "address=172.19.0.1", "mask=255.255.255.252"])?;
         netsh(&["interface", "ipv4", "set", "subinterface", &index.to_string(), &format!("mtu={MTU}"), "store=active"])?;
@@ -310,13 +350,19 @@ mod win {
                 netsh(&["interface", "ipv4", "add", "route", &format!("prefix={prefix}"), &iface, "nexthop=0.0.0.0", "metric=1", "store=active"])?;
             }
         }
-        if cfg.ipv6 {
-            if let Err(e) = ipv6(index, cfg.auto_route) {
-                if hub.core().general.block_ipv6 { bail!("IPv6 protection requires TUN IPv6 routes: {e:#}"); }
-                tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
+        let ipv6_ready_required = if cfg.ipv6 {
+            match ipv6(index, cfg.auto_route) {
+                Ok(()) => true,
+                Err(e) => {
+                    if hub.core().general.block_ipv6 { bail!("IPv6 protection requires TUN IPv6 routes: {e:#}"); }
+                    tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
+                    false
+                }
             }
-        }
-        let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY).map_err(|e| anyhow!("TUN session: {e}"))?);
+        } else { false };
+        // A live Wintun session is insufficient: a Tentative address makes
+        // Windows DNS queries fail and may cause fallback to another adapter.
+        wait_addresses(index, ipv6_ready_required).await?;
         tracing::info!("TUN adapter Prism (if {index}) up at {ADDR}/30, outbound bound to if {phys}, auto-route={}", cfg.auto_route);
 
         // adapter -> stack (wintun reads block, so use a thread)

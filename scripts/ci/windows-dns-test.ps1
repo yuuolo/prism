@@ -48,12 +48,8 @@ try {
   }
   if (!$ready) { throw 'TUN did not become ready' }
   Get-NetIPAddress -InterfaceAlias Prism | Select-Object IPAddress,AddressState | Format-Table | Out-Host
-  $preferred = $false
-  for ($i = 0; $i -lt 10; $i++) {
-    if (Get-NetIPAddress -InterfaceAlias Prism -AddressFamily IPv4 | Where-Object { $_.IPAddress -eq '172.19.0.1' -and $_.AddressState -eq 'Preferred' }) { $preferred = $true; break }
-    Start-Sleep -Seconds 1
-  }
-  if (!$preferred) { throw 'TUN IPv4 address never reached Preferred state' }
+  $addresses = @(Get-NetIPAddress -InterfaceAlias Prism | Where-Object { $_.IPAddress -in @('172.19.0.1','fdfe:dcba:9876::1') })
+  if ($addresses.Count -ne 2 -or @($addresses | Where-Object AddressState -ne 'Preferred').Count) { throw 'core declared TUN ready before both addresses reached Preferred state' }
   if (!$Baseline -and (Get-Content -LiteralPath $stdout -Raw) -notmatch 'DNS protection: Windows IPv4/IPv6 TCP/UDP 53') { throw 'DNS enforcement was not installed' }
   foreach ($tcp in @($false, $true)) {
     Clear-DnsClientCache
