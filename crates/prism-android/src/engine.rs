@@ -82,7 +82,7 @@ pub extern "system" fn Java_dev_prism_android_CoreBridge_start(
         let Ok((profile, reload)) = profile::build(session) else {
             return json!({"error":"节点或直连规则不受支持"});
         };
-        let mut slot = ENGINE.lock().unwrap();
+        let mut slot = ENGINE.lock().unwrap_or_else(|p| p.into_inner());
         if slot.is_some() {
             return json!({"error":"已有连接，请先断开"});
         }
@@ -218,7 +218,7 @@ pub extern "system" fn Java_dev_prism_android_CoreBridge_validateSession(
 #[no_mangle]
 pub extern "system" fn Java_dev_prism_android_CoreBridge_stop(_: JNIEnv, _: JClass) {
     let _ = std::panic::catch_unwind(|| {
-        if let Some(running) = ENGINE.lock().unwrap().take() {
+        if let Some(running) = ENGINE.lock().unwrap_or_else(|p| p.into_inner()).take() {
             running.cancel.cancel();
             let _ = running.join.join();
         }
@@ -227,7 +227,7 @@ pub extern "system" fn Java_dev_prism_android_CoreBridge_stop(_: JNIEnv, _: JCla
 #[no_mangle]
 pub extern "system" fn Java_dev_prism_android_CoreBridge_networkChanged(_: JNIEnv, _: JClass) {
     let _ = std::panic::catch_unwind(|| {
-        if let Some(r) = ENGINE.lock().unwrap().as_ref() {
+        if let Some(r) = ENGINE.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             let _ = r.changes.send(());
         }
     });
@@ -238,7 +238,7 @@ pub extern "system" fn Java_dev_prism_android_CoreBridge_status(
     _: JClass,
 ) -> jstring {
     ffi(&mut env, |_| {
-        let slot = ENGINE.lock().unwrap();
+        let slot = ENGINE.lock().unwrap_or_else(|p| p.into_inner());
         match slot.as_ref() {
             Some(r) => {
                 let s = r.hub.core().tunnel.stats.clone();
