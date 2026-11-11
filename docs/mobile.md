@@ -2,7 +2,7 @@
 
 本文定义后续开发范围，不代表已实现移动端。当前正式安装包仅支持 Windows 和 macOS。
 
-开发状态：暂停移动端开发，优先修复桌面自研 Prism 内核的 DNS 泄露与稳定性问题。
+开发状态：已恢复 Android 精简版开发，独立工程位于 `android/`，JNI 桥位于 `crates/prism-android/`；iOS/iPadOS 与原生鸿蒙暂不开发。当前是验证阶段，构建和模拟器通过不能替代真机稳定性验证。工程说明见 [Android README](../android/README.md)。
 
 ## 产品边界
 

@@ -30,6 +30,12 @@ pub use win::start;
 #[cfg(target_os = "macos")]
 pub use mac::start;
 
+#[cfg(target_os = "android")]
+#[path = "tun_android.rs"]
+mod android;
+#[cfg(target_os = "android")]
+pub use android::attach as attach_android;
+
 /// The adapter's address. DNS on port 53 is always intercepted.
 #[cfg(any(windows, target_os = "macos"))]
 const ADDR: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 1);
@@ -42,12 +48,12 @@ const ADDR6: &str = "fdfe:dcba:9876::1";
 /// IPv6 split default routes.
 #[cfg(any(windows, target_os = "macos"))]
 const ROUTES6: [&str; 2] = ["::/1", "8000::/1"];
-#[cfg(any(windows, target_os = "macos"))]
-const MTU: usize = 9000;
+#[cfg(any(windows, target_os = "macos", target_os = "android"))]
+const MTU: usize = if cfg!(target_os = "android") { 1500 } else { 9000 };
 
 /// The platform-independent part: the userspace stack and what happens to
 /// the connections it produces.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "android"))]
 mod stack {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;

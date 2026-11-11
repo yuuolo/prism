@@ -30,6 +30,22 @@ pub fn bind_interface() -> u32 {
     BIND_IF.load(Ordering::Relaxed)
 }
 
+#[cfg(target_os = "android")]
+type SocketProtector = Arc<dyn Fn(i32) -> io::Result<()> + Send + Sync>;
+#[cfg(target_os = "android")]
+static ANDROID_PROTECTOR: std::sync::RwLock<Option<SocketProtector>> = std::sync::RwLock::new(None);
+/// Installed by the Android VpnService bridge before any core socket opens.
+#[cfg(target_os = "android")]
+pub fn set_android_protector(protector: Option<SocketProtector>) {
+    *ANDROID_PROTECTOR.write().unwrap() = protector;
+}
+#[cfg(target_os = "android")]
+fn protect_android(fd: i32) -> io::Result<()> {
+    let protector = ANDROID_PROTECTOR.read().unwrap().clone()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "Android VPN socket protector unavailable"))?;
+    protector(fd)
+}
+
 #[cfg(windows)]
 fn pin(sock: std::os::windows::io::RawSocket, v6: bool, index: u32) -> io::Result<()> {
     use windows_sys::Win32::Networking::WinSock::{setsockopt, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IP_UNICAST_IF};
@@ -106,13 +122,22 @@ fn pin_index(peer: &SocketAddr) -> io::Result<u32> {
 }
 
 async fn connect_addr(addr: SocketAddr) -> io::Result<TcpStream> {
+    #[cfg(target_os = "android")]
+    let s = {
+        let socket = if addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+        protect_android(raw(&socket))?;
+        socket.connect(addr).await?
+    };
+    #[cfg(not(target_os = "android"))]
+    let s = {
     let index = pin_index(&addr)?;
-    let s = if index == 0 {
+    if index == 0 {
         TcpStream::connect(addr).await?
     } else {
         let sock = if addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
         pin(raw(&sock), addr.is_ipv6(), index)?;
         sock.connect(addr).await?
+    }
     };
     let _ = s.set_nodelay(true);
     Ok(s)
@@ -144,7 +169,7 @@ async fn resolve_inner(host: &str, port: u16, proxy: bool) -> io::Result<Vec<Soc
         let ips = if proxy { r.lookup_proxy(h).await? } else { r.lookup(h).await? };
         return Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect());
     }
-    if bind_interface() != 0 {
+    if bind_interface() != 0 || cfg!(target_os = "android") {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "DNS REJECT: TUN resolver unavailable; system DNS fallback refused"));
     }
     let addrs: Vec<SocketAddr> = tokio::time::timeout(Duration::from_secs(10), tokio::net::lookup_host((h, port)))
@@ -180,6 +205,8 @@ async fn connect_resolved(mut addrs: Vec<SocketAddr>) -> io::Result<TcpStream> {
 pub async fn udp_socket(peer: SocketAddr) -> io::Result<UdpSocket> {
     let bind: SocketAddr = if peer.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
     let s = UdpSocket::bind(bind).await?;
+    #[cfg(target_os = "android")]
+    protect_android(raw(&s))?;
     let index = pin_index(&peer)?;
     if index != 0 {
         pin(raw(&s), peer.is_ipv6(), index)?;

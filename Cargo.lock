@@ -4154,6 +4154,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "prism-android"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "ipnet",
+ "jni 0.21.1",
+ "libc",
+ "prism-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "prism-core"
 version = "0.2.10"
 dependencies = [
