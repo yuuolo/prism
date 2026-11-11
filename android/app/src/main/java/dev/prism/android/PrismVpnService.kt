@@ -67,7 +67,7 @@ class PrismVpnService : VpnService() {
                 check(!result.has("error"))
                 if (ticket != generation.get()) { cleanup(); return@execute }
                 main.post {
-                    if (ticket == generation.get() && !destroyed) { publish("已连接"); observeNetworks() }
+                    publishWhenNetworkReady(ticket,SystemClock.elapsedRealtime()+10000)
                 }
             } catch (_: Throwable) {
                 cleanup()
@@ -75,6 +75,21 @@ class PrismVpnService : VpnService() {
             }
         }
         return START_NOT_STICKY
+    }
+    private fun publishWhenNetworkReady(ticket: Int, deadline: Long) {
+        if (ticket != generation.get() || destroyed) return
+        // establish() and native startup can finish before Android has applied
+        // the UID routes. A socket opened then stays on the physical network.
+        val manager=getSystemService(ConnectivityManager::class.java)
+        val network=manager.activeNetwork
+        val capabilities=network?.let {manager.getNetworkCapabilities(it)}
+        val link=network?.let {manager.getLinkProperties(it)}
+        if(capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN)==true &&
+            link?.dnsServers?.any {it.hostAddress=="172.19.0.2"}==true) {
+            publish("已连接"); observeNetworks()
+        } else if(SystemClock.elapsedRealtime()<deadline) {
+            main.postDelayed({publishWhenNetworkReady(ticket,deadline)},100)
+        } else disconnect("系统尚未完成 VPN 路由配置，请重试")
     }
     private fun observeNetworks() {
         if (callback != null) return
