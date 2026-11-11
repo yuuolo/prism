@@ -77,7 +77,9 @@ class VpnSmokeTest {
             val input=DataInputStream(s.getInputStream()); val answer=ByteArray(input.readUnsignedShort()); input.readFully(answer); fakeIp(answer)
         } else DatagramSocket().use {s ->
             s.soTimeout=5000; s.send(DatagramPacket(q,q.size,InetAddress.getByName("172.19.0.2"),53))
-            val result=DatagramPacket(ByteArray(4096),4096); s.receive(result); fakeIp(result.data.copyOf(result.length))
+            val result=DatagramPacket(ByteArray(4096),4096)
+            try {s.receive(result)} catch (e: SocketTimeoutException) {throw AssertionError("DNS timeout; native status: ${CoreBridge.status()}",e)}
+            fakeIp(result.data.copyOf(result.length))
         }
     }
     private fun http() {Socket().use {s ->

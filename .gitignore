@@ -6,6 +6,7 @@ src-tauri/binaries/
 *.log
 android/.gradle/
 android/local.properties
+android/.signing/
 android/**/build/
 android/app/src/main/jniLibs/
 *.keystore

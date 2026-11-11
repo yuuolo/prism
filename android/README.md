@@ -35,7 +35,9 @@ bash scripts/android/build-native.sh
 bash android/gradlew -p android assembleDebug
 ```
 
-产物：`android/app/build/outputs/apk/debug/app-debug.apk`。这是调试签名 APK，不复用桌面更新密钥；正式分发前需要确定持久的 Android 发布签名。不同调试签名不能互相覆盖安装。
+调试产物：`android/app/build/outputs/apk/debug/app-debug.apk`。CI 另行构建 Release 未签名 APK，正式对外的 Alpha 安装包在本机使用固定的 Android 私钥签名，再运行 `apksigner verify` 后发布；不上传签名私钥和密码，不复用桌面更新密钥。调试签名与发布签名不同，不能互相覆盖安装。
+
+本机签名材料位于被 Git 忽略的 `android/.signing/`，应保留离线备份，后续版本沿用同一个签名。CI 的未签名 APK 不能直接安装。
 
 CI：`.github/workflows/android.yml` 构建 ARM64 与 x86_64 JNI 库、APK、Lint，并在 Android 17 模拟器进行真实 VPN/DNS/TCP/UDP、IPv6 阻断、会话重建和断开测试。测试使用本地 SOCKS 服务，不使用真实订阅或远程账号。模拟器授权只作用于隔离 CI 设备，普通手机仍需要用户确认系统 VPN 对话框。
 

@@ -1,4 +1,5 @@
 use crate::hub::Hub;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     io,
     os::fd::{AsRawFd, OwnedFd},
@@ -6,6 +7,15 @@ use std::{
 };
 use tokio::{io::unix::AsyncFd, sync::mpsc};
 use tokio_util::sync::CancellationToken;
+
+static RECEIVED: AtomicU64 = AtomicU64::new(0);
+static SENT: AtomicU64 = AtomicU64::new(0);
+pub fn packet_counts() -> (u64, u64) {
+    (
+        RECEIVED.load(Ordering::Relaxed),
+        SENT.load(Ordering::Relaxed),
+    )
+}
 
 /// The caller owns a duplicate of the VpnService packet fd; never close Java's copy.
 pub fn attach(
@@ -20,6 +30,8 @@ pub fn attach(
         return Err(io::Error::last_os_error().into());
     }
     let device = Arc::new(AsyncFd::new(fd)?);
+    RECEIVED.store(0, Ordering::Relaxed);
+    SENT.store(0, Ordering::Relaxed);
     let (input, from_device) = mpsc::channel(256);
     let (to_device, mut output) = mpsc::channel::<Vec<u8>>(256);
     super::stack::run(&hub.core().general.tun, hub.clone(), from_device, to_device)?;
@@ -48,10 +60,13 @@ pub fn attach(
                     Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Ok(Err(e)) => return Err::<(), anyhow::Error>(e.into()),
                     Ok(Ok(0)) => anyhow::bail!("Android TUN descriptor closed"),
-                    Ok(Ok(n)) => input
-                        .send(bytes[..n].to_vec())
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Android packet stack stopped"))?,
+                    Ok(Ok(n)) => {
+                        RECEIVED.fetch_add(1, Ordering::Relaxed);
+                        input
+                            .send(bytes[..n].to_vec())
+                            .await
+                            .map_err(|_| anyhow::anyhow!("Android packet stack stopped"))?;
+                    }
                 }
             }
         };
@@ -76,7 +91,10 @@ pub fn attach(
                         Err(_) => continue,
                         Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
                         Ok(Err(e)) => return Err::<(), anyhow::Error>(e.into()),
-                        Ok(Ok(n)) if n == packet.len() => break,
+                        Ok(Ok(n)) if n == packet.len() => {
+                            SENT.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
                         _ => anyhow::bail!("short Android TUN packet write"),
                     }
                 }

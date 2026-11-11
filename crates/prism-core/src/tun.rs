@@ -35,6 +35,8 @@ pub use mac::start;
 mod android;
 #[cfg(target_os = "android")]
 pub use android::attach as attach_android;
+#[cfg(target_os = "android")]
+pub use android::packet_counts as android_packet_counts;
 
 /// The adapter's address. DNS on port 53 is always intercepted.
 #[cfg(any(windows, target_os = "macos"))]

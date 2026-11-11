@@ -242,7 +242,8 @@ pub extern "system" fn Java_dev_prism_android_CoreBridge_status(
         match slot.as_ref() {
             Some(r) => {
                 let s = r.hub.core().tunnel.stats.clone();
-                json!({"running":r.alive.load(Ordering::Acquire),"upload":s.upload.load(Ordering::Relaxed),"download":s.download.load(Ordering::Relaxed)})
+                let (received, sent) = prism_core::tun::android_packet_counts();
+                json!({"running":r.alive.load(Ordering::Acquire),"upload":s.upload.load(Ordering::Relaxed),"download":s.download.load(Ordering::Relaxed),"tunReceived":received,"tunSent":sent})
             }
             None => json!({"running":false,"upload":0,"download":0}),
         }
