@@ -23,10 +23,8 @@ class MainActivity : Activity() {
     private var counters: TextView? = null
     private var connect: Button? = null
     private var nodes: Spinner? = null
-    private var registered = false
     @Volatile private var busy = false
     private var nodeCount = 0
-    private val receiver = object : BroadcastReceiver() { override fun onReceive(c: Context?, i: Intent?) { updateStatus() } }
     private val tick = object : Runnable { override fun run() { updateStatus(); main.postDelayed(this, 1000) } }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun label(value: String, size: Float = 15f): TextView = TextView(this).apply { text=value; textSize=size; setPadding(0,dp(8),0,dp(8)); root.addView(this) }
@@ -192,14 +190,9 @@ class MainActivity : Activity() {
     private fun formatBytes(v: Long): String = when {v>=1024*1024 -> "%.1f MiB".format(v/1048576.0); v>=1024 -> "%.1f KiB".format(v/1024.0); else -> "$v B"}
     override fun onResume() {
         super.onResume()
-        if(!registered) {
-            if(Build.VERSION.SDK_INT>=33) registerReceiver(receiver,IntentFilter(PrismVpnService.STATE),RECEIVER_NOT_EXPORTED)
-            else registerReceiver(receiver,IntentFilter(PrismVpnService.STATE))
-            registered=true
-        }
         main.post(tick)
     }
-    override fun onPause() { main.removeCallbacks(tick); if(registered) {unregisterReceiver(receiver); registered=false}; super.onPause() }
+    override fun onPause() { main.removeCallbacks(tick); super.onPause() }
     override fun onDestroy() { main.removeCallbacksAndMessages(null); io.shutdownNow(); super.onDestroy() }
     private class UserMessage(message: String) : Exception(message)
 }

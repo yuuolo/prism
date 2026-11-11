@@ -13,7 +13,6 @@ class PrismVpnService : VpnService() {
     companion object {
         const val CONNECT = "dev.prism.android.CONNECT"
         const val DISCONNECT = "dev.prism.android.DISCONNECT"
-        const val STATE = "dev.prism.android.STATE"
         @Volatile var stage = "已断开"
         @Volatile var detail = ""
         private val events = ArrayDeque<String>()
@@ -31,7 +30,6 @@ class PrismVpnService : VpnService() {
     private var destroyed = false
     private fun publish(value: String, message: String = "") {
         stage = value; detail = message; log(if (message.isEmpty()) value else "$value：$message")
-        sendBroadcast(Intent(STATE).setPackage(packageName))
     }
     override fun onCreate() {
         super.onCreate()
