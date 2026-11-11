@@ -186,17 +186,27 @@ impl DnsGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{net::UdpSocket, process::Command};
+    use std::{
+        io,
+        net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket},
+        process::Command,
+        time::Duration,
+    };
     fn same_guid(a: GUID, b: GUID) -> bool {
         (a.data1, a.data2, a.data3, a.data4) == (b.data1, b.data2, b.data3, b.data4)
     }
-    fn external_probe(port: u16, tcp: bool) -> String {
-        // No DNS names or user data: TEST-NET destination, one invalid byte.
-        // A different executable must not inherit the core's AppID exception.
-        let script = if tcp {
-            format!("$c=[Net.Sockets.TcpClient]::new();try{{$t=$c.ConnectAsync('192.0.2.1',{port});if(!$t.Wait(3000)){{'timeout'}}else{{$t.GetAwaiter().GetResult();'allowed'}}}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};$e.NativeErrorCode}}finally{{$c.Dispose()}}")
+    fn external_probe(host: &str, port: u16, tcp: bool) -> String {
+        // A different executable must not inherit the core AppID exception.
+        // All probes stay on loopback; no DNS names or packets leave the runner.
+        let family = if host.contains(':') {
+            "InterNetworkV6"
         } else {
-            format!("$c=[Net.Sockets.UdpClient]::new();try{{[void]$c.Send([byte[]]@(0),1,'192.0.2.1',{port});'allowed'}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};$e.NativeErrorCode}}finally{{$c.Dispose()}}")
+            "InterNetwork"
+        };
+        let script = if tcp {
+            format!("$c=[Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::{family});try{{$t=$c.ConnectAsync('{host}',{port});if(!$t.Wait(3000)){{'timeout'}}else{{$t.GetAwaiter().GetResult();'allowed'}}}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};$e.NativeErrorCode}}finally{{$c.Dispose()}}")
+        } else {
+            format!("$c=[Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::{family});try{{[void]$c.Send([byte[]]@(0),1,'{host}',{port});'allowed'}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};$e.NativeErrorCode}}finally{{$c.Dispose()}}")
         };
         let out = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -207,7 +217,62 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8_lossy(&out.stdout).trim().into()
+        let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            ["allowed", "10013", "timeout"].contains(&result.as_str()),
+            "unexpected probe failure: {result}"
+        );
+        result
+    }
+    struct Receiver {
+        host: &'static str,
+        udp: UdpSocket,
+        tcp: TcpListener,
+    }
+    impl Receiver {
+        fn new(host: &'static str) -> Self {
+            let addr = SocketAddr::new(host.parse().unwrap(), 53);
+            let udp = UdpSocket::bind(addr).unwrap();
+            udp.set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let tcp = TcpListener::bind(addr).unwrap();
+            tcp.set_nonblocking(true).unwrap();
+            Self { host, udp, tcp }
+        }
+        fn check_udp(&self, delivered: bool) {
+            let result = self.udp.recv(&mut [0u8; 16]);
+            if delivered {
+                assert_eq!(result.unwrap(), 1, "{} UDP must arrive", self.host);
+            } else {
+                assert!(
+                    matches!(
+                        result.unwrap_err().kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ),
+                    "{} UDP must be blocked",
+                    self.host
+                );
+            }
+        }
+        fn check_tcp(&self, delivered: bool) {
+            let result = self.tcp.accept();
+            if delivered {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock,
+                    "{} TCP must be blocked",
+                    self.host
+                );
+            }
+        }
+        fn external(&self, delivered: bool) {
+            external_probe(self.host, 53, false);
+            self.check_udp(delivered);
+            external_probe(self.host, 53, true);
+            self.check_tcp(delivered);
+        }
     }
     #[test]
     fn native_dns_blocks_other_apps_and_cleans_up() {
@@ -215,7 +280,10 @@ mod tests {
         if std::env::var("PRISM_DNS_GUARD_TEST").as_deref() != Ok("1") {
             return;
         }
-        assert_eq!(external_probe(53, false), "allowed");
+        let receivers = [Receiver::new("127.0.0.1"), Receiver::new("::1")];
+        for r in &receivers {
+            r.external(true);
+        }
         let guard = DnsGuard::install(777, &std::env::current_exe().unwrap()).unwrap();
         assert_eq!(guard.ids.len(), 6);
         let mut families = [0, 0];
@@ -260,40 +328,46 @@ mod tests {
             }
         }
         assert_eq!(families, [3, 3]);
-        assert_eq!(
-            external_probe(53, false),
-            "10013",
-            "UDP DNS must fail with WSAEACCES"
-        );
-        assert_eq!(
-            external_probe(53, true),
-            "10013",
-            "TCP DNS must fail with WSAEACCES"
-        );
-        assert_eq!(
-            external_probe(443, false),
-            "allowed",
-            "ordinary traffic is unaffected"
-        );
-        let own = UdpSocket::bind("0.0.0.0:0").unwrap();
-        assert_eq!(
-            own.send_to(&[0], "192.0.2.1:53").unwrap(),
-            1,
-            "core bootstrap remains possible"
-        );
+        for r in &receivers {
+            r.external(false);
+            let ip: IpAddr = r.host.parse().unwrap();
+            let other = UdpSocket::bind(SocketAddr::new(ip, 0)).unwrap();
+            other
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            assert_eq!(
+                external_probe(r.host, other.local_addr().unwrap().port(), false),
+                "allowed"
+            );
+            assert_eq!(
+                other.recv(&mut [0u8; 16]).unwrap(),
+                1,
+                "ordinary traffic is unaffected"
+            );
+            // The core can still resolve configured bootstrap endpoints.
+            let own = UdpSocket::bind(SocketAddr::new(ip, 0)).unwrap();
+            own.send_to(&[0], SocketAddr::new(ip, 53)).unwrap();
+            r.check_udp(true);
+            let _tcp = TcpStream::connect(SocketAddr::new(ip, 53)).unwrap();
+            r.check_tcp(true);
+        }
         drop(guard);
-        assert_eq!(
-            external_probe(53, false),
-            "allowed",
-            "closing the session must restore DNS"
-        );
-        let index = crate::network::uplink(0).unwrap().index;
+        for r in &receivers {
+            r.external(true);
+        }
+        let mut index = 0;
+        let addr = socket2::SockAddr::from("127.0.0.1:53".parse::<SocketAddr>().unwrap());
+        check("loopback route", unsafe {
+            windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterfaceEx(
+                addr.as_ptr().cast(),
+                &mut index,
+            )
+        })
+        .unwrap();
         let on_interface = DnsGuard::enable(index).unwrap();
-        assert_eq!(
-            external_probe(53, false),
-            "allowed",
-            "the specified interface must remain usable"
-        );
+        for r in &receivers {
+            r.external(true);
+        }
         drop(on_interface);
     }
 }

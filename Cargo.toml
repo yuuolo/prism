@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/prism-core", "crates/prism-service", "src-tauri"]
 
 [workspace.package]
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 license = "MIT"
 
