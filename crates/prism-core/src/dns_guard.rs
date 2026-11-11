@@ -57,10 +57,10 @@ impl DnsGuard {
             windows_sys::Win32::NetworkManagement::IpHelper::GetIfEntry2(&mut row)
         })?;
         let exe = std::env::current_exe().context("DNS protection executable")?;
-        Self::install(unsafe { row.InterfaceLuid.Value }, &exe)
+        Self::install(index, &exe)
     }
-    fn install(mut luid: u64, exe: &Path) -> Result<Self> {
-        anyhow::ensure!(luid != 0, "DNS protection requires a TUN interface");
+    fn install(index: u32, exe: &Path) -> Result<Self> {
+        anyhow::ensure!(index != 0, "DNS protection requires a TUN interface");
         let mut engine = std::ptr::null_mut();
         let session = FWPM_SESSION0 {
             flags: FWPM_SESSION_FLAG_DYNAMIC,
@@ -134,10 +134,13 @@ impl DnsGuard {
                         14,
                         vec![
                             port(),
+                            // The SDK aliases LOCAL_INTERFACE_INDEX to this
+                            // condition. Match the routed interface index,
+                            // rather than the source address's interface LUID.
                             condition(
-                                FWPM_CONDITION_IP_LOCAL_INTERFACE,
-                                FWP_UINT64,
-                                FWP_CONDITION_VALUE0_0 { uint64: &mut luid },
+                                FWPM_CONDITION_INTERFACE_INDEX,
+                                FWP_UINT32,
+                                FWP_CONDITION_VALUE0_0 { uint32: index },
                             ),
                         ],
                     ),
@@ -178,7 +181,7 @@ impl DnsGuard {
         }
         result?;
         check("commit filters", unsafe { FwpmTransactionCommit0(engine) })?;
-        tracing::info!("DNS protection: Windows IPv4/IPv6 TCP/UDP 53 restricted to TUN interface LUID {luid} and core upstream sockets");
+        tracing::info!("DNS protection: Windows IPv4/IPv6 TCP/UDP 53 restricted to TUN interface {index} and core upstream sockets");
         Ok(guard)
     }
 }
@@ -314,9 +317,9 @@ mod tests {
                     assert_eq!(conditions.len(), 2);
                     if let Some(interface) = conditions
                         .iter()
-                        .find(|c| same_guid(c.fieldKey, FWPM_CONDITION_IP_LOCAL_INTERFACE))
+                        .find(|c| same_guid(c.fieldKey, FWPM_CONDITION_INTERFACE_INDEX))
                     {
-                        assert_eq!(*interface.conditionValue.Anonymous.uint64, 777);
+                        assert_eq!(interface.conditionValue.Anonymous.uint32, 777);
                     } else {
                         assert!(conditions
                             .iter()
