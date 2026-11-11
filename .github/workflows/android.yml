@@ -53,8 +53,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The runner's preinstalled command-line tools can predate minor SDK levels.
+      ANDROID_HOME: ${{ runner.temp }}/prism-android-sdk
+      ANDROID_SDK_ROOT: ${{ runner.temp }}/prism-android-sdk
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: actions/download-artifact@v4
         with:
           name: prism-android-alpha
