@@ -104,6 +104,9 @@ class VpnSmokeTest {
                 await("已断开")
             }
             assertFalse(JSONObject(CoreBridge.status()).getBoolean("running"))
+            context.startForegroundService(Intent(context,PrismVpnService::class.java).setAction(PrismVpnService.CONNECT))
+            try { await("已连接"); dns(false); http() }
+            finally { context.startService(Intent(context,PrismVpnService::class.java).setAction(PrismVpnService.DISCONNECT)); await("已断开") }
         }
     }
 }

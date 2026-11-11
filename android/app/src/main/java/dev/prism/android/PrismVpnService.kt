@@ -17,10 +17,13 @@ class PrismVpnService : VpnService() {
         @Volatile var stage = "已断开"
         @Volatile var detail = ""
         private val events = ArrayDeque<String>()
+        // Serialize across Service instances: old onDestroy cleanup must
+        // finish before a newly created Service can start another core.
+        private val engineSerial = Executors.newSingleThreadExecutor()
         @Synchronized fun logs() = events.toList()
         @Synchronized private fun log(value: String) { events.addFirst(value); while (events.size > 30) events.removeLast() }
     }
-    private val serial = Executors.newSingleThreadExecutor()
+    private val serial get() = engineSerial
     private val main = Handler(Looper.getMainLooper())
     private val generation = AtomicInteger()
     private var descriptor: ParcelFileDescriptor? = null
@@ -109,8 +112,8 @@ class PrismVpnService : VpnService() {
     override fun onDestroy() {
         destroyed = true; generation.incrementAndGet()
         callback?.let { runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } }; callback = null
-        serial.execute { cleanup() }; serial.shutdown()
-        publish("已断开")
+        serial.execute { cleanup() }
+        if (stage != "连接失败") publish("已断开", detail)
         super.onDestroy()
     }
 }
