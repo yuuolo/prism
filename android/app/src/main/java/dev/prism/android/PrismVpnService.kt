@@ -65,9 +65,10 @@ class PrismVpnService : VpnService() {
                 descriptor = fd
                 val result = JSONObject(CoreBridge.start(fd.fd, config, filesDir.absolutePath, this))
                 check(!result.has("error"))
+                waitForVpnRouting(ticket)
                 if (ticket != generation.get()) { cleanup(); return@execute }
                 main.post {
-                    publishWhenNetworkReady(ticket,SystemClock.elapsedRealtime()+10000)
+                    if (ticket == generation.get() && !destroyed) { publish("已连接"); observeNetworks() }
                 }
             } catch (_: Throwable) {
                 cleanup()
@@ -76,20 +77,38 @@ class PrismVpnService : VpnService() {
         }
         return START_NOT_STICKY
     }
-    private fun publishWhenNetworkReady(ticket: Int, deadline: Long) {
-        if (ticket != generation.get() || destroyed) return
-        // establish() and native startup can finish before Android has applied
-        // the UID routes. A socket opened then stays on the physical network.
+    private fun waitForVpnRouting(ticket: Int) {
+        // establish() finishes before UID routes are applied. During reconnect
+        // activeNetwork may still describe the old VPN, so also prove a packet
+        // can travel through this running core and back before reporting ready.
         val manager=getSystemService(ConnectivityManager::class.java)
-        val network=manager.activeNetwork
-        val capabilities=network?.let {manager.getNetworkCapabilities(it)}
-        val link=network?.let {manager.getLinkProperties(it)}
-        if(capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN)==true &&
-            link?.dnsServers?.any {it.hostAddress=="172.19.0.2"}==true) {
-            publish("已连接"); observeNetworks()
-        } else if(SystemClock.elapsedRealtime()<deadline) {
-            main.postDelayed({publishWhenNetworkReady(ticket,deadline)},100)
-        } else disconnect("系统尚未完成 VPN 路由配置，请重试")
+        val deadline=SystemClock.elapsedRealtime()+10000
+        while(SystemClock.elapsedRealtime()<deadline) {
+            check(ticket==generation.get())
+            val network=manager.activeNetwork
+            val capabilities=network?.let {manager.getNetworkCapabilities(it)}
+            val link=network?.let {manager.getLinkProperties(it)}
+            if(capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN)==true &&
+                link?.dnsServers?.any {it.hostAddress=="172.19.0.2"}==true) {
+                val bytes=java.io.ByteArrayOutputStream()
+                java.io.DataOutputStream(bytes).apply {
+                    writeShort(ticket and 65535); writeShort(0x0100); writeShort(1); repeat(3) {writeShort(0)}
+                    "ready-${SystemClock.elapsedRealtime()}.prism.invalid".split('.').forEach {part -> writeByte(part.length); write(part.toByteArray(Charsets.US_ASCII))}
+                    writeByte(0); writeShort(1); writeShort(1)
+                }
+                val query=bytes.toByteArray()
+                val ready=runCatching {java.net.DatagramSocket().use {socket ->
+                    socket.soTimeout=500
+                    socket.send(java.net.DatagramPacket(query,query.size,java.net.InetAddress.getByName("172.19.0.2"),53))
+                    val answer=java.net.DatagramPacket(ByteArray(4096),4096); socket.receive(answer)
+                    answer.length>=16 && answer.data[0]==query[0] && answer.data[1]==query[1] &&
+                        (answer.data[answer.length-4].toInt() and 255)==198 && (answer.data[answer.length-3].toInt() and 255)==18
+                }}.getOrDefault(false)
+                if(ready) return
+            }
+            SystemClock.sleep(100)
+        }
+        error("VPN routes are not ready")
     }
     private fun observeNetworks() {
         if (callback != null) return
