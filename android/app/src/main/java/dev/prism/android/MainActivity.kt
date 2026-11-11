@@ -34,7 +34,11 @@ class MainActivity : Activity() {
     private fun button(value: String, action: () -> Unit): Button = Button(this).apply { text=value; setOnClickListener { action() }; root.addView(this,LinearLayout.LayoutParams(-1,-2)) }
     private fun message(value: String) { Toast.makeText(this,value,Toast.LENGTH_LONG).show() }
     private fun idle() = PrismVpnService.stage !in listOf("已连接","正在连接","正在断开")
-    private fun editable(): Boolean { if (!idle()) { message("修改配置前请先断开"); return false }; return true }
+    private fun editable(): Boolean {
+        if (busy) { message("请等待当前操作完成"); return false }
+        if (!idle()) { message("修改配置前请先断开"); return false }
+        return true
+    }
     private fun runTask(action: () -> String) {
         if (busy) { message("请等待当前操作完成"); return }
         busy=true; updateStatus()
@@ -100,7 +104,7 @@ class MainActivity : Activity() {
         status?.text=stage + if(PrismVpnService.detail.isEmpty()) "" else "\n${PrismVpnService.detail}"
         connect?.text=when(stage) {"已连接","正在连接" -> "断开"; "正在断开" -> "正在断开"; else -> "连接"}
         connect?.isEnabled=stage!="正在断开" && (nodeCount>0 || !idle()) && (!busy || !idle())
-        nodes?.isEnabled=idle() && nodeCount>0
+        nodes?.isEnabled=idle() && nodeCount>0 && !busy
         if(stage=="已连接") runCatching {
             val stats=JSONObject(CoreBridge.status())
             counters?.text="↑ ${formatBytes(stats.optLong("upload"))}    ↓ ${formatBytes(stats.optLong("download"))}"
