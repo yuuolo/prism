@@ -1,5 +1,5 @@
 # Disposable elevated Windows runner only. Installs a real TUN for this test.
-param([Parameter(Mandatory=$true)][string]$Core)
+param([Parameter(Mandatory=$true)][string]$Core, [switch]$Baseline)
 $ErrorActionPreference = 'Stop'
 $testDir = Join-Path $env:RUNNER_TEMP 'prism-dns-test'
 New-Item -ItemType Directory -Path $testDir -Force | Out-Null
@@ -27,6 +27,11 @@ hosts:
 proxies: []
 rules: ['MATCH,DIRECT']
 '@ | Set-Content -LiteralPath $config -Encoding utf8
+if ($Baseline) {
+  # The existing auto-route=false mode creates the same connected TUN
+  # subnet without installing DNS enforcement. Use it as a routing baseline.
+  (Get-Content -LiteralPath $config -Raw).Replace('auto-route: true','auto-route: false') | Set-Content -LiteralPath $config -Encoding utf8
+}
 $stdout = Join-Path $testDir 'core.log'
 $stderr = Join-Path $testDir 'core-error.log'
 $process = $null
@@ -42,7 +47,14 @@ try {
     Start-Sleep -Seconds 1
   }
   if (!$ready) { throw 'TUN did not become ready' }
-  if ((Get-Content -LiteralPath $stdout -Raw) -notmatch 'DNS protection: Windows IPv4/IPv6 TCP/UDP 53') { throw 'DNS enforcement was not installed' }
+  Get-NetIPAddress -InterfaceAlias Prism | Select-Object IPAddress,AddressState | Format-Table | Out-Host
+  $preferred = $false
+  for ($i = 0; $i -lt 10; $i++) {
+    if (Get-NetIPAddress -InterfaceAlias Prism -AddressFamily IPv4 | Where-Object { $_.IPAddress -eq '172.19.0.1' -and $_.AddressState -eq 'Preferred' }) { $preferred = $true; break }
+    Start-Sleep -Seconds 1
+  }
+  if (!$preferred) { throw 'TUN IPv4 address never reached Preferred state' }
+  if (!$Baseline -and (Get-Content -LiteralPath $stdout -Raw) -notmatch 'DNS protection: Windows IPv4/IPv6 TCP/UDP 53') { throw 'DNS enforcement was not installed' }
   foreach ($tcp in @($false, $true)) {
     Clear-DnsClientCache
     $dnsArgs = @{ Name='dns-guard-test.invalid'; Type='A'; Server='172.19.0.2'; DnsOnly=$true; NoHostsFile=$true; QuickTimeout=$true; ErrorAction='Stop' }

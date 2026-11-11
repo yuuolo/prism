@@ -33,4 +33,6 @@ jobs:
         run: cargo build -p prism-core --locked
       - name: Actual TUN DNS over UDP and TCP
         shell: pwsh
-        run: ./scripts/ci/windows-dns-test.ps1 -Core (Resolve-Path target/debug/prism-core.exe).Path
+        run: |
+          ./scripts/ci/windows-dns-test.ps1 -Core (Resolve-Path target/debug/prism-core.exe).Path -Baseline
+          ./scripts/ci/windows-dns-test.ps1 -Core (Resolve-Path target/debug/prism-core.exe).Path
