@@ -4,7 +4,7 @@
 
 **[使用手册](docs/manual.md)**：安装与界面说明、系统代理与 TUN、订阅格式、配置语法（Clash YAML / 分享链接 / sing-box）、命令行与常见问题。
 
-**移动端**：已发布独立的 [Android 0.2.0-beta.1](https://github.com/yuuolo/prism/releases/tag/android-v0.2.0-beta.1)，包含新版界面、多订阅与节点管理、升级通知和校验安装。Alpha 用户先手动覆盖安装一次，此后可收到升级提醒。iOS/iPadOS 与 HarmonyOS NEXT 暂停。范围与验证状态见 [移动端方案](docs/mobile.md)。
+**移动端**：已迁移到独立仓库 [prism-phone](https://github.com/yuuolo/prism-phone)，安卓功能、构建、问题反馈及后续发布在该仓库维护。现有 [Android 0.2.0-beta.1](https://github.com/yuuolo/prism/releases/tag/android-v0.2.0-beta.1) 仍可安装；旧安卓升级入口继续提供兼容更新。iOS/iPadOS 与 HarmonyOS NEXT 暂停。详见 [迁移说明](docs/mobile.md)。
 
 ```
 ┌──────────── Prism GUI (Tauri 2 + React) ────────────┐

@@ -2,7 +2,7 @@ name: Tailscale protection
 on:
   workflow_dispatch:
   push:
-    branches: [prism-codex]
+    branches: [master]
     paths:
       - 'crates/prism-service/**'
       - '.github/workflows/tailscale-guard.yml'

@@ -2,7 +2,7 @@ name: DNS leak protection
 on:
   workflow_dispatch:
   push:
-    branches: [prism-codex]
+    branches: [master]
     paths:
       - 'crates/prism-core/src/dns_guard.rs'
       - 'crates/prism-core/src/tun.rs'
