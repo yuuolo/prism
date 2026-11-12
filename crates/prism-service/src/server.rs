@@ -38,6 +38,12 @@ struct State {
     core: tokio::sync::Mutex<Option<Running>>,
     #[cfg(windows)]
     kill_switch: Mutex<Option<crate::killswitch::KillSwitch>>,
+    #[cfg(windows)]
+    tail: Mutex<crate::tailguard::Control>,
+    #[cfg(windows)]
+    tail_identity: Mutex<Option<Arc<crate::tailguard::Identity>>>,
+    #[cfg(windows)]
+    tail_refresh: tokio::sync::Mutex<()>,
     logs: Arc<Mutex<Logs>>,
     /// path -> (len, mtime, sha256)
     hashes: Mutex<HashMap<PathBuf, (u64, SystemTime, String)>>,
@@ -91,6 +97,54 @@ impl State {
         false
     }
 
+    #[cfg(windows)]
+    async fn refresh_tail(&self) -> Result<()> {
+        use crate::tailguard::{self, Permit};
+        let _guard=self.tail_refresh.lock().await;
+        let (requested,suspended,lease,generation)={let t=self.tail.lock().unwrap();(t.requested,t.suspended,t.lease_left(std::time::Instant::now()),t.generation)};
+        let protected=self.kill_switch_on();
+        let mut status=TailscaleProtection{requested,..Default::default()};
+        let mut permit=None;
+        if requested && protected && !suspended {
+            let cached=self.tail_identity.lock().unwrap().clone();
+            let identity=tokio::task::spawn_blocking(move ||tailguard::identity(cached)).await.unwrap_or_else(|e|Err(anyhow!("身份验证任务失败：{e}")));
+            match identity {
+                Ok(id)=>{
+                    *self.tail_identity.lock().unwrap()=Some(id.clone()); status.verified=true;
+                    match tailguard::connected(id.clone()).await {
+                        Ok(p)=>{status.connected=true;status.phase="connected".into();status.interface_index=p.interface.as_ref().map(|i|i.index);status.peer_addresses=p.peers.len();status.detail="已验证守护进程及组网接口，限地址放行".into();permit=Some(p);let mut t=self.tail.lock().unwrap();if t.generation==generation {t.lease_until=None;}}
+                        Err(e) if lease>0=>{status.phase="connecting".into();status.detail=format!("短期连接授权：{e:#}");status.lease_seconds=lease;permit=Some(Permit{identity:id,interface:None,peers:vec![]});}
+                        Err(e)=>{status.phase="disconnected".into();status.detail=format!("组网例外已撤销：{e:#}");}
+                    }
+                }
+                Err(e)=>{*self.tail_identity.lock().unwrap()=None;status.phase="unverified".into();status.detail=format!("未放行：{e:#}");}
+            }
+        } else {status.phase=if suspended {"suspended"} else {"disabled"}.into();status.detail="无组网例外，互联网保护策略保持不变".into();}
+        let current=self.tail.lock().unwrap();
+        let live_requested=current.requested; status.requested=live_requested;
+        if status.phase=="connecting" {status.lease_seconds=current.lease_left(std::time::Instant::now());}
+        if current.generation!=generation || status.phase=="connecting" && current.lease_left(std::time::Instant::now())==0 {
+            permit=None;status.connected=false;status.phase="revoked".into();status.detail="授权状态已变更或连接授权已过期，取消旧例外".into();status.lease_seconds=0;
+        }
+        drop(current);
+        // Keep the old binary handles alive until all corresponding filters
+        // have actually been removed. Scope blocks remain during replacement.
+        if let Some(ks)=self.kill_switch.lock().unwrap().as_mut() {
+            if let Err(e)=ks.set_tailnet(live_requested,permit) {
+                self.tail.lock().unwrap().status=TailscaleProtection{requested:live_requested,phase:"error".into(),detail:format!("组网规则更新/撤销失败，基础断网保护仍保留，正在重试：{e:#}"),..Default::default()};
+                return Err(e);
+            }
+        } else {
+            status.connected=false;status.phase="disabled".into();status.interface_index=None;status.peer_addresses=0;status.lease_seconds=0;
+            status.detail="断网保护未启用，无需添加组网例外".into();
+        }
+        let changed={let old=&self.tail.lock().unwrap().status; old.phase!=status.phase || old.interface_index!=status.interface_index || old.peer_addresses!=status.peer_addresses};
+        if !status.verified {*self.tail_identity.lock().unwrap()=None;}
+        if changed {push_log(&self.logs,format!("[service] Tailscale 保护 {}：{}",status.phase,status.detail));}
+        self.tail.lock().unwrap().status=status;
+        Ok(())
+    }
+
     fn hash(&self, p: &Path) -> Option<String> {
         let meta = p.metadata().ok()?;
         let key = (meta.len(), meta.modified().ok()?);
@@ -108,6 +162,8 @@ impl State {
         let mut core = self.core.lock().await;
         if let Some(r) = core.as_mut() {
             if !matches!(r.child.try_wait(), Ok(None)) {
+                push_log(&self.logs, format!("[service] {} 内核异常退出{}", r.kind,
+                    if self.kill_switch_on() { "，断网保护已触发" } else { "" }));
                 *core = None;
             }
         }
@@ -118,6 +174,9 @@ impl State {
             version: env!("CARGO_PKG_VERSION").into(),
             wintun: self.hash(&self.layout.wintun()),
             kill_switch: self.kill_switch_on(),
+            tailscale_supported: cfg!(windows),
+            #[cfg(windows)]
+            tailscale: self.tail.lock().unwrap().status.clone(),
             ..Default::default()
         };
         drop(core);
@@ -154,13 +213,14 @@ impl State {
 
     /// Stops on request: the user wants the network back, so the block goes too.
     async fn stop(&self) {
+        #[cfg(windows)] self.tail.lock().unwrap().request(false);
         self.stop_core().await;
         if let Err(e) = self.set_kill_switch(false) {
             log(&self.layout, &format!("{e:#}"));
         }
     }
 
-    async fn start(&self, kind: &str, config: &str, files: &BTreeMap<String, String>, kill_switch: bool) -> Result<()> {
+    async fn start(&self, kind: &str, config: &str, files: &BTreeMap<String, String>, kill_switch: bool, tailscale: bool) -> Result<()> {
         let file = core_file(kind).with_context(|| format!("unknown core {kind}"))?;
         let bin = self.layout.cores_dir().join(file);
         if !bin.exists() {
@@ -173,9 +233,12 @@ impl State {
             }
         }
         let config = sanitize_config(kind, config)?;
+        #[cfg(windows)] self.tail.lock().unwrap().request(tailscale && kind=="prism");
+        #[cfg(not(windows))] let _=tailscale;
         // Before the old core goes, so a restart has no unprotected moment.
         if kill_switch {
             self.set_kill_switch(true)?;
+            #[cfg(windows)] self.refresh_tail().await?;
         }
         self.stop_core().await;
         let run = self.layout.run_dir();
@@ -258,6 +321,9 @@ fn load_state(layout: Layout) -> Result<Arc<State>> {
         core: Default::default(),
         #[cfg(windows)]
         kill_switch: Default::default(),
+        #[cfg(windows)] tail: Default::default(),
+        #[cfg(windows)] tail_identity: Default::default(),
+        #[cfg(windows)] tail_refresh: Default::default(),
         logs: Default::default(),
         hashes: Default::default(),
     }))
@@ -270,6 +336,16 @@ pub async fn serve(layout: Layout, mut stop: tokio::sync::watch::Receiver<bool>)
     let state = load_state(layout)?;
     let sid = state.owner.user_sid.clone();
     let mut pipe = create_pipe(&pipe_name, &sid, true)?;
+    let weak=Arc::downgrade(&state); let mut tail_stop=stop.clone();
+    tokio::spawn(async move {
+        loop { tokio::select! {
+            _=tail_stop.changed()=>break,
+            _=tokio::time::sleep(std::time::Duration::from_secs(2))=>{
+                let Some(st)=weak.upgrade() else {break};
+                if let Err(e)=st.refresh_tail().await {push_log(&st.logs,format!("[service] Tailscale 保护更新失败：{e:#}"));}
+            }
+        }}
+    });
     loop {
         tokio::select! {
             r = pipe.connect() => {
@@ -371,8 +447,15 @@ async fn dispatch(req: Request, st: &State) -> Response {
             st.stop().await;
             Response { ok: true, ..Default::default() }
         }
+        Request::TailscaleConnect {connect} => {
+            #[cfg(windows)] {
+                st.tail.lock().unwrap().connect(connect,std::time::Instant::now());
+                match st.refresh_tail().await {Ok(())=>Response{ok:true,status:Some(st.status().await),..Default::default()},Err(e)=>Response::err(e)}
+            }
+            #[cfg(not(windows))] {let _=connect; Response::err("此保护联动目前只支持 Windows")}
+        }
         Request::Logs { since } => Response { ok: true, lines: st.logs_since(since), ..Default::default() },
-        Request::Start { core, config, files, kill_switch } => match st.start(&core, &config, &files, kill_switch).await {
+        Request::Start { core, config, files, kill_switch, tailscale } => match st.start(&core, &config, &files, kill_switch, tailscale).await {
             Ok(()) => Response { ok: true, status: Some(st.status().await), ..Default::default() },
             Err(e) => Response::err(e),
         },

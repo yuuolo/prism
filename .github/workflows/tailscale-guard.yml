@@ -1,0 +1,28 @@
+name: Tailscale protection
+on:
+  workflow_dispatch:
+  push:
+    branches: [prism-codex]
+    paths:
+      - 'crates/prism-service/**'
+      - '.github/workflows/tailscale-guard.yml'
+permissions:
+  contents: read
+jobs:
+  wfp:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tailscale-guard
+      - name: Build tests before enabling any filters
+        run: cargo test -p prism-service --lib --no-run --locked
+      - name: Service policy and signature tests
+        run: cargo test -p prism-service --lib --locked
+      - name: Native WFP conditions and revocation (isolated runner)
+        env:
+          PRISM_TAILGUARD_WFP_TEST: '1'
+        run: cargo test -p prism-service --lib native_scope_filters_and_revocation_keep_base_protection --locked -- --test-threads=1 --nocapture

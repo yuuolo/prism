@@ -77,6 +77,10 @@ export default function Connections() {
   const [ruleFor, setRuleFor] = useState<{ value: string; path: string } | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState("");
+  const [network, setNetwork] = useState("");
+  const [exit, setExit] = useState("");
+  const [sort, setSort] = useState("start");
+  const [ascending, setAscending] = useState(false);
   const [paused, setPaused] = useState(false);
   const [view, setView] = useState<"table" | "map">("table");
   const [exportOpen, setExportOpen] = useState(false);
@@ -85,6 +89,7 @@ export default function Connections() {
   const prev = useRef<Map<string, Connection>>(new Map());
   // While the mouse is on a row the list holds still, so its buttons can be hit.
   const hovering = useRef(false);
+  const displayedOrder = useRef<string[]>([]);
   const listed = useRef<Set<string>>(new Set());
   const [waiting, setWaiting] = useState(0);
   const running = !!snap?.running;
@@ -127,13 +132,30 @@ export default function Connections() {
   );
 
   const f = filter.trim().toLowerCase();
-  const shown = f
+  const searched = f
     ? rows.filter((c) =>
         [c.metadata.host, c.metadata.destinationIP, c.metadata.process, c.metadata.processPath, c.rule, c.rulePayload, ...c.chains].some((x) =>
           x?.toLowerCase().includes(f),
         ),
       )
     : rows;
+
+  const shown = searched.filter(c => (!network || c.metadata.network?.toLowerCase() === network)
+    && (!exit || c.chains.includes(exit))).slice().sort((a, b) => {
+      const value = (c: Row): string | number => sort === "host" ? c.metadata.host || c.metadata.destinationIP || ""
+        : sort === "process" ? c.metadata.process || "" : sort === "start" ? c.start
+        : c[sort as "upload" | "download" | "upSpeed" | "downSpeed"];
+      const x = value(a), y = value(b);
+      const order = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y));
+      return (ascending ? order : -order) || a.id.localeCompare(b.id);
+    });
+
+  if (hovering.current) {
+    const positions = new Map(displayedOrder.current.map((id, i) => [id, i]));
+    shown.sort((a, b) => (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity));
+  } else {
+    displayedOrder.current = shown.map(c => c.id);
+  }
 
   const doExport = async (format: ExportFormat) => {
     setExportOpen(false);
@@ -147,15 +169,26 @@ export default function Connections() {
 
   return (
     <>
-      <div className="page-head">
+      <div className="page-head" style={{ flexWrap: "wrap" }}>
         <h1>{t("连接")}</h1>
-        <span className="tag">{t("{n} 个", { n: rows.length })}</span>
+        <span className="tag">{shown.length} / {t("{n} 个", { n: rows.length })}</span>
         {waiting > 0 && !paused && (
           <span className="tag accent" title={t("{n} 个新连接，鼠标移开后显示", { n: waiting })}>
             {t("+{n} 新连接", { n: waiting })}
           </span>
         )}
         <input className="input" placeholder={t("过滤主机 / 程序 / 规则 / 节点")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <select className="input" aria-label={t("网络筛选")} value={network} onChange={e => setNetwork(e.target.value)}>
+          <option value="">{t("全部网络")}</option><option value="tcp">TCP</option><option value="udp">UDP</option>
+        </select>
+        <select className="input" aria-label={t("出口筛选")} value={exit} onChange={e => setExit(e.target.value)}>
+          <option value="">{t("全部出口")}</option>
+          {[...new Set(rows.flatMap(c => c.chains))].sort().map(x => <option key={x}>{x}</option>)}
+        </select>
+        <select className="input" aria-label={t("排序")} value={sort} onChange={e => setSort(e.target.value)}>
+          {[["start", "开始时间"], ["host", "主机"], ["process", "程序"], ["upload", "上传"], ["download", "下载"], ["upSpeed", "上传速度"], ["downSpeed", "下载速度"]].map(([k, v]) => <option key={k} value={k}>{t(v)}</option>)}
+        </select>
+        <button className="btn" onClick={() => setAscending(!ascending)}>{ascending ? t("升序") : t("降序")}</button>
         <div className="seg">
           <button className={view === "table" ? "on" : ""} onClick={() => setView("table")}>
             {t("列表")}
@@ -171,7 +204,7 @@ export default function Connections() {
           <button
             className="btn"
             disabled={!running || shown.length === 0}
-            title={f ? t("导出过滤后的 {n} 条连接", { n: shown.length }) : t("导出全部 {n} 条连接", { n: shown.length })}
+            title={f || network || exit ? t("导出过滤后的 {n} 条连接", { n: shown.length }) : t("导出全部 {n} 条连接", { n: shown.length })}
             onClick={() => setExportOpen(!exportOpen)}
           >
             {t("导出")} ▾

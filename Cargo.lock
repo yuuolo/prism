@@ -4118,7 +4118,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "prism"
-version = "0.2.7"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4154,8 +4154,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "prism-android"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "ipnet",
+ "jni 0.21.1",
+ "libc",
+ "prism-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "prism-core"
-version = "0.2.7"
+version = "0.2.10"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4217,7 +4233,7 @@ dependencies = [
 
 [[package]]
 name = "prism-service"
-version = "0.2.7"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

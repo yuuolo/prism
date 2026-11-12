@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use prism_core::config::{self, clash, singbox, Format};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
@@ -26,6 +26,8 @@ pub struct CoreManager {
     /// Copies the service's core output into `logs`.
     service_logs: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub logs: Arc<Mutex<VecDeque<String>>>,
+    started: Mutex<Option<std::time::Instant>>,
+    app: Mutex<Option<AppHandle>>,
 }
 
 /// TUN without administrator rights goes through the TUN service.
@@ -206,7 +208,9 @@ fn clash_doc(store: &Store, s: &Settings) -> Result<(serde_yaml::Value, Vec<Stri
     warnings.extend(route_warnings(clash::add_user_rules(&mut doc, &user_rules(s))));
     warnings.extend(app_warnings(clash::add_app_rules(&mut doc, &app_routes(s))));
     warnings.extend(real_ip_warnings(clash::add_user_rules(&mut doc, &real_ip_rules(s))));
+    if s.core == CoreKind::Prism { crate::privacy::apply(&mut doc, &s.dns_privacy)?; }
     clash::add_real_ip_dns(&mut doc, &real_ip_domains(s));
+    if s.core == CoreKind::Prism && s.tailscale_bypass { crate::tailscale::apply(&mut doc)?; }
     Ok((doc, warnings))
 }
 
@@ -251,6 +255,10 @@ pub fn write_runtime_config(store: &Store, s: &Settings) -> Result<RuntimeConfig
 }
 
 impl CoreManager {
+    pub fn uptime_secs(&self) -> u64 {
+        self.started.lock().unwrap().map(|t| t.elapsed().as_secs()).unwrap_or(0)
+    }
+
     pub fn push_log(&self, app: &AppHandle, line: String) {
         push_log(&self.logs, app, line);
     }
@@ -259,20 +267,38 @@ impl CoreManager {
         if let Some(kind) = *self.service.lock().await {
             return match crate::tunsvc::status().await {
                 Ok(st) if st.running && st.core.as_deref() == Some(crate::tunsvc::kind_name(kind)) => Some(kind),
-                _ => None,
+                Ok(st) => {
+                    if let Some(started) = self.started.lock().unwrap().take() {
+                        if let Some(app) = self.app.lock().unwrap().as_ref() {
+                            self.push_log(app, format!("[prism] 服务内核异常退出，持续运行 {} 秒{}", started.elapsed().as_secs(),
+                                if st.kill_switch { "，断网保护已触发" } else { "" }));
+                        }
+                    }
+                    None
+                },
+                Err(_) => None,
             };
         }
         let mut g = self.child.lock().await;
         if let Some((kind, child)) = g.as_mut() {
             match child.try_wait() {
                 Ok(None) => return Some(*kind),
-                _ => *g = None,
+                Ok(Some(status)) => {
+                    if let Some(started) = self.started.lock().unwrap().take() {
+                        if let Some(app) = self.app.lock().unwrap().as_ref() {
+                            self.push_log(app, format!("[prism] 内核异常退出（{status}），持续运行 {} 秒", started.elapsed().as_secs()));
+                        }
+                    }
+                    *g = None;
+                },
+                Err(_) => return None,
             }
         }
         None
     }
 
     pub async fn start(&self, app: &AppHandle, store: &Store, s: &Settings) -> Result<()> {
+        *self.app.lock().unwrap() = Some(app.clone());
         // The service replaces its core itself: stopping it first would lift
         // the kill switch for a moment.
         if use_service(s) {
@@ -295,6 +321,10 @@ impl CoreManager {
             let since = crate::tunsvc::logs(0).await.ok().and_then(|l| l.last().map(|x| x.0)).unwrap_or(0);
             crate::tunsvc::start(store, s, std::fs::read_to_string(&cfg)?).await?;
             *self.service.lock().await = Some(s.core);
+            let previous = self.started.lock().unwrap().replace(std::time::Instant::now());
+            if let Some(previous) = previous {
+                self.push_log(app, format!("[prism] 服务内核已重启，上次持续运行 {} 秒", previous.elapsed().as_secs()));
+            }
             self.push_log(app, format!("[prism] 通过 TUN 服务启动 {:?} 内核（无需以管理员身份运行 Prism）", s.core));
             self.forward_service_logs(app, since);
         } else {
@@ -369,6 +399,7 @@ impl CoreManager {
             });
         }
         *self.child.lock().await = Some((s.core, child));
+        *self.started.lock().unwrap() = Some(std::time::Instant::now());
         Ok(())
     }
 
@@ -381,6 +412,11 @@ impl CoreManager {
     }
 
     pub async fn stop(&self) {
+        if let Some(started) = self.started.lock().unwrap().take() {
+            if let Some(app) = self.app.lock().unwrap().as_ref() {
+                self.push_log(app, format!("[prism] 内核运行结束，持续运行 {} 秒", started.elapsed().as_secs()));
+            }
+        }
         self.stop_local().await;
         let ours = self.service.lock().await.take().is_some();
         // Also what a crashed Prism left in the service: a core or a block.
@@ -397,6 +433,14 @@ impl CoreManager {
 }
 
 fn push_log(logs: &Mutex<VecDeque<String>>, app: &AppHandle, line: String) {
+    let lower = line.to_lowercase();
+    if lower.contains("reject") || lower.contains("拒绝") || lower.contains("断网保护") || lower.contains("异常退出") || lower.contains("持续运行") || lower.contains("启动") || lower.contains("网络恢复") || lower.contains("自动恢复") || lower.contains("tailscale 保护") {
+        if let Ok(dir) = app.path().app_data_dir() {
+            if let Err(e) = crate::events::record(&dir.join("security-events.json"), &line) {
+                eprintln!("[prism] 保存运行和安全记录失败: {e:#}");
+            }
+        }
+    }
     {
         let mut l = logs.lock().unwrap();
         l.push_back(line.clone());

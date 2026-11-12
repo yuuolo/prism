@@ -79,6 +79,7 @@ impl Hub {
     /// Process-wide state that follows the current core.
     fn install(&self) {
         crate::net::set_resolver(self.core().dns.clone());
+        crate::net::set_tailscale_bypass(self.core().general.tailscale_bypass);
     }
 
     /// Rebuilds the core from the config file (or `payload`) and swaps it in.

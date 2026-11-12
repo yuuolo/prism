@@ -176,6 +176,8 @@ pub fn parse(v: &Value) -> Result<Profile> {
     if let Some(m) = s(root, "find-process-mode") {
         g.find_process_mode = m;
     }
+    g.block_ipv6 = b(root, "prism-block-ipv6");
+    g.tailscale_bypass = b(root, "prism-tailscale-bypass");
     if let Some(t) = sub(root, "tun") {
         g.tun.enable = b(t, "enable");
         g.tun.auto_route = !matches!(t.get("auto-route"), Some(Value::Bool(false)));
@@ -459,6 +461,8 @@ pub fn emit_proxy(p: &ProxyConfig) -> Value {
 pub fn emit(p: &Profile) -> Value {
     let mut root = Mapping::new();
     let g = &p.general;
+    if g.block_ipv6 { put(&mut root, "prism-block-ipv6", true); }
+    if g.tailscale_bypass { put(&mut root, "prism-tailscale-bypass", true); }
     put(&mut root, "mixed-port", g.mixed_port as u64);
     put(&mut root, "allow-lan", g.allow_lan);
     put(&mut root, "mode", g.mode.as_str());
@@ -746,7 +750,8 @@ pub fn apply_overrides(v: &mut Value, o: &Overrides) {
         }
         put(&mut t, "auto-route", true);
         put(&mut t, "auto-detect-interface", true);
-        put(&mut t, "dns-hijack", seq(&["any:53"]));
+        put(&mut t, "dns-hijack", seq(&["any:53", "tcp://any:53"]));
+        put(&mut t, "strict-route", true);
         put(&mut t, "mtu", 9000u64);
         // IPv6 is routed into the TUN too, so it can't bypass the rules.
         put(&mut t, "inet6-address", seq(&["fdfe:dcba:9876::1/126"]));
@@ -875,6 +880,8 @@ rules: [MATCH,DIRECT]
         apply_overrides(&mut v, &o);
         let p = parse(&v).unwrap();
         assert!(p.general.tun.enable && p.general.tun.auto_route && p.general.tun.ipv6);
+        assert_eq!(v["tun"]["strict-route"].as_bool(), Some(true));
+        assert_eq!(v["tun"]["dns-hijack"], seq(&["any:53", "tcp://any:53"]));
         let plain: Value = serde_yaml::from_str("tun: {enable: true}
 proxies: []
 ").unwrap();

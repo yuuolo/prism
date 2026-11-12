@@ -67,6 +67,10 @@ if (!windows) {
 
 const dir = join(out, "bundle", "nsis");
 const installer = `Prism_${version}_x64-setup.exe`;
+if (!sign) {
+  console.log(`\nBuilt local test installer: ${join(dir, installer)} (no updater signature or release manifest)`);
+  process.exit(0);
+}
 const signature = readFileSync(join(dir, `${installer}.sig`), "utf8").trim();
 const notesFile = process.env.PRISM_RELEASE_NOTES_FILE;
 const manifest = {

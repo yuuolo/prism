@@ -140,8 +140,30 @@ function PatchesEditor({ profile, live, onClose }: { profile: ProfileMeta | null
   );
 }
 
+function SingleNodeDialog({ onClose }: { onClose: () => void }) {
+  const { run } = useApp();
+  const [content, setContent] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    const ok = await run(() => api.addSingleNode(content, name), t("节点已添加"));
+    setBusy(false);
+    if (ok) onClose();
+  };
+  return <div className="modal-bg"><div className="modal">
+    <h2>{t("添加单个节点")}</h2>
+    <input className="input" placeholder={t("名称（可选）")} value={name} onChange={e => setName(e.target.value)} />
+    <textarea className="input" rows={6} placeholder={t("粘贴单个节点分享链接，或只含一个节点的 Clash / sing-box 配置")} value={content} onChange={e => setContent(e.target.value)} />
+    <div className="small muted">{t("节点独立保存到本地，并加入当前订阅的节点选择和自动选择组。")}</div>
+    <div className="row"><span className="spacer" /><button className="btn" disabled={busy} onClick={onClose}>{t("取消")}</button>
+      <button className="btn primary" disabled={busy || !content.trim()} onClick={save}>{busy ? t("保存中…") : t("添加")}</button></div>
+  </div></div>;
+}
+
 export default function Profiles() {
   const { snap, run } = useApp();
+  const [addingNode, setAddingNode] = useState(false);
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<ProfileMeta | null | undefined>(undefined);
@@ -189,8 +211,10 @@ export default function Profiles() {
 
   return (
     <>
+      {addingNode && <SingleNodeDialog onClose={() => setAddingNode(false)} />}
       <div className="page-head">
         <h1>{t("订阅")}</h1>
+        <button className="btn" onClick={() => setAddingNode(true)}>{t("添加单个节点")}</button>
         <button className="btn" disabled={!!busy} onClick={updateAll}>
           {busy === "all" ? t("更新中…") : t("全部更新")}
         </button>

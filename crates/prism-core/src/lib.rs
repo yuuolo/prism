@@ -11,6 +11,8 @@ pub mod common;
 pub mod config;
 pub mod delay;
 pub mod dns;
+#[cfg(windows)]
+mod dns_guard;
 pub mod domain;
 pub mod geo;
 pub mod http;
@@ -18,6 +20,7 @@ pub mod hub;
 pub mod mrs;
 pub mod inbound;
 pub mod net;
+mod network;
 pub mod outbound;
 pub mod process;
 pub mod provider;
@@ -310,6 +313,8 @@ pub async fn build(mut profile: Profile, home: &Path, env: &BuildEnv) -> Result<
         stats: env.stats.clone(),
         dns: resolver.clone(),
         find_process: tunnel::FindProcess::parse(&profile.general.find_process_mode),
+        block_ipv6: profile.general.block_ipv6,
+        tailscale_bypass: profile.general.tailscale_bypass,
     });
     Ok(Core {
         general: profile.general,

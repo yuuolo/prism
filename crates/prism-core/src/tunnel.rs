@@ -156,6 +156,8 @@ pub struct Tunnel {
     pub stats: Arc<Stats>,
     pub dns: Option<Arc<crate::dns::Resolver>>,
     pub find_process: FindProcess,
+    pub block_ipv6: bool,
+    pub tailscale_bypass: bool,
 }
 
 impl Tunnel {
@@ -185,6 +187,13 @@ impl Tunnel {
     /// Picks the outbound name for a connection: (target, rule, payload).
     async fn target(&self, meta: &mut Metadata) -> (String, String, String) {
         self.restore_fake_ip(meta);
+        if self.tailscale_bypass && (meta.dst.ip().is_some_and(crate::net::is_tailnet_ip) || meta.dst_ip.is_some_and(crate::net::is_tailnet_ip)
+            || meta.dst.domain().is_some_and(|d| d.ends_with(".ts.net"))) {
+            return ("DIRECT".into(), "Tailscale".into(), "tailnet".into());
+        }
+        if self.block_ipv6 && (meta.dst.ip().is_some_and(|ip| ip.is_ipv6()) || meta.dst_ip.is_some_and(|ip| ip.is_ipv6())) {
+            return ("REJECT".into(), "IPv6Blocked".into(), "::/0".into());
+        }
         match self.find_process {
             FindProcess::Always => meta.lookup_process().await,
             FindProcess::Off => meta.process_checked = true,
@@ -202,7 +211,10 @@ impl Tunnel {
 
     pub async fn dial_udp(&self, meta: &mut Metadata) -> io::Result<DialedUdp> {
         let (target, rule, payload) = self.target(meta).await;
-        let (out, chain) = self.reg.resolve(&target, &meta.dst)?;
+        let (out, chain) = self.reg.resolve(&target, &meta.dst).map_err(|e| {
+            tracing::warn!("异常拒绝: {} --> {} match {rule} using {target}: {e}", meta.source(), meta.dst);
+            e
+        })?;
         let shown = if chain.len() > 1 { format!("{target}[{}]", chain.last().unwrap()) } else { target.clone() };
         let res = tokio::time::timeout(Duration::from_secs(10), out.connect_udp(&meta.dst)).await;
         let pipe = match res {
@@ -240,7 +252,10 @@ impl Tunnel {
 
     pub async fn dial(&self, meta: &mut Metadata) -> io::Result<Dialed> {
         let (target, rule, payload) = self.target(meta).await;
-        let (out, chain) = self.reg.resolve(&target, &meta.dst)?;
+        let (out, chain) = self.reg.resolve(&target, &meta.dst).map_err(|e| {
+            tracing::warn!("异常拒绝: {} --> {} match {rule} using {target}: {e}", meta.source(), meta.dst);
+            e
+        })?;
         let shown = if chain.len() > 1 { format!("{target}[{}]", chain.last().unwrap()) } else { target.clone() };
         let res = tokio::time::timeout(Duration::from_secs(10), out.connect(&meta.dst)).await;
         let stream = match res {

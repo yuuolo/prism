@@ -4,6 +4,28 @@ import { t } from "./i18n";
 export type CoreKind = "prism" | "mihomo" | "singbox";
 export type Mode = "rule" | "global" | "direct";
 
+export interface RecoverySettings { enabled: boolean; stall_secs: number; probe_urls: string[] }
+export interface RecoveryStatus { phase: string; message: string; restarts: number; checked_at: number }
+export const DEFAULT_RECOVERY: RecoverySettings = { enabled: true, stall_secs: 120, probe_urls: ["https://www.gstatic.com/generate_204", "https://www.cloudflare.com/cdn-cgi/trace"] };
+export interface TailPeer { name: string; dns_name: string; ips: string[]; online: boolean; relay: string; direct: boolean }
+export interface TailProtection { requested: boolean; verified: boolean; connected: boolean; phase: string; detail: string; interface_index: number | null; peer_addresses: number; lease_seconds: number }
+export interface TailStatus { protection: TailProtection | null; installed: boolean; state: string; version: string; tailnet: string; self_node: TailPeer | null; peers: TailPeer[]; auth_url: string | null; error: string | null }
+
+export interface DnsPrivacy {
+  enabled: boolean;
+  via_proxy: boolean;
+  outbound: string;
+  ipv6: boolean;
+  block_ipv6: boolean;
+  fake_ip: boolean;
+  nameservers: string[];
+  bootstrap: string[];
+}
+export const DEFAULT_DNS_PRIVACY: DnsPrivacy = {
+  enabled: true, via_proxy: true, outbound: "", ipv6: false, block_ipv6: false, fake_ip: true,
+  nameservers: ["https://1.1.1.1/dns-query"], bootstrap: ["https://223.5.5.5/dns-query"],
+};
+
 export interface Settings {
   core: CoreKind;
   mixed_port: number;
@@ -24,6 +46,9 @@ export interface Settings {
   webdav: { url: string; username: string; password: string };
   tun: boolean;
   unified_delay: boolean;
+  dns_privacy: DnsPrivacy;
+  recovery: RecoverySettings;
+  tailscale_bypass: boolean;
   proxy_bypass: string;
   active_profile: string | null;
   /** 合并订阅: profiles whose nodes are added to the active one. */
@@ -146,6 +171,8 @@ export interface Snapshot {
   tun_service: "missing" | "stopped" | "running";
   /** The core is gone and the kill switch is holding the network. */
   kill_switch_blocking: boolean;
+  uptime_secs: number;
+  recovery: RecoveryStatus;
   platform: "windows" | "macos" | string;
 }
 
@@ -296,6 +323,10 @@ export interface RuleItem {
 export const api = {
   state: () => invoke<Snapshot>("get_state"),
   versions: () => invoke<Record<CoreKind, string | null>>("core_versions"),
+  tailscaleStatus: () => invoke<TailStatus>("tailscale_status"),
+  tailscaleAction: (action: "connect" | "disconnect") => invoke<TailStatus>("tailscale_action", { action }),
+  tailscalePing: (ip: string) => invoke<string>("tailscale_ping", { ip }),
+  tailscaleOpen: (page: "download" | "login" | "admin") => invoke<void>("tailscale_open", { page }),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   importProfile: (args: { url?: string; content?: string; name?: string }) =>
     invoke<ProfileMeta>("import_profile", { args }),
@@ -314,6 +345,8 @@ export const api = {
   listProcesses: () => invoke<ProcessInfo[]>("list_processes"),
   profileOutbounds: () => invoke<Outbounds>("profile_outbounds"),
   setAppRules: (rules: AppRule[]) => invoke<void>("set_app_rules", { rules }),
+  addSingleNode: (content: string, name: string) => invoke<ProfileMeta>("add_single_node", { content, name }),
+  securityEvents: () => invoke<string[]>("security_events"),
   setMergeProfiles: (ids: string[]) => invoke<void>("set_merge_profiles", { ids }),
   setRouteRules: (rules: RouteRule[]) => invoke<void>("set_route_rules", { rules }),
   setChains: (chains: ChainRule[]) => invoke<void>("set_chains", { chains }),

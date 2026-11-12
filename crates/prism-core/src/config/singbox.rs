@@ -449,6 +449,7 @@ pub fn emit(p: &Profile, o: &Overrides) -> Value {
 
     let mut rules = vec![json!({ "action": "sniff" })];
     if o.tun {
+        rules.insert(0, json!({ "port": 53, "action": "hijack-dns" }));
         rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
     }
     rules.push(json!({ "clash_mode": "Direct", "outbound": "DIRECT" }));
@@ -859,6 +860,8 @@ pub fn apply_overrides(v: &mut Value, o: &Overrides) {
             r.insert("auto_detect_interface".into(), json!(true));
             let rules = r.entry("rules").or_insert_with(|| json!([]));
             if let Some(list) = rules.as_array_mut() {
+                list.retain(|r| !(r.get("port") == Some(&json!(53)) && r.get("action").and_then(Value::as_str) == Some("hijack-dns")));
+                list.insert(0, json!({ "port": 53, "action": "hijack-dns" }));
                 if !list.iter().any(|x| x.get("action").and_then(|a| a.as_str()) == Some("hijack-dns")) {
                     list.insert(0, json!({ "protocol": "dns", "action": "hijack-dns" }));
                 }
@@ -1081,6 +1084,19 @@ pub fn parse(v: &Value) -> Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tun_port53_cannot_be_bypassed_by_direct_rule() {
+        let o = Overrides { mixed_port: 7890, controller: "127.0.0.1:9090".into(), secret: String::new(), mode: Mode::Rule, allow_lan: false, log_level: "info".into(), tun: true, unified_delay: false };
+        let mut v = json!({"route": {"rules": [{"outbound": "DIRECT"}]}});
+        apply_overrides(&mut v, &o);
+        apply_overrides(&mut v, &o);
+        let rules = v["route"]["rules"].as_array().unwrap();
+        let dns = rules.iter().position(|r| r["port"] == 53 && r["action"] == "hijack-dns").unwrap();
+        let direct = rules.iter().position(|r| r["outbound"] == "DIRECT").unwrap();
+        assert!(dns < direct);
+        assert_eq!(rules.iter().filter(|r| r["port"] == 53).count(), 1);
+    }
 
     #[test]
     fn strict_rules_reject_when_the_target_is_gone() {

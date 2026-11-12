@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, CORE_NAMES, errText, fmtBytes, type CoreKind, type RemoteBackup, type Settings } from "../api";
+import { api, DEFAULT_RECOVERY, DEFAULT_DNS_PRIVACY, CORE_NAMES, errText, fmtBytes, type CoreKind, type RemoteBackup, type Settings } from "../api";
 import { useApp } from "../state";
 import { t } from "../i18n";
 
@@ -435,6 +435,45 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
   );
 }
 
+function RecoveryCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+  const { snap } = useApp();
+  const p = form.recovery ?? DEFAULT_RECOVERY;
+  const update = (key: keyof typeof p, value: unknown) => set("recovery", { ...p, [key]: value });
+  return <div className="card span-2"><h3>{t("内核自动恢复")}</h3>
+    <div className="row"><b>{t("异常退出与无响应自动重启")}</b><span className="spacer" /><button aria-label={t("异常退出与无响应自动重启")} className={`switch ${p.enabled ? "on" : ""}`} onClick={() => update("enabled", !p.enabled)} /></div>
+    <div className="field"><label>{t("连接与流量无变化检测（秒）")}</label><input className="input" type="number" min={60} max={3600} value={p.stall_secs} onChange={e => update("stall_secs", Number(e.target.value))} /></div>
+    <div className="field"><label>{t("联网探测地址（每行一个，最多四个）")}</label><textarea className="input" rows={2} value={p.probe_urls.join("\n")} onChange={e => update("probe_urls", e.target.value.split("\n"))} /></div>
+    <p className="small muted">{t("正常空闲不会直接触发重启；长时间无变化时经本机代理探测联网，连续三次全部地址失败才重启。异常退出需连续确认。重启间隔至少一分钟，十分钟最多三次。")}</p>
+    <p className="small muted">{t("手动停止后不会自动拉起；监控在后台运行，不依赖连接页面。宽限期和冷却期间可能暂时不探测。")}</p>
+    <p className="small">{t("监控状态")}: {snap?.recovery?.phase || "idle"} · {snap?.recovery?.message || "—"} · {t("本次自动重启")}: {snap?.recovery?.restarts ?? 0}</p>
+  </div>;
+}
+
+function DnsPrivacyCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+  const p = form.dns_privacy ?? DEFAULT_DNS_PRIVACY;
+  const change = (key: keyof typeof p, value: unknown) => set("dns_privacy", { ...p, [key]: value });
+  const prism = form.core === "prism";
+  return <div className="card span-2">
+    <h3>{t("Prism DNS 与 IPv6 保护")}</h3>
+    {!prism && <p className="small muted">{t("此组设置只作用于 Prism 内核，其他内核继续使用各自配置。")}</p>}
+    <div className="row wrap"><b>{t("覆盖订阅 DNS 配置")}</b><span className="spacer" />
+      <button aria-label={t("覆盖订阅 DNS 配置")} className={`switch ${p.enabled ? "on" : ""}`} disabled={!prism} onClick={() => change("enabled", !p.enabled)} /></div>
+    {p.enabled && prism && <>
+      <div className="field"><label>{t("DNS 经代理查询")}</label><button aria-label={t("DNS 经代理查询")} className={`switch ${p.via_proxy ? "on" : ""}`} onClick={() => change("via_proxy", !p.via_proxy)} /></div>
+      {!p.via_proxy && <p className="small muted">{t("当前为直连 DoH：查询已加密，但 DNS 出口仍可能与代理出口不同。")}</p>}
+      <div className="field"><label>{t("DNS 出口")}</label><input className="input" disabled={!p.via_proxy} placeholder={t("留空自动使用节点选择组，可填写节点或代理组名称")} value={p.outbound} onChange={e => change("outbound", e.target.value)} /></div>
+      <div className="field"><label>{t("DoH 上游（每行一个，直连模式须使用 IP 地址）")}</label><textarea className="input" rows={3} value={p.nameservers.join("\n")} onChange={e => change("nameservers", e.target.value.split("\n"))} /></div>
+      <div className="field"><label>{t("节点引导 DoH（直连，仅解析代理服务器域名，使用 IP 地址）")}</label><textarea className="input" rows={2} value={p.bootstrap.join("\n")} onChange={e => change("bootstrap", e.target.value.split("\n"))} /></div>
+      {([["fake_ip", "使用 fake-IP"], ["ipv6", "允许 DNS AAAA 查询"], ["block_ipv6", "阻止客户端 IPv6 目标连接"]] as const).map(([key, label]) => <div className="field" key={key}>
+        <label>{t(label)}</label><button aria-label={t(label)} className={`switch ${p[key] ? "on" : ""}`} disabled={key === "ipv6" && p.block_ipv6} onClick={() => change(key, !p[key])} />
+      </div>)}
+      <p className="small muted">{t("开启后覆盖订阅的 DNS 策略和 fallback；真实 IP 页面中明确设置的 DNS 例外仍保留。DNS 代理出口选中 DIRECT、不可用或为链式组时拒绝查询，不回退直连。")}</p>
+      <p className="small muted">{t("IPv6 阻断会保留 TUN IPv6 路由，并在内核拒绝 IPv6 目标；关闭 AAAA 查询本身不等于禁用 IPv6。系统代理模式无法接管所有应用的 DNS，建议配合 TUN。")}</p>
+    </>}
+    <p className="small muted">{t("修改后点击页面顶部保存，运行中的内核会重新启动。浏览器自带 DoH 按普通 HTTPS 连接分流；此开关不会更改系统或浏览器设置。")}</p>
+  </div>;
+}
+
 export default function SettingsPage() {
   const { snap, run } = useApp();
   const [form, setForm] = useState<Settings | null>(null);
@@ -611,6 +650,8 @@ export default function SettingsPage() {
 
         <BackupCard />
 
+        <RecoveryCard form={form} set={set} />
+        <DnsPrivacyCard form={form} set={set} />
         <UpdateCard form={form} set={set} />
       </div>
 

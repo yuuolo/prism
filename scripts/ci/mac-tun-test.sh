@@ -25,6 +25,13 @@ tun:
   enable: true
   auto-route: true
   inet6-address: [fdfe:dcba:9876::1/126]
+# TUN DNS now fails closed; explicitly configure its resolver just as the GUI does.
+dns:
+  enable: true
+  enhanced-mode: redir-host
+  nameserver: ['https://1.1.1.1/dns-query']
+  proxy-server-nameserver: ['https://1.1.1.1/dns-query']
+  default-nameserver: [1.1.1.1]
 proxies: []
 rules:
   - MATCH,DIRECT

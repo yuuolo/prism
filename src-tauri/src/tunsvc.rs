@@ -50,6 +50,16 @@ pub async fn status() -> Result<Status> {
     call(&Request::Status).await?.status.context("no status")
 }
 
+pub async fn tailscale_control(connect: bool) -> Result<prism_service::TailscaleProtection> {
+    let status=status().await?;
+    if !status.tailscale_supported {bail!(NEED_UPDATE);}
+    let response=call(&Request::TailscaleConnect {connect}).await?;
+    let status=response.status.context("保护服务缺少状态")?;
+    if !status.tailscale_supported {bail!(NEED_UPDATE);}
+    if connect && status.kill_switch && !status.tailscale.verified {bail!("Tailscale 身份验证失败：{}",status.tailscale.detail);}
+    Ok(status.tailscale)
+}
+
 /// Copies the cores this Prism uses into the service (installing it if
 /// needed). Shows a UAC prompt (Windows) / the administrator password
 /// prompt (macOS).
@@ -130,7 +140,8 @@ pub async fn start(store: &Store, s: &Settings, config: String) -> Result<()> {
         }
     }
     let kill_switch = s.kill_switch && s.tun;
-    let r = call(&Request::Start { core: kind_name(s.core).into(), config, files, kill_switch }).await?;
+    if kill_switch && s.tailscale_bypass && !st.tailscale_supported {bail!(NEED_UPDATE);}
+    let r = call(&Request::Start { core: kind_name(s.core).into(), config, files, kill_switch, tailscale: s.tailscale_bypass && s.core == CoreKind::Prism }).await?;
     // A service from before the kill switch ignores the request.
     if kill_switch && !r.status.is_some_and(|st| st.kill_switch) {
         let _ = stop().await;

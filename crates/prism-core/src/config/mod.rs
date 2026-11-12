@@ -329,6 +329,10 @@ impl TunConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct General {
+    #[serde(default)]
+    pub block_ipv6: bool,
+    #[serde(default)]
+    pub tailscale_bypass: bool,
     pub mixed_port: u16,
     pub allow_lan: bool,
     pub bind_address: String,
@@ -348,6 +352,8 @@ pub struct General {
 impl Default for General {
     fn default() -> Self {
         General {
+            block_ipv6: false,
+            tailscale_bypass: false,
             mixed_port: 7890,
             allow_lan: false,
             bind_address: "*".into(),
