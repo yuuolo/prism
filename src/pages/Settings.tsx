@@ -441,9 +441,9 @@ function RecoveryCard({ form, set }: { form: Settings; set: <K extends keyof Set
   const update = (key: keyof typeof p, value: unknown) => set("recovery", { ...p, [key]: value });
   return <div className="card span-2"><h3>{t("内核自动恢复")}</h3>
     <div className="row"><b>{t("异常退出与无响应自动重启")}</b><span className="spacer" /><button aria-label={t("异常退出与无响应自动重启")} className={`switch ${p.enabled ? "on" : ""}`} onClick={() => update("enabled", !p.enabled)} /></div>
-    <div className="field"><label>{t("连接与流量无变化检测（秒）")}</label><input className="input" type="number" min={60} max={3600} value={p.stall_secs} onChange={e => update("stall_secs", Number(e.target.value))} /></div>
+    <div className="field"><label>{t("连接与流量无变化诊断（秒）")}</label><input className="input" type="number" min={60} max={3600} value={p.stall_secs} onChange={e => update("stall_secs", Number(e.target.value))} /></div>
     <div className="field"><label>{t("联网探测地址（每行一个，最多四个）")}</label><textarea className="input" rows={2} value={p.probe_urls.join("\n")} onChange={e => update("probe_urls", e.target.value.split("\n"))} /></div>
-    <p className="small muted">{t("正常空闲不会直接触发重启；长时间无变化时经本机代理探测联网，连续三次全部地址失败才重启。异常退出需连续确认。重启间隔至少一分钟，十分钟最多三次。")}</p>
+    <p className="small muted">{t("每三十秒检查代理联网；开启 TUN 时还检查系统路由与 DNS 通路，连接或流量变化不会推迟探测。连续三轮失败才重启，正常空闲不会直接触发重启。无变化阈值仅用于诊断提示。重启间隔至少一分钟，十分钟最多三次。")}</p>
     <p className="small muted">{t("手动停止后不会自动拉起；监控在后台运行，不依赖连接页面。宽限期和冷却期间可能暂时不探测。")}</p>
     <p className="small">{t("监控状态")}: {snap?.recovery?.phase || "idle"} · {snap?.recovery?.message || "—"} · {t("本次自动重启")}: {snap?.recovery?.restarts ?? 0}</p>
   </div>;

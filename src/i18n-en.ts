@@ -1,5 +1,7 @@
 // English for the interface (keys: the Chinese text used in the components).
 export const EN: Record<string, string> = {
+  "连接与流量无变化诊断（秒）": "Unchanged connections/traffic diagnostic threshold (seconds)",
+  "每三十秒检查代理联网；开启 TUN 时还检查系统路由与 DNS 通路，连接或流量变化不会推迟探测。连续三轮失败才重启，正常空闲不会直接触发重启。无变化阈值仅用于诊断提示。重启间隔至少一分钟，十分钟最多三次。": "Check proxy connectivity every 30 seconds, and system routing/DNS when TUN is enabled. Activity does not postpone probes. Restart after three failed rounds; normal idle does not trigger a restart. The inactivity threshold is diagnostic only. Restarts are at least one minute apart, at most three per ten minutes.",
   "连接按钮可给通过验证的 Tailscale 守护进程最多 60 秒临时授权；未完成连接会自动撤销，可点击断开立即取消。正常连接只放行已验证接口上的组网地址，互联网阻断保持启用。": "Connect authorizes the verified Tailscale daemon for up to 60 seconds. Authorization expires if connection is not completed; Disconnect cancels it immediately. Connected peers are allowed only on the verified tailnet interface. Internet blocking remains active.",
   "临时连接授权剩余秒数": "Temporary connection authorization (seconds remaining)",
   "允许的组网地址数": "Allowed tailnet addresses",

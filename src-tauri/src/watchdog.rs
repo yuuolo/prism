@@ -197,17 +197,34 @@ impl Policy {
                 .is_none_or(|t| now.saturating_sub(*t) >= 60)
     }
 }
-async fn probe(s: &crate::store::Settings) -> bool {
-    let Ok(proxy) = reqwest::Proxy::all(format!("http://127.0.0.1:{}", s.mixed_port)) else {
-        return false;
-    };
-    let Ok(client) = reqwest::Client::builder()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeResult {
+    Healthy,
+    ProxyFailed,
+    TunFailed,
+}
+impl ProbeResult {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Healthy => "联网探测正常",
+            Self::ProxyFailed => "代理数据通路联网探测失败",
+            Self::TunFailed => "代理端口正常，但系统 TUN/DNS 通路联网探测失败",
+        }
+    }
+}
+
+async fn probe_path(s: &crate::store::Settings, via_proxy: bool) -> bool {
+    let mut builder = reqwest::Client::builder()
         .no_proxy()
-        .proxy(proxy)
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(4))
-        .build()
-    else {
+        .timeout(Duration::from_secs(4));
+    if via_proxy {
+        let Ok(proxy) = reqwest::Proxy::all(format!("http://127.0.0.1:{}", s.mixed_port)) else {
+            return false;
+        };
+        builder = builder.proxy(proxy);
+    }
+    let Ok(client) = builder.build() else {
         return false;
     };
     for url in s
@@ -227,11 +244,33 @@ async fn probe(s: &crate::store::Settings) -> bool {
     }
     false
 }
+async fn probe(s: &crate::store::Settings) -> ProbeResult {
+    if !probe_path(s, true).await {
+        return ProbeResult::ProxyFailed;
+    }
+    // A working mixed port does not prove the TUN routes, adapter or system DNS
+    // work. This request uses system DNS/routing, with environment proxies off.
+    // It never changes routes or relaxes the service's kill-switch filters.
+    if s.tun && !probe_path(s, false).await {
+        return ProbeResult::TunFailed;
+    }
+    ProbeResult::Healthy
+}
 fn status(st: &crate::AppState, phase: &str, message: &str) {
     let mut s = st.recovery_status.lock().unwrap();
     s.phase = phase.into();
     s.message = message.into();
     s.checked_at = chrono::Utc::now().timestamp();
+}
+fn diagnostic(app: &AppHandle, st: &crate::AppState, phase: &str, message: &str) {
+    let changed = {
+        let old = st.recovery_status.lock().unwrap();
+        old.phase != phase || old.message != message
+    };
+    status(st, phase, message);
+    if changed {
+        st.core.push_log(app, format!("[prism] 自动恢复监测 [{phase}]：{message}"));
+    }
 }
 pub async fn run(app: AppHandle) {
     let clock = Instant::now();
@@ -245,7 +284,7 @@ pub async fn run(app: AppHandle) {
         if !s.recovery.enabled || ticket.is_none() || s.active_profile.is_none() {
             policy = Policy::default();
             generation = None;
-            status(&st, "idle", "未启用或已手动停止");
+            diagnostic(&app, &st, "idle", "未启用或已手动停止");
             continue;
         }
         let ticket = ticket.unwrap();
@@ -256,9 +295,11 @@ pub async fn run(app: AppHandle) {
             continue;
         }
         let now = clock.elapsed().as_secs();
-        if generation != Some(ticket) {
-            generation = Some(ticket);
+        let next_generation = (ticket, s.recovery.clone());
+        if generation.as_ref() != Some(&next_generation) {
+            generation = Some(next_generation);
             policy = Policy::default();
+            st.core.push_log(&app, format!("[prism] 自动恢复监测：已启用，30 秒周期探测；TUN={}，断网保护={}，连续 3 次失败后恢复", s.tun, s.kill_switch));
         }
         let alive = tokio::time::timeout(Duration::from_secs(4), st.core.running())
             .await
@@ -282,39 +323,45 @@ pub async fn run(app: AppHandle) {
             None
         };
         let observed = policy.observe(now, alive, sample, s.recovery.stall_secs);
-        let Some(reason) = observed.or((policy.probe_failures > 0).then_some("联网探测连续失败"))
-        else {
-            status(&st, "healthy", "内核监测正常");
-            continue;
-        };
-        if !alive && probe(&s).await {
-            status(&st, "healthy", "内核状态不可用，但代理联网正常");
+        if !alive && observed.is_none() {
+            diagnostic(&app, &st, "suspect", "内核状态不可用，等待下一轮确认");
             continue;
         }
-        if alive {
-            if !policy.probe_due(now) {
-                continue;
+        // Probe periodically even while counters/connections change: retries
+        // and background traffic can keep a broken data path looking active.
+        if alive && !policy.probe_due(now) {
+            continue;
+        }
+        let health = probe(&s).await;
+        if !st.core_intent.valid(ticket) || st.settings().recovery != s.recovery {
+            continue;
+        }
+        let healthy = health == ProbeResult::Healthy;
+        let confirmed = policy.probe_result(healthy);
+        if healthy {
+            let message = if observed == Some("连接和流量长时间无变化") {
+                "连接和流量无变化，但联网探测正常"
+            } else {
+                "联网探测正常"
+            };
+            let recovering = st.recovery_status.lock().unwrap().phase != "healthy";
+            if recovering {
+                diagnostic(&app, &st, "healthy", "联网探测恢复正常");
+            } else {
+                status(&st, "healthy", message);
             }
-            status(&st, "probing", reason);
-            let healthy = probe(&s).await;
-            if !policy.probe_result(healthy) {
-                status(
-                    &st,
-                    if healthy { "healthy" } else { "suspect" },
-                    if healthy {
-                        "无流量变化，但联网探测正常"
-                    } else {
-                        "联网探测失败，等待连续确认"
-                    },
-                );
-                continue;
-            }
+            continue;
+        }
+        let reason = if alive { health.reason() } else { observed.unwrap() };
+        if alive && !confirmed {
+            diagnostic(&app, &st, "suspect", &format!("{}（连续 {} 次，等待确认）", reason, policy.probe_failures));
+            continue;
         }
         if !st.core_intent.valid(ticket) {
             continue;
         }
         if !policy.restart_allowed(now) {
-            status(&st, "cooldown", "自动恢复已达频率限制，冷却后重试");
+            diagnostic(&app, &st, "cooldown", "自动恢复已达频率限制，冷却后重试");
             continue;
         }
         policy.restarts.push_back(now);
@@ -414,7 +461,7 @@ mod tests {
             let mut s = crate::store::Settings::default();
             s.mixed_port = port;
             s.recovery.probe_urls = vec!["http://probe.invalid/".into()];
-            assert_eq!(probe(&s).await, expected);
+            assert_eq!(probe_path(&s, true).await, expected);
             task.await.unwrap();
         }
     }
@@ -431,5 +478,50 @@ mod tests {
         assert!(p.probe_result(false));
         assert!(!p.probe_result(true));
         assert_eq!(p.probe_failures, 0);
+    }
+    #[test]
+    fn changing_connections_do_not_postpone_periodic_failure_detection() {
+        let mut p = Policy::default();
+        let mut confirmed_at = None;
+        for now in (0..=60).step_by(10) {
+            let mut s = sample();
+            s.up = now + 1;
+            s.connections.push((format!("retry-{now}"), 1, 0));
+            assert!(p.observe(now, true, Some(s), 120).is_none());
+            if p.probe_due(now) && p.probe_result(false) {
+                confirmed_at = Some(now);
+            }
+        }
+        assert_eq!(confirmed_at, Some(60));
+    }
+    #[tokio::test]
+    async fn tun_health_requires_system_path_even_when_proxy_port_works() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn responder(code: u16) -> (u16, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let task = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).await.unwrap();
+                socket.write_all(format!("HTTP/1.1 {code} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            });
+            (port, task)
+        }
+        for (tun, system_code, expected) in [
+            (false, 503, ProbeResult::Healthy),
+            (true, 503, ProbeResult::TunFailed),
+            (true, 204, ProbeResult::Healthy),
+        ] {
+            let (proxy_port, proxy) = responder(204).await;
+            let (system_port, system) = responder(system_code).await;
+            let mut s = crate::store::Settings::default();
+            s.tun = tun;
+            s.mixed_port = proxy_port;
+            s.recovery.probe_urls = vec![format!("http://127.0.0.1:{system_port}/health")];
+            assert_eq!(probe(&s).await, expected);
+            proxy.await.unwrap();
+            if tun { system.await.unwrap(); } else { system.abort(); }
+        }
     }
 }

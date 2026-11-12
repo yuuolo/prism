@@ -1,0 +1,32 @@
+name: Core recovery
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'src-tauri/src/**'
+      - 'src-tauri/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/recovery.yml'
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: recovery-windows
+      - run: npm ci
+      - name: Desktop recovery and persistence tests
+        run: cargo test -p prism --lib --locked
+      - name: Frontend build
+        run: npm run build
