@@ -180,6 +180,7 @@ class PrismVpnService : VpnService() {
         callback?.let { runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } }; callback = null
         serial.execute { cleanup() }
         if (stage != "连接失败") publish("已断开", detail)
+        if(visibleService===this) visibleService=null
         super.onDestroy()
     }
 }

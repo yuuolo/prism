@@ -27,6 +27,13 @@ $certificate=(& $java --enable-native-access=ALL-UNNAMED -jar (Join-Path $BuildT
 if($certificate -notmatch 'certificate SHA-256 digest: 618f92202c7e120f365eebc928044ec68422bd12a26ba7337e43075336f6f1c0') {throw "Signing certificate differs from the published Android Alpha"}
 & (Join-Path $BuildTools "zipalign.exe") -c -P 16 4 $apk; Assert-Exit
 $hash=(Get-FileHash $apk -Algorithm SHA256).Hash.ToLowerInvariant()
+$channel=& $gh api "repos/$repo/releases/tags/android-updates" 2>$null
+if($LASTEXITCODE -eq 0 -and (($channel | ConvertFrom-Json).assets | Where-Object {$_.name -eq "android-update.json"})) {
+    $previousDir=Join-Path $work ("channel-"+[Guid]::NewGuid().ToString("N"))
+    & $gh release download android-updates --repo $repo --pattern android-update.json --dir $previousDir; Assert-Exit
+    $previous=Get-Content (Join-Path $previousDir "android-update.json") -Raw | ConvertFrom-Json
+    if([long]$previous.versionCode -gt $code -or ([long]$previous.versionCode -eq $code -and $previous.sha256 -ne $hash)) {throw "Refusing to roll back or replace an existing update version"}
+}
 $checksum="$apk.sha256"
 [IO.File]::WriteAllText((Join-Path (Get-Location) $checksum),"$hash  $name`n",[Text.Encoding]::ASCII)
 $existingText=& $gh api "repos/$repo/releases/tags/$tag" 2>$null
