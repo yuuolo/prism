@@ -19,6 +19,10 @@ class PrismVpnService : VpnService() {
         // Serialize across Service instances: old onDestroy cleanup must
         // finish before a newly created Service can start another core.
         private val engineSerial = Executors.newSingleThreadExecutor()
+        // Access owner/pendingVpn only on engineSerial.
+        private var nativeOwner: PrismVpnService? = null
+        private var pendingVpn: Network? = null
+        @Volatile private var visibleService: PrismVpnService? = null
         @Synchronized fun logs() = events.toList()
         @Synchronized private fun log(value: String) { events.addFirst(value); while (events.size > 30) events.removeLast() }
     }
@@ -28,11 +32,16 @@ class PrismVpnService : VpnService() {
     private var descriptor: ParcelFileDescriptor? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var destroyed = false
+    private var vpnNetwork: Network? = null
+    @Volatile private var activeCoreTicket = -1
+    private var latestStartId = 0
     private fun publish(value: String, message: String = "") {
+        if(visibleService!==this) return
         stage = value; detail = message; log(if (message.isEmpty()) value else "$value：$message")
     }
     override fun onCreate() {
         super.onCreate()
+        visibleService=this; stage="已断开"; detail=""
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("vpn", "VPN 连接", NotificationManager.IMPORTANCE_LOW))
     }
     private fun notification(): Notification {
@@ -42,6 +51,7 @@ class PrismVpnService : VpnService() {
             .setContentText("VPN 正在连接或运行").setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null, "断开", stop).build()).build()
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestStartId=startId
         if (intent?.action != CONNECT) { disconnect(); return START_NOT_STICKY }
         if (stage == "已连接" || stage == "正在连接") return START_NOT_STICKY
         val ticket = generation.incrementAndGet()
@@ -53,6 +63,8 @@ class PrismVpnService : VpnService() {
         serial.execute {
             try {
                 if (ticket != generation.get()) return@execute
+                nativeOwner?.takeIf {it!==this}?.cleanup()
+                awaitDetached(true)
                 check(prepare(this) == null) { "请重新授权 VPN" }
                 val config = ProfileStore(this).session()
                 val validation = JSONObject(CoreBridge.validateSession(config))
@@ -63,6 +75,7 @@ class PrismVpnService : VpnService() {
                     .setConfigureIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
                     .establish() ?: error("VPN permission revoked")
                 descriptor = fd
+                nativeOwner=this; activeCoreTicket=ticket
                 val result = JSONObject(CoreBridge.start(fd.fd, config, filesDir.absolutePath, this))
                 check(!result.has("error"))
                 waitForVpnRouting(ticket)
@@ -90,6 +103,7 @@ class PrismVpnService : VpnService() {
             val link=network?.let {manager.getLinkProperties(it)}
             if(capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN)==true &&
                 link?.dnsServers?.any {it.hostAddress=="172.19.0.2"}==true) {
+                vpnNetwork=network
                 val bytes=java.io.ByteArrayOutputStream()
                 java.io.DataOutputStream(bytes).apply {
                     writeShort(ticket and 65535); writeShort(0x0100); writeShort(1); repeat(3) {writeShort(0)}
@@ -124,20 +138,40 @@ class PrismVpnService : VpnService() {
         manager.registerNetworkCallback(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), next)
     }
     /** Called only by the embedded core; never perform blocking JNI stop on this native thread. */
-    fun onCoreStopped() { main.post { if (!destroyed && stage in listOf("正在连接","已连接")) disconnect("内核已停止") } }
+    fun onCoreStopped() {
+        val ticket=activeCoreTicket
+        if(ticket<0) return
+        main.post {if(!destroyed && activeCoreTicket==ticket && generation.get()==ticket && stage in listOf("正在连接","已连接")) disconnect("内核已停止")}
+    }
     fun protectSocket(fd: Int): Boolean = protect(fd)
     private fun cleanup() {
-        runCatching { CoreBridge.stop() }
+        activeCoreTicket=-1
+        if(nativeOwner===this) {runCatching {CoreBridge.stop()}; nativeOwner=null}
+        vpnNetwork?.let {pendingVpn=it}; vpnNetwork=null
         runCatching { descriptor?.close() }; descriptor = null
+        awaitDetached(false)
+    }
+    private fun awaitDetached(required: Boolean) {
+        val old=pendingVpn ?: return
+        val manager=getSystemService(ConnectivityManager::class.java)
+        val until=SystemClock.elapsedRealtime()+5000
+        while(SystemClock.elapsedRealtime()<until) {
+            if(manager.getNetworkCapabilities(old)==null) {pendingVpn=null; return}
+            SystemClock.sleep(100)
+        }
+        // A newly created tun0 can otherwise inherit an old agent whose routes
+        // still reference the deleted interface index. Do not race that teardown.
+        if(required) error("Previous VPN routes have not been removed")
     }
     private fun disconnect(reason: String = "") {
         if (destroyed) return
         val ticket = generation.incrementAndGet()
+        val stopId=latestStartId
         callback?.let { runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } }; callback = null
         publish("正在断开")
         serial.execute {
             cleanup()
-            main.post { if (ticket == generation.get() && !destroyed) { publish("已断开", reason); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() } }
+            main.post { if (ticket == generation.get() && !destroyed) { publish("已断开", reason); stopForeground(STOP_FOREGROUND_REMOVE); stopSelfResult(stopId) } }
         }
     }
     override fun onRevoke() { main.post { disconnect("VPN 授权已撤销") } }

@@ -90,7 +90,9 @@ class AndroidFeaturesTest {
         assertTrue(device.wait(Until.hasObject(By.desc("节点")),10000))
         val dir=File(context.getExternalFilesDir(null),"screenshots").apply {mkdirs()}
         for((nav,file) in listOf("连接" to "connection.png","节点" to "nodes.png","设置" to "settings.png","更新" to "updates.png")) {
-            device.findObject(By.desc(nav)).click(); device.waitForIdle(); Thread.sleep(300)
+            device.findObject(By.desc(nav)).click()
+            val title=when(nav) {"节点" -> "节点与订阅"; "更新" -> "版本更新"; else -> nav}
+            assertTrue(device.wait(Until.hasObject(By.text(title)),5000)); device.waitForIdle(); Thread.sleep(300)
             assertTrue(device.takeScreenshot(File(dir,file)))
         }
         device.findObject(By.desc("节点")).click(); device.waitForIdle()
