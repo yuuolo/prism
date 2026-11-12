@@ -33,6 +33,10 @@ class MainActivity : Activity() {
     private var checkingUpdate = false
     private var darkCard = false
     private var progress: ProgressBar? = null
+    private var nodeQuery=""
+    private var nodeKind=""
+    private var nodeSort=0
+    private var nodeFavorites=false
     private val tick = object : Runnable { override fun run() { updateStatus(); main.postDelayed(this, 1000) } }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun label(value: String, size: Float = 15f): TextView = TextView(this).apply {
@@ -63,8 +67,8 @@ class MainActivity : Activity() {
     private fun actions(vararg items: Pair<String,()->Unit>) {
         val row=LinearLayout(this)
         items.forEach {(title,action) -> row.addView(Button(this).apply {text=title; isAllCaps=false; textSize=12f; setTextColor(PrismStyle.purple)
-            background=PrismStyle.shape(Color.rgb(246,243,255),dp(10).toFloat()); setPadding(dp(2),0,dp(2),0); minWidth=0
-            setOnClickListener {action()}},LinearLayout.LayoutParams(0,dp(46),1f).apply {marginEnd=dp(4)})}
+            background=PrismStyle.shape(Color.rgb(246,243,255),dp(10).toFloat()); setPadding(dp(2),dp(6),dp(2),dp(6)); minWidth=0; minHeight=dp(48)
+            setOnClickListener {action()}},LinearLayout.LayoutParams(0,-2,1f).apply {marginEnd=dp(4)})}
         root.addView(row,LinearLayout.LayoutParams(-1,-2).apply {topMargin=dp(8)})
     }
     private fun inputDialog(title: String,hint: String,action: (String)->Unit) {
@@ -86,14 +90,22 @@ class MainActivity : Activity() {
             main.post { busy=false; if (!isDestroyed) { message(result); render() } }
         }
     }
-    override fun onCreate(saved: Bundle?) { super.onCreate(saved); store=ProfileStore(this); if(intent.getBooleanExtra("updates",false)) tab=3; Updates.schedule(this); render() }
+    override fun onCreate(saved: Bundle?) { super.onCreate(saved); store=ProfileStore(this); tab=saved?.getInt("tab",0) ?: 0; if(intent.getBooleanExtra("updates",false)) tab=3; Updates.schedule(this); render() }
+    override fun onSaveInstanceState(out: Bundle) {out.putInt("tab",tab); super.onSaveInstanceState(out)}
+    override fun onNewIntent(next: Intent) {super.onNewIntent(next); setIntent(next); if(next.getBooleanExtra("updates",false)) {tab=3; render()}}
     private fun render() {
         val host=LinearLayout(this).apply {orientation=LinearLayout.VERTICAL; setBackgroundColor(PrismStyle.background)}
-        host.setOnApplyWindowInsetsListener {view,insets -> view.setPadding(insets.systemWindowInsetLeft,insets.systemWindowInsetTop,insets.systemWindowInsetRight,insets.systemWindowInsetBottom); insets}
+        host.setOnApplyWindowInsetsListener {view,insets ->
+            if(Build.VERSION.SDK_INT>=30) {
+                val bars=insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+                view.setPadding(bars.left,bars.top,bars.right,bars.bottom)
+            } else view.setPadding(insets.systemWindowInsetLeft,insets.systemWindowInsetTop,insets.systemWindowInsetRight,insets.systemWindowInsetBottom)
+            insets
+        }
         val scroller=ScrollView(this).apply {isFillViewport=true; clipToPadding=false}
         root=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(20),dp(16),dp(20),dp(24)) }
         val centered=FrameLayout(this)
-        centered.addView(root,FrameLayout.LayoutParams(dp(minOf(640,resources.configuration.screenWidthDp)),-2,Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+        centered.addView(root,FrameLayout.LayoutParams(if(resources.configuration.screenWidthDp>640) dp(640) else -1,-2,Gravity.TOP or Gravity.CENTER_HORIZONTAL))
         scroller.addView(centered); host.addView(scroller,LinearLayout.LayoutParams(-1,0,1f))
         setContentView(host); host.requestApplyInsets(); darkCard=false
         status=null; counters=null; connect=null; nodes=null
@@ -214,18 +226,21 @@ class MainActivity : Activity() {
         }
         label("节点列表",20f)
         val query=field("搜索节点名称或协议")
+        query.setText(nodeQuery)
         val controls=LinearLayout(this)
         val kinds=listOf("全部协议")+(0 until all.length()).map {all.getJSONObject(it).optString("kind")}.distinct().sorted()
         val kind=Spinner(this).apply {adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,kinds)}
         val sort=Spinner(this).apply {adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,listOf("默认排序","名称排序","协议排序","收藏优先"))}
+        kind.setSelection(kinds.indexOf(nodeKind).coerceAtLeast(0)); sort.setSelection(nodeSort)
         controls.addView(kind,LinearLayout.LayoutParams(0,dp(48),1f)); controls.addView(sort,LinearLayout.LayoutParams(0,dp(48),1f)); root.addView(controls)
-        val onlyFavorites=CheckBox(this).apply {text="只看收藏"; setTextColor(PrismStyle.muted)}; root.addView(onlyFavorites)
+        val onlyFavorites=CheckBox(this).apply {text="只看收藏"; setTextColor(PrismStyle.muted); isChecked=nodeFavorites}; root.addView(onlyFavorites)
         val summary=label("",12f)
         val list=LinearLayout(this).apply {orientation=LinearLayout.VERTICAL}; root.addView(list)
         val selected=all.optJSONObject(state.optInt("selected"))?.optString("_id")
         var limit=50
         fun draw() {
             val keyword=query.text.toString().trim()
+            nodeQuery=keyword; nodeKind=kinds.getOrElse(kind.selectedItemPosition) {""}; nodeSort=sort.selectedItemPosition.coerceAtLeast(0); nodeFavorites=onlyFavorites.isChecked
             var nodes=(0 until all.length()).map {all.getJSONObject(it)}.filter {
                 (keyword.isEmpty() || it.optString("name").contains(keyword,true) || it.optString("kind").contains(keyword,true)) &&
                     (kind.selectedItemPosition<=0 || it.optString("kind")==kinds[kind.selectedItemPosition]) && (!onlyFavorites.isChecked || it.optBoolean("_favorite"))
@@ -330,7 +345,7 @@ class MainActivity : Activity() {
                 if(busy) {message("请等待当前操作完成"); return@button}
                 busy=true; updateStatus(); message("正在下载并校验安装包")
                 io.execute {
-                    val result=runCatching {if(Updates.downloaded(this,update)) Updates.verifyPackage(this,Updates.apk(this),update.code) else Updates.download(this,update)}
+                    val result=runCatching {if(!Updates.downloaded(this,update)) Updates.download(this,update)}
                     main.post {busy=false; if(!isDestroyed) {
                         render()
                         if(result.isSuccess) installUpdate(update) else message("下载或校验失败，请重试；也可打开 GitHub 发布页")
@@ -361,7 +376,7 @@ class MainActivity : Activity() {
                 }.show(); return
         }
         runTask {
-            Updates.verifyPackage(this,Updates.apk(this),update.code)
+            Updates.verifyDownloaded(this,Updates.apk(this),update)
             main.post {if(!isDestroyed) runCatching {startActivity(Updates.installIntent(this))}.onFailure {message("无法打开安装器，请从发布页下载安装")}}
             "安装包已校验，请在系统安装器中确认"
         }

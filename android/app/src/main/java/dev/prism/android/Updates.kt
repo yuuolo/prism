@@ -58,8 +58,12 @@ object Updates {
         if(jobs.getPendingJob(JOB)==null) jobs.schedule(JobInfo.Builder(JOB,ComponentName(c,UpdateJobService::class.java))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPeriodic(INTERVAL).setPersisted(true).build())
     }
-    fun due(c: Context)=System.currentTimeMillis()-prefs(c).getLong("checked",0)>6*60*60*1000L
+    fun due(c: Context): Boolean {
+        val age=System.currentTimeMillis()-maxOf(prefs(c).getLong("checked",0),prefs(c).getLong("attempted",0))
+        return age<0 || age>6*60*60*1000L
+    }
     fun check(c: Context,notify: Boolean): AndroidUpdate? = synchronized(lock) {
+        prefs(c).edit().putLong("attempted",System.currentTimeMillis()).apply()
         val body=open(MANIFEST).useConnection {connection ->
             check(connection.responseCode==200) {"更新服务暂时不可用"}
             connection.inputStream.use {input ->
@@ -144,6 +148,7 @@ object Updates {
                 url.host in setOf("github.com","release-assets.githubusercontent.com","objects.githubusercontent.com"))
             val connection=url.openConnection() as HttpsURLConnection
             connection.connectTimeout=10000; connection.readTimeout=20000; connection.instanceFollowRedirects=false
+            connection.useCaches=false; connection.setRequestProperty("Cache-Control","no-cache")
             connection.setRequestProperty("User-Agent","Prism-Android/${BuildConfig.VERSION_NAME}")
             try {
                 if(connection.responseCode !in listOf(301,302,303,307,308)) return connection

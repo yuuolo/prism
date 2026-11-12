@@ -43,7 +43,6 @@ class AndroidFeaturesTest {
         assertNotNull(context.getSystemService(JobScheduler::class.java).getPendingJob(7042))
         Updates.setEnabled(context,false)
         assertNull(context.getSystemService(JobScheduler::class.java).getPendingJob(7042))
-        fun fixture(name: String)=File(context.cacheDir,name).apply {context.assets.open(name).use {input -> outputStream().use {input.copyTo(it)}}}
         // Test APK assets live in the instrumentation APK, rather than the app.
         fun asset(name: String)=File(context.cacheDir,name).apply {instrumentation.context.assets.open(name).use {input -> outputStream().use {input.copyTo(it)}}}
         val good=asset("future-update.apk"); val wrong=asset("wrong-signer.apk")
@@ -61,10 +60,12 @@ class AndroidFeaturesTest {
         context.contentResolver.openInputStream(Updates.installIntent(context).data!!)!!.use {assertEquals(good.length(),it.readBytes().size.toLong())}
         val bad=android.net.Uri.parse("content://${context.packageName}.updates/../profile")
         assertTrue(runCatching {context.contentResolver.openInputStream(bad)}.isFailure)
-        if(android.os.Build.VERSION.SDK_INT>=33) instrumentation.uiAutomation.executeShellCommand("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS").close()
+        if(android.os.Build.VERSION.SDK_INT>=33) instrumentation.uiAutomation.executeShellCommand("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS").use {fd -> java.io.FileInputStream(fd.fileDescriptor).use {it.readBytes()}}
         context.getSharedPreferences("android-updates",0).edit().remove("notified").commit()
         Updates.notify(context,update)
         val manager=context.getSystemService(NotificationManager::class.java)
+        val until=System.currentTimeMillis()+3000
+        while(manager.activeNotifications.none {it.id==7043} && System.currentTimeMillis()<until) Thread.sleep(100)
         assertTrue(manager.activeNotifications.any {it.id==7043})
         Updates.notify(context,update); assertEquals(1,manager.activeNotifications.count {it.id==7043})
         manager.cancel(7043); Updates.apk(context).delete(); good.delete(); wrong.delete(); damaged.delete()

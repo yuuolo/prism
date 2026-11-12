@@ -13,6 +13,8 @@ cat > "$scratch/AndroidManifest.xml" <<'XML'
 XML
 "$tools/aapt2" link --manifest "$scratch/AndroidManifest.xml" -I "$ANDROID_HOME/platforms/android-37.0/android.jar" -o "$scratch/unsigned.apk"
 # These are disposable test keys, never the production Android signing key.
-"$tools/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-key-alias androiddebugkey --ks-pass pass:android --out "$assets/future-update.apk" "$scratch/unsigned.apk"
+debug_store=$(bash android/gradlew -p android -q signingReport --console plain | awk '/^[[:space:]]*Store: / && !printed {sub(/^[[:space:]]*Store: /, ""); print; printed=1}')
+test -f "$debug_store"
+"$tools/apksigner" sign --ks "$debug_store" --ks-key-alias androiddebugkey --ks-pass pass:android --out "$assets/future-update.apk" "$scratch/unsigned.apk"
 keytool -genkeypair -keystore "$scratch/wrong.jks" -storetype JKS -alias fixture -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=Disposable fixture' -storepass android -keypass android >/dev/null 2>&1
 "$tools/apksigner" sign --ks "$scratch/wrong.jks" --ks-key-alias fixture --ks-pass pass:android --out "$assets/wrong-signer.apk" "$scratch/unsigned.apk"
