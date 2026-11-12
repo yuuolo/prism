@@ -96,6 +96,8 @@ class VpnSmokeTest {
         assertEquals(3478,response.port)
     }}
     @Test fun encryptedProfileAndRealVpnTraffic() {
+        Updates.setEnabled(context,false)
+        context.getSharedPreferences("prism-mobile",0).edit().clear().commit()
         // This only runs in the disposable CI emulator, never on the user's phone.
         shell("appops set ${context.packageName} ACTIVATE_VPN allow")
         assertNull(VpnService.prepare(context))

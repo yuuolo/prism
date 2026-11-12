@@ -9,5 +9,6 @@ android/local.properties
 android/.signing/
 android/**/build/
 android/app/src/main/jniLibs/
+android/app/src/androidTest/assets/*.apk
 *.keystore
 *.jks

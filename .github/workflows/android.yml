@@ -1,4 +1,4 @@
-name: Android minimal
+name: Android
 on:
   workflow_dispatch:
   push:
@@ -51,7 +51,10 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
           bash scripts/android/build-native.sh
       - name: Build APK and instrumentation
-        run: bash android/gradlew -p android assembleDebug assembleDebugAndroidTest assembleRelease lintDebug lintRelease --stacktrace
+        run: |
+          bash android/gradlew -p android assembleDebug --stacktrace
+          bash scripts/android/build-update-fixtures.sh
+          bash android/gradlew -p android assembleDebugAndroidTest assembleRelease lintDebug lintRelease --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: prism-android-unsigned-release
