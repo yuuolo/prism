@@ -1,10 +1,10 @@
 # Prism 移动端方案
 
-本文定义移动端的交付边界。稳定安装包支持 Windows 和 macOS；Android 已提供 Alpha 测试包，其他移动平台尚未发布。
+本文定义移动端的交付边界。稳定安装包支持 Windows 和 macOS；Android 已提供 Beta 测试包，其他移动平台尚未发布。
 
-开发状态：Android 精简版 `0.1.0-alpha.1` 已[发布](https://github.com/yuuolo/prism/releases/tag/android-v0.1.0-alpha.1)，工程位于 `android/`，JNI 桥位于 `crates/prism-android/`。ARM64/x86_64、Debug/Release 构建、Lint，以及 Android 17 / API 37.2 / 16 KiB 内存页模拟器的系统 VPN、TCP/UDP DNS、系统解析、TCP/UDP 转发、会话重建、IPv6 阻断和立即重连[验收通过](https://github.com/yuuolo/prism/actions/runs/42991269494)。发布包使用固定本地安卓签名，私钥不上传，GitHub 资产摘要与本地校验一致。构建和模拟器通过不能替代真机稳定性验证。工程说明见 [Android README](../android/README.md)。
+开发状态：Android `0.2.0-beta.1` 已[发布](https://github.com/yuuolo/prism/releases/tag/android-v0.2.0-beta.1)，工程位于 `android/`，JNI 桥位于 `crates/prism-android/`。ARM64/x86_64、Debug/Release 构建、Lint，以及 Android 17 / API 37.2 / 16 KiB 内存页模拟器的 5 项[验收通过](https://github.com/yuuolo/prism/actions/runs/43163603189)。覆盖 Alpha 配置迁移、多订阅隔离、节点搜索与页面截图、升级通知和安装校验、系统 VPN/DNS/TCP/UDP、会话重建、IPv6 阻断及连续三轮重连。发布包沿用原安卓签名，私钥不上传；公开升级元数据与 APK 大小、SHA-256 一致。构建和模拟器通过不能替代真机稳定性验证。工程说明见 [Android README](../android/README.md)。
 
-当前优先完善 Android：`0.2.0-beta.1` 增加界面重做、多订阅、节点管理和独立升级通知，正在验收。根据用户最新决定，iOS/iPadOS 和 HarmonyOS NEXT 暂停，待具备相应开发者账号及验证条件后再继续；目前没有 iOS 或 NEXT 安装包，不使用 APK 容器充当原生鸿蒙。
+当前优先完善 Android：`0.2.0-beta.1` 增加界面重做、多订阅、节点管理和独立升级通知，已完成发布。更新通道为独立的 `android-updates/android-update.json`，桌面 latest 仍为 v0.2.10；Alpha 用户需手动覆盖安装 Beta 一次。根据用户最新决定，iOS/iPadOS 和 HarmonyOS NEXT 暂停，待具备相应开发者账号及验证条件后再继续；目前没有 iOS 或 NEXT 安装包，不使用 APK 容器充当原生鸿蒙。
 
 ## 产品边界
 

@@ -4,7 +4,7 @@
 
 **[使用手册](docs/manual.md)**：安装与界面说明、系统代理与 TUN、订阅格式、配置语法（Clash YAML / 分享链接 / sing-box）、命令行与常见问题。
 
-**移动端**：已发布独立的 [Android 0.1.0-alpha.1 测试版](https://github.com/yuuolo/prism/releases/tag/android-v0.1.0-alpha.1)，用于真机验证；不作为稳定版。iOS/iPadOS 与 HarmonyOS NEXT 原生版按独立精简方案继续推进，功能以系统支持和真机稳定性为准。范围与发布条件见 [移动端方案](docs/mobile.md)。
+**移动端**：已发布独立的 [Android 0.2.0-beta.1](https://github.com/yuuolo/prism/releases/tag/android-v0.2.0-beta.1)，包含新版界面、多订阅与节点管理、升级通知和校验安装。Alpha 用户先手动覆盖安装一次，此后可收到升级提醒。iOS/iPadOS 与 HarmonyOS NEXT 暂停。范围与验证状态见 [移动端方案](docs/mobile.md)。
 
 ```
 ┌──────────── Prism GUI (Tauri 2 + React) ────────────┐
