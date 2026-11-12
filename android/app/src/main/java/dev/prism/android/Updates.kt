@@ -31,6 +31,7 @@ object Updates {
     private const val NOTICE = 7043
     private const val INTERVAL = 24*60*60*1000L
     private val lock=Any()
+    private val downloadLock=Any()
     private fun prefs(c: Context)=c.getSharedPreferences("android-updates",0)
     fun enabled(c: Context)=prefs(c).getBoolean("enabled",true)
     fun cached(c: Context): AndroidUpdate? {
@@ -62,6 +63,7 @@ object Updates {
         val age=System.currentTimeMillis()-maxOf(prefs(c).getLong("checked",0),prefs(c).getLong("attempted",0))
         return age<0 || age>6*60*60*1000L
     }
+    fun stale(c: Context)=System.currentTimeMillis()-prefs(c).getLong("checked",0)>6*60*60*1000L
     fun check(c: Context,notify: Boolean): AndroidUpdate? = synchronized(lock) {
         prefs(c).edit().putLong("attempted",System.currentTimeMillis()).apply()
         val body=open(MANIFEST).useConnection {connection ->
@@ -93,7 +95,7 @@ object Updates {
     }
     fun apk(c: Context)=File(c.cacheDir,"updates/update.apk")
     fun downloaded(c: Context,u: AndroidUpdate)=prefs(c).getLong("downloaded",0)==u.code && apk(c).isFile
-    fun download(c: Context,u: AndroidUpdate): File = synchronized(lock) {
+    fun download(c: Context,u: AndroidUpdate): File = synchronized(downloadLock) {
         require(u.code>BuildConfig.VERSION_CODE && u.minSdk<=Build.VERSION.SDK_INT)
         // Validate metadata again even when supplied by a restored UI instance.
         parse(u.json())

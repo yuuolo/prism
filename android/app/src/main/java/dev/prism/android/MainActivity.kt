@@ -22,6 +22,7 @@ class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var store: ProfileStore
     private val io = Executors.newSingleThreadExecutor()
+    private val updatesIo = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var tab = 0
     private var status: TextView? = null
@@ -37,6 +38,7 @@ class MainActivity : Activity() {
     private var nodeKind=""
     private var nodeSort=0
     private var nodeFavorites=false
+    private var lastStage=""
     private val tick = object : Runnable { override fun run() { updateStatus(); main.postDelayed(this, 1000) } }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun label(value: String, size: Float = 15f): TextView = TextView(this).apply {
@@ -180,8 +182,11 @@ class MainActivity : Activity() {
     override fun onActivityResult(request: Int, result: Int, data: Intent?) { super.onActivityResult(request,result,data); if(request==100 && result==RESULT_OK) startVpn() }
     private fun updateStatus() {
         progress?.visibility=if(busy || checkingUpdate) View.VISIBLE else View.GONE
-        if(tab!=0) return
         val stage=PrismVpnService.stage
+        val connected=stage=="已连接" && lastStage!=stage
+        lastStage=stage
+        if(connected && Updates.enabled(this) && Updates.stale(this)) checkUpdates(true)
+        if(tab!=0) return
         status?.text=stage + if(PrismVpnService.detail.isEmpty()) "" else "\n${PrismVpnService.detail}"
         connect?.text=when(stage) {"已连接","正在连接" -> "断开"; "正在断开" -> "正在断开"; else -> "连接"}
         connect?.isEnabled=stage!="正在断开" && (nodeCount>0 || !idle()) && (!busy || !idle())
@@ -362,11 +367,13 @@ class MainActivity : Activity() {
         if(checkingUpdate || (!automatic && busy)) return
         checkingUpdate=true
         if(!automatic && tab==3) render()
-        io.execute {
+        val connectedAtStart=PrismVpnService.stage=="已连接"
+        updatesIo.execute {
             val result=runCatching {Updates.check(this,true)}
             main.post {checkingUpdate=false; if(!isDestroyed) {
                 if(!automatic) message(if(result.isFailure) "暂时无法检查更新，请稍后重试" else if(result.getOrNull()==null) "当前已是可用的最新版本" else "发现新版本 ${result.getOrNull()!!.version}")
                 if(tab==3 || (tab==0 && result.getOrNull()!=null)) render()
+                if(automatic && result.isFailure && !connectedAtStart && PrismVpnService.stage=="已连接") checkUpdates(true)
             }}
         }
     }
@@ -392,6 +399,6 @@ class MainActivity : Activity() {
         Updates.cached(this)?.let {Updates.notify(this,it)}
     }
     override fun onPause() { main.removeCallbacks(tick); super.onPause() }
-    override fun onDestroy() { main.removeCallbacksAndMessages(null); io.shutdownNow(); super.onDestroy() }
+    override fun onDestroy() { main.removeCallbacksAndMessages(null); io.shutdownNow(); updatesIo.shutdownNow(); super.onDestroy() }
     private class UserMessage(message: String) : Exception(message)
 }
