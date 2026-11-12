@@ -38,6 +38,17 @@ class AndroidFeaturesTest {
         assertTrue(store.load().getJSONArray("nodes").getJSONObject(0).getBoolean("_local"))
         reset()
     }
+    @Test fun alphaProfileMigrationKeepsIdsAndCredentials() {
+        reset(); val store=ProfileStore(context)
+        val nodes=JSONObject(CoreBridge.importProfile(profile("Legacy",10001))).getJSONArray("nodes")
+        store.save(JSONObject().put("nodes",nodes).put("selected",0).put("sourceUrl","https://example.com/private-token").put("direct",org.json.JSONArray()))
+        val first=store.load(); val id=first.getJSONArray("nodes").getJSONObject(0).getString("_id")
+        assertEquals(id,store.load().getJSONArray("nodes").getJSONObject(0).getString("_id"))
+        assertEquals("legacy",first.getJSONArray("nodes").getJSONObject(0).getString("_sourceId"))
+        assertEquals("https://example.com/private-token",first.getJSONArray("subscriptions").getJSONObject(0).getString("url"))
+        assertFalse(context.getSharedPreferences("prism-mobile",0).getString("profile","")!!.contains("private-token"))
+        store.select(id); assertEquals("Legacy",JSONObject(store.session()).getJSONObject("node").getString("name")); reset()
+    }
     @Test fun updateIntegritySignerNotificationsAndProvider() {
         Updates.setEnabled(context,true)
         assertNotNull(context.getSystemService(JobScheduler::class.java).getPendingJob(7042))

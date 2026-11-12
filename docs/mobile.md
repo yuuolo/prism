@@ -4,7 +4,7 @@
 
 开发状态：Android 精简版 `0.1.0-alpha.1` 已[发布](https://github.com/yuuolo/prism/releases/tag/android-v0.1.0-alpha.1)，工程位于 `android/`，JNI 桥位于 `crates/prism-android/`。ARM64/x86_64、Debug/Release 构建、Lint，以及 Android 17 / API 37.2 / 16 KiB 内存页模拟器的系统 VPN、TCP/UDP DNS、系统解析、TCP/UDP 转发、会话重建、IPv6 阻断和立即重连[验收通过](https://github.com/yuuolo/prism/actions/runs/42991269494)。发布包使用固定本地安卓签名，私钥不上传，GitHub 资产摘要与本地校验一致。构建和模拟器通过不能替代真机稳定性验证。工程说明见 [Android README](../android/README.md)。
 
-后续顺序：Android 测试包完成后继续 iOS/iPadOS 和 HarmonyOS NEXT 原生版；不使用 APK 容器充当原生鸿蒙。iOS 分发目标为 TestFlight，当前尚未开通 Apple Developer Program，尚未具备签名和上传条件。根据 Apple 的 VPN 应用规则，分发主体需要核对组织开发者资格。HarmonyOS NEXT 需验证官方 SDK、VPN 扩展权限、签名及真机条件，尚无可用 HAP 包。
+当前优先完善 Android：`0.2.0-beta.1` 增加界面重做、多订阅、节点管理和独立升级通知，正在验收。根据用户最新决定，iOS/iPadOS 和 HarmonyOS NEXT 暂停，待具备相应开发者账号及验证条件后再继续；目前没有 iOS 或 NEXT 安装包，不使用 APK 容器充当原生鸿蒙。
 
 ## 产品边界
 

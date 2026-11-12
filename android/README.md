@@ -1,12 +1,15 @@
-# Prism Android 精简版
+# Prism Android
 
-独立原生 Kotlin 界面与 Android VpnService，内嵌 Rust prism-core。开发版本 `0.1.0-alpha.1`，与桌面版本、设置、签名及更新渠道分开。当前处于开发验证阶段，不作为稳定版发布。
+独立原生 Kotlin 界面与 Android VpnService，内嵌 Rust prism-core。开发版本 `0.2.0-beta.1`，与桌面版本、设置、签名及更新渠道分开。当前为 Beta 验证阶段。
 
 ## 范围
 
 - 连接/断开、系统 VPN 授权、前台连接通知。
-- HTTPS 订阅手动导入/更新、粘贴配置和单节点添加；单独添加的节点保留。
-- 节点选择、按需测试当前节点、基础域名后缀/IPv4 CIDR 直连规则。
+- 多个 HTTPS 订阅独立导入/更新和删除，粘贴配置与单节点添加；更新一个订阅不覆盖其他来源。
+- 节点搜索、协议筛选、名称/协议/收藏排序、收藏、选择和删除；按需测试当前节点。
+- 基础域名后缀/IPv4 CIDR 直连规则，受限的本地运行记录及复制。
+- 独立安卓升级通道，启动检查、系统每日后台检查、升级通知、手动下载和系统确认安装。
+- 紫色连接卡片、底部导航、分组列表、订阅卡片与独立更新页；适应系统边距和软键盘。
 - IPv4/IPv6 均路由进入 VPN；首版仅开放 IPv4 目标，IPv6 目标在内核拒绝，避免移除 IPv6 路由造成旁路。
 - DNS TCP/UDP 53 由内核处理，使用经所选节点的 DoH；代理服务器域名使用独立 IP 地址 DoH 引导，普通查询不回退系统 DNS。
 - 用户配置和订阅凭据使用 Android Keystore AES-GCM 加密，不参加系统备份；诊断事件有容量上限，不记录节点密钥和订阅 URL。
@@ -20,6 +23,14 @@
 所有 Rust TCP/UDP 出站 socket 在连接前调用 VpnService.protect，防止回环。Java 的普通应用请求仍进入 VPN；不全局排除自身 UID。手机系统管理底层网络，底层网络变化时有间隔限制地重建连接池/DNS，保留 VPN 描述符；不以流量空闲反复重启。
 
 用户断开和撤销 VPN 授权使旧连接请求失效；关闭 native runtime 后再释放 Java 的 TUN 描述符。后台不持续测速、不轮询连接列表、不持有无限保活任务。
+
+## 版本更新
+
+更新元数据固定为 `https://github.com/yuuolo/prism/releases/download/android-updates/android-update.json`；不读取 GitHub 默认 latest 或桌面 `latest.json`。后台任务由 Android JobScheduler 安排，系统省电、强行停止、网络限制或通知权限会影响提醒时机；应用打开时还会按间隔检查。只检查和提醒，不自动下载安装。
+
+安装包需通过大小、SHA-256、包名、递增 versionCode 和当前安装签名校验，拒绝其他签名和损坏包。只允许官方仓库的安卓 APK 地址及 GitHub 官方下载重定向。安装必须由用户授权此来源并在系统安装器确认，不进行静默安装。
+
+`0.1.0-alpha.1` 未含更新器，需要手动覆盖安装 Beta 一次，此后可收到升级提醒。保留同一安卓签名和 Keystore 数据，旧节点配置自动迁移为独立订阅/节点来源。
 
 ## 构建
 

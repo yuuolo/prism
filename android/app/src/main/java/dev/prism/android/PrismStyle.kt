@@ -8,7 +8,7 @@ import android.view.View
 object PrismStyle {
     val background=Color.rgb(246,245,251)
     val ink=Color.rgb(37,32,56)
-    val muted=Color.rgb(126,119,146)
+    val muted=Color.rgb(110,103,128)
     val purple=Color.rgb(116,87,231)
     val line=Color.rgb(231,226,241)
     fun shape(color: Int,radius: Float,stroke: Int?=null)=GradientDrawable().apply {

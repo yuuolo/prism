@@ -118,7 +118,7 @@ class MainActivity : Activity() {
         root.addView(progress,LinearLayout.LayoutParams(-1,dp(3)))
         Updates.cached(this)?.let {u -> button("发现新版本 ${u.version} · 查看更新") {tab=3; render()} }
         label(listOf("连接","节点与订阅","设置","版本更新")[tab],28f)
-        label(listOf("一处连接，轻松切换。","让每一条连接都有归属。","按自己的习惯配置。","保持 Prism 常新。")[tab],13f)
+        label(listOf("选择节点，开始连接。","集中管理订阅，快速找到节点。","按自己的习惯配置。","查看新版本与升级提醒。")[tab],13f)
         val tabs=LinearLayout(this).apply {setBackgroundColor(Color.WHITE); elevation=dp(3).toFloat(); setPadding(dp(8),dp(5),dp(8),dp(5))}
         listOf("连接","节点","设置","更新").forEachIndexed { i,title ->
             val item=LinearLayout(this).apply {orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER; isClickable=true; isFocusable=true; contentDescription=title; isSelected=tab==i
@@ -135,10 +135,11 @@ class MainActivity : Activity() {
         card(true) {
         label("PRISM VPN",11f).apply {letterSpacing=.16f; setTextColor(Color.rgb(197,182,235))}
         status=label(PrismVpnService.stage,28f)
-        label("你的网络，由你掌控。",13f).setTextColor(Color.rgb(215,204,237))
+        label("加密 DNS · 全设备接管",13f).setTextColor(Color.rgb(215,204,237))
         val state=try {store.load()} catch (_: Exception) {label("无法读取加密配置，请检查本机存储后重新导入"); JSONObject().put("nodes",JSONArray())}
         val choices=state.getJSONArray("nodes"); nodeCount=choices.length()
         val spinner=Spinner(this)
+        spinner.contentDescription="选择节点"; spinner.setPadding(dp(12),0,dp(12),0)
         spinner.backgroundTintList=android.content.res.ColorStateList.valueOf(Color.WHITE)
         root.addView(spinner,LinearLayout.LayoutParams(-1,dp(52)).apply {topMargin=dp(10);bottomMargin=dp(10)}); nodes=spinner
         spinner.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,if(nodeCount==0) listOf("请先添加节点") else (0 until nodeCount).map {choices.getJSONObject(it).optString("name","节点 ${it+1}")}).also {it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)}
@@ -178,12 +179,13 @@ class MainActivity : Activity() {
     @Deprecated("Platform callback")
     override fun onActivityResult(request: Int, result: Int, data: Intent?) { super.onActivityResult(request,result,data); if(request==100 && result==RESULT_OK) startVpn() }
     private fun updateStatus() {
-        progress?.visibility=if(busy) View.VISIBLE else View.GONE
+        progress?.visibility=if(busy || checkingUpdate) View.VISIBLE else View.GONE
         if(tab!=0) return
         val stage=PrismVpnService.stage
         status?.text=stage + if(PrismVpnService.detail.isEmpty()) "" else "\n${PrismVpnService.detail}"
         connect?.text=when(stage) {"已连接","正在连接" -> "断开"; "正在断开" -> "正在断开"; else -> "连接"}
         connect?.isEnabled=stage!="正在断开" && (nodeCount>0 || !idle()) && (!busy || !idle())
+        connect?.alpha=if(connect?.isEnabled==true) 1f else .5f
         nodes?.isEnabled=idle() && nodeCount>0 && !busy
         if(stage=="已连接") runCatching {
             val stats=JSONObject(CoreBridge.status())
@@ -333,7 +335,7 @@ class MainActivity : Activity() {
         label("打开应用时检查；后台由 Android 安排每日检查，省电或网络限制可能推迟。只检查，不自动下载或安装。",13f)
         if(Build.VERSION.SDK_INT>=33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)
             button("允许升级通知") {requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),110)}
-        button("检查新版本") {checkUpdates(false)}
+        button(if(checkingUpdate) "正在检查…" else "检查新版本") {checkUpdates(false)}.isEnabled=!checkingUpdate
         }
         val update=Updates.cached(this)
         if(update==null) label("暂无已发现的可用更新")
@@ -341,9 +343,9 @@ class MainActivity : Activity() {
             card {
             label("新版本 ${update.version}",20f); label(update.notes.ifEmpty {"版本改进与修复"})
             label("下载大小 ${formatBytes(update.size)}；安装前校验 SHA-256、包名、版本及安卓签名。",13f)
-            button(if(Updates.downloaded(this,update)) "安装已下载的更新" else "下载并安装更新") {
+            button(if(busy) "正在下载并校验…" else if(Updates.downloaded(this,update)) "安装已下载的更新" else "下载并安装更新") {
                 if(busy) {message("请等待当前操作完成"); return@button}
-                busy=true; updateStatus(); message("正在下载并校验安装包")
+                busy=true; render(); message("正在下载并校验安装包")
                 io.execute {
                     val result=runCatching {if(!Updates.downloaded(this,update)) Updates.download(this,update)}
                     main.post {busy=false; if(!isDestroyed) {
@@ -351,7 +353,7 @@ class MainActivity : Activity() {
                         if(result.isSuccess) installUpdate(update) else message("下载或校验失败，请重试；也可打开 GitHub 发布页")
                     }}
                 }
-            }
+            }.isEnabled=!busy
             }
         }
         button("打开安卓发布页") {startActivity(Intent(Intent.ACTION_VIEW,android.net.Uri.parse("https://github.com/yuuolo/prism/releases?q=android-v")))}
@@ -359,6 +361,7 @@ class MainActivity : Activity() {
     private fun checkUpdates(automatic: Boolean) {
         if(checkingUpdate || (!automatic && busy)) return
         checkingUpdate=true
+        if(!automatic && tab==3) render()
         io.execute {
             val result=runCatching {Updates.check(this,true)}
             main.post {checkingUpdate=false; if(!isDestroyed) {
