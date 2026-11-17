@@ -156,3 +156,24 @@ async fn refuses_other_programs() {
     }
     let _ = std::fs::remove_dir_all(l.data.parent().unwrap());
 }
+
+/// Prism checks whether the service is up by connecting and closing at
+/// once (client::state); that is not a failed request worth logging.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn liveness_checks_are_not_logged() {
+    let l = layout("probe", std::env::current_exe().unwrap());
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let srv = tokio::spawn(server::serve(l.clone(), stop_rx));
+    wait_ready(&l).await;
+    for _ in 0..20 {
+        drop(std::os::unix::net::UnixStream::connect(&l.pipe).unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(request_at(&l, &Request::Status).await.unwrap().ok);
+    let log = std::fs::read_to_string(l.log_file()).unwrap_or_default();
+    assert!(!log.contains("request failed"), "{log}");
+    stop_tx.send(true).unwrap();
+    srv.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(l.data.parent().unwrap());
+}
