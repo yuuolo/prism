@@ -370,6 +370,7 @@ impl State {
         loop {
             anyhow::ensure!(self.supervisor.lock().unwrap().valid(ticket), "恢复已取消");
             if control(&spec.config, "GET", "/version", None).await.is_ok() { break; }
+            anyhow::ensure!(self.process_state().await.is_some(), "内核在 API 就绪前已退出");
             if tokio::time::Instant::now() >= deadline { bail!("等待内核 API 超时"); }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -732,7 +733,11 @@ async fn dispatch(req: Request, st: &State) -> Response {
                         let valid = st.supervisor.lock().unwrap().valid(ticket);
                         match state {
                             Ok(state) if valid => st.supervisor.lock().unwrap().sync_state(None, state),
-                            _ if valid => { let mut supervisor = st.supervisor.lock().unwrap(); supervisor.status.enabled = false; supervisor.status.phase = "waiting-api".into(); }
+                            // No GUI mutation can run before this lifecycle lock
+                            // is released. If startup dies before the first API
+                            // snapshot, retry the original launch state rather
+                            // than silently disabling independent recovery.
+                            _ if valid => { st.supervisor.lock().unwrap().status.phase = "waiting-api".into(); }
                             _ => {}
                         }
                     }

@@ -225,3 +225,33 @@ async fn independent_recovery_preserves_reload_and_selection_and_manual_stop_win
     stop_tx.send(true).unwrap(); service.await.unwrap().unwrap();
     std::fs::remove_dir_all(l.data.parent().unwrap()).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failure_before_api_readiness_keeps_bounded_recovery_enabled() {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let source = target.join("debug").join(format!("prism-core{}", prism_service::EXE));
+    let l = layout("startup-failure", std::env::current_exe().unwrap());
+    std::fs::copy(source, l.cores_dir().join(format!("prism-core{}", prism_service::EXE))).unwrap();
+    // Only this fixture's listener is occupied; no system networking changes.
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = format!("mixed-port: {}\nexternal-controller: 127.0.0.1:{}\nproxies: []\nrules: ['MATCH,DIRECT']\n", occupied.local_addr().unwrap().port(), free_port());
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let service = tokio::spawn(server::serve(l.clone(), stop_rx)); wait_ready(&l).await;
+    let started = request_at(&l, &Request::Start {core:"prism".into(),config,files:BTreeMap::new(),kill_switch:false,tailscale:false,kill_switch_apps:vec![],recovery:true}).await.unwrap();
+    assert!(started.ok, "{:?}", started.error);
+    let state = started.status.unwrap();
+    assert!(state.recovery.enabled, "early startup exit must not disable recovery");
+    let original = state.recovery.last_exit_pid.expect("fixture must fail before API startup");
+    let mut retried = false;
+    for _ in 0..200 {
+        let state = request_at(&l, &Request::Status).await.unwrap().status.unwrap();
+        if state.recovery.last_exit_pid != Some(original) && matches!(state.recovery.phase.as_str(), "failed" | "cooldown") {
+            assert!(state.recovery.enabled); retried = true; break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(retried, "service did not retry the early startup failure");
+    assert!(request_at(&l, &Request::Stop).await.unwrap().ok);
+    stop_tx.send(true).unwrap(); service.await.unwrap().unwrap();
+    std::fs::remove_dir_all(l.data.parent().unwrap()).unwrap();
+}
