@@ -259,7 +259,7 @@ async fn probe(s: &crate::store::Settings) -> ProbeResult {
 /// Rebuild Prism's DNS/outbound state without replacing the TUN device or
 /// touching firewall protection. Only used after confirmed connectivity loss.
 async fn repair_sessions(s: &crate::store::Settings) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(8), crate::core::api(s, "PUT", "/configs", Some(serde_json::json!({}))))
+    tokio::time::timeout(Duration::from_secs(8), crate::core::api(s, "PUT", "/configs", Some(serde_json::json!({"repair":true}))))
         .await.map_err(|_| anyhow::anyhow!("会话重建超时"))??;
     tokio::time::timeout(Duration::from_secs(4), crate::core::api(s, "DELETE", "/connections", None))
         .await.map_err(|_| anyhow::anyhow!("旧连接清理超时"))??;
@@ -442,9 +442,25 @@ mod tests {
         let server = tokio::spawn(async move {
             for expected in ["PUT /configs HTTP/1.1", "DELETE /connections HTTP/1.1"] {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let mut bytes = [0; 4096];
-                let n = socket.read(&mut bytes).await.unwrap();
-                assert!(String::from_utf8_lossy(&bytes[..n]).starts_with(expected));
+                let mut bytes = Vec::new();
+                let (body_at, length) = loop {
+                    let mut chunk = [0; 1024];
+                    let n = socket.read(&mut chunk).await.unwrap(); assert_ne!(n, 0);
+                    bytes.extend_from_slice(&chunk[..n]); assert!(bytes.len() <= 4096);
+                    if let Some(at) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&bytes[..at]);
+                        let length = header.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                        break (at + 4, length);
+                    }
+                };
+                while bytes.len() < body_at + length {
+                    let mut chunk = [0; 1024]; let n = socket.read(&mut chunk).await.unwrap(); assert_ne!(n, 0);
+                    bytes.extend_from_slice(&chunk[..n]); assert!(bytes.len() <= 4096);
+                }
+                assert!(String::from_utf8_lossy(&bytes).starts_with(expected));
+                if expected.starts_with("PUT") {
+                    assert_eq!(serde_json::from_slice::<Value>(&bytes[body_at..body_at + length]).unwrap(), serde_json::json!({"repair":true}));
+                }
                 socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await.unwrap();
             }
         });

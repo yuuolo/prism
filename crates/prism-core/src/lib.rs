@@ -21,6 +21,8 @@ pub mod mrs;
 pub mod inbound;
 pub mod net;
 mod network;
+#[cfg(windows)]
+mod network_changes;
 pub mod outbound;
 pub mod process;
 pub mod provider;

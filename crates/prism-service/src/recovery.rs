@@ -71,7 +71,7 @@ pub fn project_snapshot(value: &serde_json::Value, pid: u32, since: u64) -> Opti
     use serde_json::{json, Map, Value};
     if value["schema"].as_u64()? != 1 || value["process_id"].as_u64()? != pid as u64 || value["captured_at"].as_u64()? < since { return None; }
     let mut output = Map::new();
-    for key in ["schema", "process_id", "captured_at", "uptime_ms", "running_pumps", "rx_packets", "rx_bytes", "tx_packets", "tx_bytes", "ring_full_drops", "rx_queue_high_water", "tx_queue_high_water", "max_queue_wait_ms", "last_rx_ms", "last_tx_ms", "working_set_bytes", "private_bytes", "process_handles", "cpu_time_100ns"] {
+    for key in ["schema", "process_id", "captured_at", "uptime_ms", "running_pumps", "rx_packets", "rx_bytes", "tx_packets", "tx_bytes", "ring_full_drops", "rx_queue_high_water", "tx_queue_high_water", "max_queue_wait_ms", "last_rx_ms", "last_tx_ms", "working_set_bytes", "private_bytes", "process_handles", "cpu_time_100ns", "network_recoveries", "network_recovery_failures", "last_network_recovery_ms"] {
         if let Some(n) = value[key].as_u64() { output.insert(key.into(), json!(n)); }
     }
     if let Some(enabled) = value["enabled"].as_bool() { output.insert("enabled".into(), json!(enabled)); }

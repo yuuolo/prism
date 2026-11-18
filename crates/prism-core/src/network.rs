@@ -20,8 +20,10 @@ impl Recovery {
     pub fn new(applied: Uplink) -> Self { Self { applied: Some(applied), offline: false } }
     pub fn needed(&mut self, next: Option<&Uplink>, resumed: bool) -> bool {
         let Some(next) = next else { self.offline = true; return false };
-        if resumed { self.offline = true; }
-        self.offline || self.applied.as_ref() != Some(next)
+        // Latch *every* unapplied change. A failed A -> B repair followed by
+        // B -> A still needs fresh pools and a corrected socket binding.
+        self.offline |= resumed || self.applied.as_ref() != Some(next);
+        self.offline
     }
     pub fn applied(&mut self, next: Uplink) { self.applied = Some(next); self.offline = false; }
 }
@@ -82,6 +84,16 @@ mod tests {
         r.applied(changed.clone());
         assert!(!r.needed(Some(&changed), false));
         assert!(r.needed(Some(&Uplink { index: 9, ..changed }), false));
+    }
+    #[test]
+    fn failed_switch_back_to_original_interface_remains_pending() {
+        let original = wifi();
+        let changed = Uplink { index: 9, ..original.clone() };
+        let mut r = Recovery::new(original.clone());
+        assert!(r.needed(Some(&changed), false));
+        assert!(r.needed(Some(&original), false), "returning to A must not discard a failed A -> B repair");
+        r.applied(original.clone());
+        assert!(!r.needed(Some(&original), false));
     }
     #[cfg(windows)]
     #[test]

@@ -12,7 +12,8 @@ from pathlib import Path
 
 NUMBERS = ("process_id", "captured_at", "uptime_ms", "running_pumps", "rx_packets", "rx_bytes", "tx_packets", "tx_bytes",
            "ring_full_drops", "rx_queue_high_water", "tx_queue_high_water", "max_queue_wait_ms", "last_rx_ms", "last_tx_ms",
-           "working_set_bytes", "private_bytes", "process_handles", "cpu_time_100ns")
+           "working_set_bytes", "private_bytes", "process_handles", "cpu_time_100ns",
+           "network_recoveries", "network_recovery_failures", "last_network_recovery_ms")
 STAGES = {"adapter_rx", "adapter_tx", "to_stack", "from_stack", "stack_runner", "tcp_accept", "udp_accept"}
 REASONS = {"task_exited", "device_receive_error", "device_send_error", "stack_input_error", "stack_output_error", "stack_runner_error"}
 

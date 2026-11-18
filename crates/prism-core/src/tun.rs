@@ -276,29 +276,48 @@ mod win {
 
     fn monitor_uplink(hub: &Arc<Hub>, index: u32, initial: crate::network::Uplink) {
         let weak = Arc::downgrade(hub);
+        let changes = match crate::network_changes::Changes::register(index, initial.index) {
+            Ok(changes) => Some(changes),
+            Err(error) => { tracing::warn!("网络恢复: {error}; using periodic route scans"); None }
+        };
         tokio::spawn(async move {
             let mut recovery = crate::network::Recovery::new(initial);
-            let mut previous = std::time::SystemTime::now();
+            let mut last_attempt: Option<tokio::time::Instant> = None;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                // Measure only time waiting for a scan. A slow reload/cooldown
+                // must not masquerade as another resume on the next iteration.
+                let waiting = std::time::SystemTime::now();
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+                    _ = async { match &changes { Some(c) => c.changed().await, None => std::future::pending::<()>().await } } => {
+                        // Fixed coalescing window: an event storm cannot keep
+                        // postponing the scan, nor cause a reload per callback.
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+                if let Some(last) = last_attempt { tokio::time::sleep_until(last + std::time::Duration::from_secs(3)).await; }
                 let Some(hub) = weak.upgrade() else { break };
-                let now = std::time::SystemTime::now();
-                let resumed = now.duration_since(previous).unwrap_or_default().as_secs() > 15;
-                previous = now;
+                let resumed = waiting.elapsed().unwrap_or_default().as_secs() > 15;
+                let invalidated = changes.as_ref().is_some_and(|c| c.take_invalidation());
                 let next = crate::network::uplink(index).ok();
-                if !recovery.needed(next.as_ref(), resumed) { continue; }
+                if !recovery.needed(next.as_ref(), resumed || invalidated) { continue; }
                 let next = next.unwrap();
+                last_attempt = Some(tokio::time::Instant::now());
+                if let Some(changes) = &changes { changes.applied(next.index); }
                 net::set_bind_interface(next.index);
                 tracing::info!("网络恢复: uplink changed or resumed, rebinding to interface {}", next.index);
                 // Rebuild protocol pools and DNS caches, keeping fake-IP mappings,
                 // selector choices, mode, API, TUN device and firewall protection.
-                match tokio::time::timeout(std::time::Duration::from_secs(30), hub.reload(None)).await {
+                let started = std::time::Instant::now();
+                match tokio::time::timeout(std::time::Duration::from_secs(30), hub.repair()).await {
                     Ok(Ok(())) => {
+                        hub.tun_health.network_repaired(true, started.elapsed());
                         hub.core().tunnel.stats.close_all();
                         recovery.applied(next);
                         tracing::info!("网络恢复: DNS and outbound sessions rebuilt successfully");
                     }
                     result => {
+                        hub.tun_health.network_repaired(false, started.elapsed());
                         tracing::warn!("网络恢复: rebuild failed ({result:?}), retrying after cooldown");
                         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                     }

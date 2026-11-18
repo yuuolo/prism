@@ -23,6 +23,8 @@ pub struct Snapshot {
     pub fault: Option<Fault>,
     pub working_set_bytes: Option<u64>, pub private_bytes: Option<u64>,
     pub process_handles: Option<u32>, pub cpu_time_100ns: Option<u64>,
+    pub network_recoveries: u64, pub network_recovery_failures: u64,
+    pub last_network_recovery_ms: u64,
 }
 pub struct Health {
     started: Instant, enabled: AtomicBool, stopping: AtomicBool,
@@ -31,6 +33,7 @@ pub struct Health {
     rx_high: AtomicU64, tx_high: AtomicU64, wait_max: AtomicU64,
     last_rx: AtomicU64, last_tx: AtomicU64, fault: Mutex<Option<Fault>>,
     pub failed: CancellationToken,
+    network_ok: AtomicU64, network_failed: AtomicU64, network_duration: AtomicU64,
 }
 impl Default for Health {
     fn default() -> Self { Self {
@@ -38,6 +41,7 @@ impl Default for Health {
         running: 0.into(), rx_packets: 0.into(), rx_bytes: 0.into(), tx_packets: 0.into(), tx_bytes: 0.into(),
         ring_full: 0.into(), rx_high: 0.into(), tx_high: 0.into(), wait_max: 0.into(),
         last_rx: 0.into(), last_tx: 0.into(), fault: Mutex::new(None), failed: CancellationToken::new(),
+        network_ok: 0.into(), network_failed: 0.into(), network_duration: 0.into(),
     } }
 }
 impl Health {
@@ -65,6 +69,11 @@ impl Health {
         self.last_tx.store(self.elapsed(), Ordering::Relaxed);
     }
     pub fn ring_full(&self) { self.ring_full.fetch_add(1, Ordering::Relaxed); }
+    pub fn network_repaired(&self, success: bool, duration: std::time::Duration) {
+        let counter = if success { &self.network_ok } else { &self.network_failed };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.network_duration.store(duration.as_millis().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+    }
     pub fn queue(&self, receive: bool, depth: usize, waited: std::time::Duration) {
         let high = if receive { &self.rx_high } else { &self.tx_high };
         high.fetch_max(depth as u64, Ordering::Relaxed);
@@ -82,6 +91,7 @@ impl Health {
             max_queue_wait_ms: get(&self.wait_max), last_rx_ms: get(&self.last_rx), last_tx_ms: get(&self.last_tx),
             fault: self.fault.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             working_set_bytes, private_bytes, process_handles, cpu_time_100ns,
+            network_recoveries: get(&self.network_ok), network_recovery_failures: get(&self.network_failed), last_network_recovery_ms: get(&self.network_duration),
         }
     }
     pub fn persist(&self, home: &std::path::Path) -> anyhow::Result<()> {
@@ -126,8 +136,11 @@ mod tests {
         let guard = h.guard(Pump::Receive);
         h.ring_full(); h.received(64); h.sent(32);
         h.queue(true, 4096, std::time::Duration::from_millis(12));
+        h.network_repaired(false, std::time::Duration::from_millis(20));
+        h.network_repaired(true, std::time::Duration::from_millis(8));
         assert!(!h.failed.is_cancelled());
         let s = h.snapshot(); assert_eq!(s.rx_bytes, 64); assert_eq!(s.tx_bytes, 32);
+        assert_eq!(s.network_recoveries, 1); assert_eq!(s.network_recovery_failures, 1); assert_eq!(s.last_network_recovery_ms, 8);
         #[cfg(windows)] {
             assert!(s.working_set_bytes.is_some_and(|n| n > 0));
             assert!(s.private_bytes.is_some_and(|n| n > 0));

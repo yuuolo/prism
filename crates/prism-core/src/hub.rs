@@ -43,6 +43,9 @@ pub struct Hub {
     pub tun_health: Arc<crate::tun_health::Health>,
     core: RwLock<Arc<Core>>,
     source: Source,
+    // Last successfully applied profile, never exposed through diagnostics.
+    // Automatic repairs must not accidentally reload a stale/on-disk edit.
+    profile: RwLock<Profile>,
     home: PathBuf,
     env: BuildEnv,
     reload_lock: tokio::sync::Mutex<()>,
@@ -52,8 +55,9 @@ impl Hub {
     pub async fn new(source: Source, home: PathBuf, profile: Profile) -> Result<Arc<Hub>> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let env = BuildEnv { stats: Arc::new(Stats::default()), reload: tx, fake_pool: Default::default() };
-        let core = build(source.apply(profile), &home, &env).await?;
-        let hub = Arc::new(Hub { tun_health: Default::default(), core: RwLock::new(Arc::new(core)), source, home, env, reload_lock: Default::default() });
+        let profile = source.apply(profile);
+        let core = build(profile.clone(), &home, &env).await?;
+        let hub = Arc::new(Hub { tun_health: Default::default(), core: RwLock::new(Arc::new(core)), source, profile: RwLock::new(profile), home, env, reload_lock: Default::default() });
         hub.install();
         // Providers ask for a reload when their content changes.
         let weak = Arc::downgrade(&hub);
@@ -61,7 +65,7 @@ impl Hub {
             while rx.recv().await.is_some() {
                 while rx.try_recv().is_ok() {}
                 let Some(hub) = weak.upgrade() else { break };
-                if let Err(e) = hub.reload(None).await {
+                if let Err(e) = hub.repair().await {
                     tracing::warn!("reload after provider update failed: {e:#}");
                 }
             }
@@ -109,8 +113,21 @@ impl Hub {
                 std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
             }
         };
-        let profile = config::parse_any(&raw)?;
-        let new = build(self.source.apply(profile), &self.home, &self.env).await?;
+        let profile = self.source.apply(config::parse_any(&raw)?);
+        self.replace(profile).await
+    }
+
+    /// Rebuild pools, resolver and provider contents from the last applied
+    /// profile. File edits are only applied by an explicit configuration reload.
+    pub async fn repair(&self) -> Result<()> {
+        let _guard = self.reload_lock.lock().await;
+        let profile = self.profile.read().unwrap().clone();
+        self.replace(profile).await
+    }
+
+    /// Caller must hold reload_lock across build and commit.
+    async fn replace(&self, profile: Profile) -> Result<()> {
+        let new = build(profile.clone(), &self.home, &self.env).await?;
         let old = self.core();
         *new.tunnel.mode.write().unwrap() = old.tunnel.mode();
         for name in &old.tunnel.reg.order {
@@ -125,6 +142,7 @@ impl Hub {
             tracing::warn!("{w}");
         }
         *self.core.write().unwrap() = Arc::new(new);
+        *self.profile.write().unwrap() = profile;
         self.install();
         old.shutdown.cancel();
         tracing::info!("configuration reloaded");
