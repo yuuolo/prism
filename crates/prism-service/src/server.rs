@@ -36,6 +36,7 @@ struct State {
     layout: Layout,
     owner: Owner,
     core: tokio::sync::Mutex<Option<Running>>,
+    kill_switch_apps: Mutex<Vec<String>>,
     #[cfg(windows)]
     kill_switch: Mutex<Option<crate::killswitch::KillSwitch>>,
     #[cfg(windows)]
@@ -60,14 +61,16 @@ fn push_log(logs: &Mutex<Logs>, line: String) {
 }
 
 impl State {
-    /// Only the cores this service runs may connect outside the TUN.
+    /// Core identities plus explicit user-selected app exceptions.
     #[cfg(windows)]
     fn set_kill_switch(&self, on: bool) -> Result<()> {
         let mut ks = self.kill_switch.lock().unwrap();
         match (on, ks.is_some()) {
             (true, false) => {
                 let allowed: Vec<PathBuf> = CORES.iter().map(|(_, file)| self.layout.cores_dir().join(file)).filter(|p| p.exists()).collect();
-                *ks = Some(crate::killswitch::KillSwitch::enable(&allowed).context("启用断网保护失败")?);
+                let mut protection = crate::killswitch::KillSwitch::enable(&allowed).context("启用断网保护失败")?;
+                protection.set_apps(&self.kill_switch_apps.lock().unwrap())?;
+                *ks = Some(protection);
                 push_log(&self.logs, "[service] 断网保护已启用".into());
             }
             (false, true) => {
@@ -95,6 +98,17 @@ impl State {
     #[cfg(not(windows))]
     fn kill_switch_on(&self) -> bool {
         false
+    }
+
+    fn set_apps(&self, paths: &[String]) -> Result<()> {
+        let paths = crate::app_exceptions::validate(paths)?;
+        #[cfg(windows)]
+        if let Some(ks) = self.kill_switch.lock().unwrap().as_mut() {
+            ks.set_apps(&paths)?;
+        }
+        *self.kill_switch_apps.lock().unwrap() = paths.clone();
+        push_log(&self.logs, format!("[service] 断网保护应用例外已更新：{} 个", paths.len()));
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -174,6 +188,8 @@ impl State {
             version: env!("CARGO_PKG_VERSION").into(),
             wintun: self.hash(&self.layout.wintun()),
             kill_switch: self.kill_switch_on(),
+            kill_switch_apps_supported: cfg!(windows),
+            kill_switch_apps: self.kill_switch_apps.lock().unwrap().clone(),
             tailscale_supported: cfg!(windows),
             #[cfg(windows)]
             tailscale: self.tail.lock().unwrap().status.clone(),
@@ -220,7 +236,7 @@ impl State {
         }
     }
 
-    async fn start(&self, kind: &str, config: &str, files: &BTreeMap<String, String>, kill_switch: bool, tailscale: bool) -> Result<()> {
+    async fn start(&self, kind: &str, config: &str, files: &BTreeMap<String, String>, kill_switch: bool, tailscale: bool, apps: &[String]) -> Result<()> {
         let file = core_file(kind).with_context(|| format!("unknown core {kind}"))?;
         let bin = self.layout.cores_dir().join(file);
         if !bin.exists() {
@@ -233,6 +249,11 @@ impl State {
             }
         }
         let config = sanitize_config(kind, config)?;
+        let available = crate::app_exceptions::available(apps)?;
+        if available.len() < apps.len() {
+            push_log(&self.logs, "[service] 断网保护：部分应用例外路径已失效，未放行这些程序".into());
+        }
+        self.set_apps(&available)?;
         #[cfg(windows)] self.tail.lock().unwrap().request(tailscale && kind=="prism");
         #[cfg(not(windows))] let _=tailscale;
         // Before the old core goes, so a restart has no unprotected moment.
@@ -319,6 +340,7 @@ fn load_state(layout: Layout) -> Result<Arc<State>> {
         layout,
         owner,
         core: Default::default(),
+        kill_switch_apps: Default::default(),
         #[cfg(windows)]
         kill_switch: Default::default(),
         #[cfg(windows)] tail: Default::default(),
@@ -447,6 +469,10 @@ async fn dispatch(req: Request, st: &State) -> Response {
             st.stop().await;
             Response { ok: true, ..Default::default() }
         }
+        Request::SetKillSwitchApps { paths } => match st.set_apps(&paths) {
+            Ok(()) => Response { ok: true, status: Some(st.status().await), ..Default::default() },
+            Err(error) => Response::err(error),
+        },
         Request::TailscaleConnect {connect} => {
             #[cfg(windows)] {
                 st.tail.lock().unwrap().connect(connect,std::time::Instant::now());
@@ -455,7 +481,7 @@ async fn dispatch(req: Request, st: &State) -> Response {
             #[cfg(not(windows))] {let _=connect; Response::err("此保护联动目前只支持 Windows")}
         }
         Request::Logs { since } => Response { ok: true, lines: st.logs_since(since), ..Default::default() },
-        Request::Start { core, config, files, kill_switch, tailscale } => match st.start(&core, &config, &files, kill_switch, tailscale).await {
+        Request::Start { core, config, files, kill_switch, tailscale, kill_switch_apps } => match st.start(&core, &config, &files, kill_switch, tailscale, &kill_switch_apps).await {
             Ok(()) => Response { ok: true, status: Some(st.status().await), ..Default::default() },
             Err(e) => Response::err(e),
         },

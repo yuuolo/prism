@@ -66,6 +66,7 @@ export interface Settings {
   geosite_srs_url: string;
   geoip_srs_url: string;
   kill_switch: boolean;
+  kill_switch_apps: string[];
   tray_speed: boolean;
 }
 
@@ -353,6 +354,7 @@ export const api = {
   setRealIpRules: (rules: RealIpRule[]) => invoke<void>("set_real_ip_rules", { rules }),
   testRealIp: (host: string) => invoke<RealIpResult>("test_real_ip", { host }),
   setKillSwitch: (enable: boolean) => invoke<void>("set_kill_switch", { enable }),
+  setKillSwitchApps: (paths: string[]) => invoke<void>("set_kill_switch_apps", { paths }),
   releaseKillSwitch: () => invoke<void>("release_kill_switch"),
   geoLocate: (hosts: string[]) => invoke<Record<string, string | null>>("geo_locate", { hosts }),
   nodeServers: () => invoke<Record<string, string>>("node_servers"),

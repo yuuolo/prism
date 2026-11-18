@@ -52,6 +52,7 @@ export function installDevMock() {
     geosite_srs_url: "",
     geoip_srs_url: "",
     kill_switch: false,
+    kill_switch_apps: [] as string[],
     chains: [{ id: "c1", enabled: true, name: "日本落地", hops: ["香港", "东京"] }],
     route_rules: [
       { id: "r1", enabled: true, kind: "DOMAIN-SUFFIX", value: "openai.com", target: "节点选择", resolve: false },
@@ -282,6 +283,7 @@ export function installDevMock() {
       settings.kill_switch = !!a.enable;
     },
     release_kill_switch: () => {},
+    set_kill_switch_apps: (a) => { settings.kill_switch_apps = a.paths as string[]; },
     set_real_ip_rules: (a) => {
       settings.real_ip_rules = a.rules as RealIpRule[];
     },

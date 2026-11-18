@@ -256,6 +256,15 @@ async fn probe(s: &crate::store::Settings) -> ProbeResult {
     }
     ProbeResult::Healthy
 }
+/// Rebuild Prism's DNS/outbound state without replacing the TUN device or
+/// touching firewall protection. Only used after confirmed connectivity loss.
+async fn repair_sessions(s: &crate::store::Settings) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(8), crate::core::api(s, "PUT", "/configs", Some(serde_json::json!({}))))
+        .await.map_err(|_| anyhow::anyhow!("会话重建超时"))??;
+    tokio::time::timeout(Duration::from_secs(4), crate::core::api(s, "DELETE", "/connections", None))
+        .await.map_err(|_| anyhow::anyhow!("旧连接清理超时"))??;
+    Ok(())
+}
 fn status(st: &crate::AppState, phase: &str, message: &str) {
     let mut s = st.recovery_status.lock().unwrap();
     s.phase = phase.into();
@@ -367,6 +376,19 @@ pub async fn run(app: AppHandle) {
         policy.restarts.push_back(now);
         policy.probe_failures = 0;
         policy.sample = None;
+        if alive && s.core == crate::store::CoreKind::Prism {
+            diagnostic(&app, &st, "repairing", "先重建 DNS 和代理会话，保留 TUN 与断网保护");
+            let repair = repair_sessions(&s).await;
+            if !st.core_intent.valid(ticket) || st.settings().recovery != s.recovery { continue; }
+            if repair.is_ok() && probe(&s).await == ProbeResult::Healthy {
+                if !st.core_intent.valid(ticket) || st.settings().recovery != s.recovery { continue; }
+                diagnostic(&app, &st, "healthy", "会话重建后联网恢复，无需重启内核");
+                continue;
+            }
+            if !st.core_intent.valid(ticket) || st.settings().recovery != s.recovery { continue; }
+            st.core.push_log(&app, format!("[prism] 自动恢复：会话重建未能恢复联网，继续重启内核{}", repair.err().map(|e| format!("：{e}")).unwrap_or_default()));
+        }
+        if let Some(last) = policy.restarts.back_mut() { *last = clock.elapsed().as_secs(); }
         {
             st.recovery_status.lock().unwrap().restarts += 1;
         }
@@ -396,6 +418,24 @@ mod tests {
             down: 0,
             connections: vec![],
         }
+    }
+    #[tokio::test]
+    async fn session_repair_uses_existing_config_and_cleans_connections() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut settings = crate::store::Settings::default();
+        settings.controller_port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for expected in ["PUT /configs HTTP/1.1", "DELETE /connections HTTP/1.1"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let n = socket.read(&mut bytes).await.unwrap();
+                assert!(String::from_utf8_lossy(&bytes[..n]).starts_with(expected));
+                socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+        });
+        repair_sessions(&settings).await.unwrap();
+        server.await.unwrap();
     }
     #[test]
     fn idle_requires_failed_probes_and_rate_is_bounded() {

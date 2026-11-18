@@ -350,14 +350,50 @@ function TunServiceCard() {
             {st !== "running" && <span className="tag">{t("需要先安装 TUN 服务。")}</span>}
             {st === "running" && snap.settings.kill_switch && !snap.settings.tun && <span className="tag">{t("需要先开启 TUN 模式才会生效。")}</span>}
           </div>
+          <KillSwitchApps />
           <div className="small muted" style={{ marginTop: 6 }}>
             {t("开启 TUN 时，只允许流量经 TUN、本机和局域网通过。内核崩溃后继续拦截，流量不会变成直连。")}{" "}
-            {t("内核崩溃后，直到重启内核或解除前都上不了网。不走 TUN 的远程控制、其他 VPN 也会被拦截。退出 Prism、停止内核或重启电脑都会解除。")}
+            {t("内核故障时保持互联网阻断；已配置的应用及组网例外按各自规则放行。停止内核或退出 Prism 会解除保护。")}
           </div>
         </div>
       )}
     </div>
   );
+}
+
+/** Exact executable identities allowed by the Windows kill switch. */
+function KillSwitchApps() {
+  const { snap, run, refresh } = useApp();
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [processes, setProcesses] = useState<string[] | null>(null);
+  const [search, setSearch] = useState("");
+  const paths = snap?.settings.kill_switch_apps ?? [];
+  const save = async (next: string[]) => {
+    setBusy(true);
+    try {
+      const ok = await run(async () => { await api.setKillSwitchApps(next); await refresh(); }, t("应用例外已保存"));
+      if (ok) setPath("");
+    } finally { setBusy(false); }
+  };
+  return <div style={{ marginTop: 12 }}>
+    <b>{t("断网保护应用例外")}</b> <span className="muted small">{paths.length}/32</span>
+    <p className="small muted">{t("仅解除指定程序的断网保护拦截，不改变代理或 TUN 路由；TUN 故障时不保证联网。DNS 防泄漏仍独立生效。请只添加可信程序，服务和子进程需分别添加。")}</p>
+    {paths.map(p => <div className="row" key={p} style={{ marginBottom: 6 }}>
+      <span className="small" style={{ flex: 1, overflowWrap: "anywhere" }}>{p}</span>
+      <button className="btn danger" disabled={busy} aria-label={`${t("移除")}: ${p}`} onClick={() => save(paths.filter(item => item !== p))}>{t("移除")}</button>
+    </div>)}
+    <div className="row wrap">
+      <input className="input" style={{ flex: 1, minWidth: 230 }} aria-label={t("应用可执行文件完整路径")} placeholder="C:\\Program Files\\Remote App\\app.exe" value={path} onChange={e => setPath(e.target.value)} disabled={busy} />
+      <button className="btn" disabled={busy || !path.trim() || paths.length >= 32} onClick={() => save([...paths, path.trim()])}>{t("添加例外")}</button>
+      <button className="btn" disabled={busy} onClick={() => run(async () => { const items = await api.listProcesses(); setProcesses([...new Set(items.map(p => p.path).filter(p => /\.exe$/i.test(p)))].sort()); })}>{t("从运行程序选择")}</button>
+    </div>
+    {processes !== null && <div style={{ marginTop: 8 }}>
+      <div className="row"><input className="input" style={{ flex: 1 }} aria-label={t("搜索正在运行的程序")} placeholder={t("搜索正在运行的程序")} value={search} onChange={e => setSearch(e.target.value)} /><button className="btn" onClick={() => setProcesses(null)}>{t("关闭")}</button></div>
+      <div className="proc-list">{processes.filter(p => p.toLowerCase().includes(search.toLowerCase())).slice(0, 80).map(p => <button className="btn" style={{ display: "block", width: "100%", textAlign: "left", overflowWrap: "anywhere" }} key={p} onClick={() => { setPath(p); setProcesses(null); }}>{p}</button>)}</div>
+    </div>}
+    <p className="small muted">{t("保存后同步新版 TUN 服务，无需重启内核；服务未运行时在下次启动应用。移除例外后，新的连接重新受保护，已有连接可能需要重新连接。")}</p>
+  </div>;
 }
 
 /** Custom geodata sources; the built-in addresses show as placeholders. */

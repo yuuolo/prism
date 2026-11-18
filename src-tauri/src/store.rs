@@ -72,6 +72,8 @@ pub struct Settings {
     /// Windows, TUN through the service: block traffic outside the TUN, also
     /// after the core dies.
     pub kill_switch: bool,
+    /// Exact local executable paths allowed outside Windows kill-switch blocks.
+    pub kill_switch_apps: Vec<String>,
     /// Live speed in the menu bar (macOS) / drawn as the tray icon (Windows).
     pub tray_speed: bool,
 }
@@ -115,6 +117,7 @@ impl Default for Settings {
             geosite_srs_url: String::new(),
             geoip_srs_url: String::new(),
             kill_switch: false,
+            kill_switch_apps: Vec::new(),
             tray_speed: cfg!(target_os = "macos"),
         }
     }

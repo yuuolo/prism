@@ -26,3 +26,7 @@ jobs:
         env:
           PRISM_TAILGUARD_WFP_TEST: '1'
         run: cargo test -p prism-service --lib native_scope_filters_and_revocation_keep_base_protection --locked -- --test-threads=1 --nocapture
+      - name: App exception allow and revoke (isolated runner)
+        env:
+          PRISM_APP_EXCEPTION_WFP_TEST: '1'
+        run: cargo test -p prism-service --lib native_app_exceptions_allow_only_selected_image_and_revoke --locked -- --test-threads=1 --nocapture

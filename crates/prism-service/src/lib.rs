@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+pub mod app_exceptions;
 
 #[cfg(windows)]
 pub mod killswitch;
@@ -158,11 +159,15 @@ pub enum Request {
         kill_switch: bool,
         #[serde(default)]
         tailscale: bool,
+        #[serde(default)]
+        kill_switch_apps: Vec<String>,
     },
     /// Stops the core and lifts the kill switch.
     Stop,
     /// Explicit, bounded permission for the verified Tailscale daemon to connect.
     TailscaleConnect { connect: bool },
+    /// Update executable exceptions without restarting the core or lifting protection.
+    SetKillSwitchApps { paths: Vec<String> },
     /// Core output lines after sequence number `since`.
     Logs { since: u64 },
 }
@@ -182,6 +187,10 @@ pub struct Status {
     /// The kill switch is on (blocking everything if `running` is false).
     #[serde(default)]
     pub kill_switch: bool,
+    #[serde(default)]
+    pub kill_switch_apps_supported: bool,
+    #[serde(default)]
+    pub kill_switch_apps: Vec<String>,
     #[serde(default)]
     pub tailscale_supported: bool,
     #[serde(default)]

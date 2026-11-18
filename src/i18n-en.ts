@@ -1,5 +1,13 @@
 // English for the interface (keys: the Chinese text used in the components).
 export const EN: Record<string, string> = {
+  "断网保护应用例外": "Kill switch app exceptions",
+  "应用例外已保存": "App exceptions saved",
+  "应用可执行文件完整路径": "Full executable path",
+  "添加例外": "Add exception",
+  "从运行程序选择": "Choose a running app",
+  "内核故障时保持互联网阻断；已配置的应用及组网例外按各自规则放行。停止内核或退出 Prism 会解除保护。": "Internet blocking remains during core faults, subject to configured app and tailnet exceptions. Stopping the core or quitting Prism removes protection.",
+  "仅解除指定程序的断网保护拦截，不改变代理或 TUN 路由；TUN 故障时不保证联网。DNS 防泄漏仍独立生效。请只添加可信程序，服务和子进程需分别添加。": "Only exempts the selected executable from kill switch blocking; proxy and TUN routing are unchanged. Connectivity during a TUN fault is not guaranteed. DNS leak protection remains independent. Add trusted programs only; services and child processes need separate entries.",
+  "保存后同步新版 TUN 服务，无需重启内核；服务未运行时在下次启动应用。移除例外后，新的连接重新受保护，已有连接可能需要重新连接。": "Saved changes sync to an updated TUN service without restarting the core, or apply on its next start. Removing an exception protects new connections again; existing connections may need reconnecting.",
   "连接与流量无变化诊断（秒）": "Unchanged connections/traffic diagnostic threshold (seconds)",
   "每三十秒检查代理联网；开启 TUN 时还检查系统路由与 DNS 通路，连接或流量变化不会推迟探测。连续三轮失败才重启，正常空闲不会直接触发重启。无变化阈值仅用于诊断提示。重启间隔至少一分钟，十分钟最多三次。": "Check proxy connectivity every 30 seconds, and system routing/DNS when TUN is enabled. Activity does not postpone probes. Restart after three failed rounds; normal idle does not trigger a restart. The inactivity threshold is diagnostic only. Restarts are at least one minute apart, at most three per ten minutes.",
   "连接按钮可给通过验证的 Tailscale 守护进程最多 60 秒临时授权；未完成连接会自动撤销，可点击断开立即取消。正常连接只放行已验证接口上的组网地址，互联网阻断保持启用。": "Connect authorizes the verified Tailscale daemon for up to 60 seconds. Authorization expires if connection is not completed; Disconnect cancels it immediately. Connected peers are allowed only on the verified tailnet interface. Internet blocking remains active.",

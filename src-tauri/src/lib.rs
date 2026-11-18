@@ -217,6 +217,7 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
         s.route_rules = keep.route_rules;
         s.merge_profiles = keep.merge_profiles;
         s.webdav = keep.webdav;
+        s.kill_switch_apps = keep.kill_switch_apps;
     })?;
     let restart = old.core != new.core
         || old.mixed_port != new.mixed_port
@@ -813,6 +814,9 @@ async fn start(app: &AppHandle, st: &AppState) -> Res<()> {
 
 async fn start_locked(app: &AppHandle, st: &AppState) -> Res<()> {
     let s = st.settings();
+    if s.tun && s.kill_switch && (!cfg!(windows) || tunsvc::state() != tunsvc::State::Running) {
+        return Err(tunsvc::NEED_UPDATE.into());
+    }
     if s.tailscale_bypass && s.kill_switch && s.tun {
         if !cfg!(windows) || tunsvc::state()!=tunsvc::State::Running { return Err(tunsvc::NEED_UPDATE.into()); }
         if !tunsvc::status().await.map_err(e)?.tailscale_supported {return Err(tunsvc::NEED_UPDATE.into());}
@@ -1159,7 +1163,26 @@ async fn set_kill_switch(app: AppHandle, st: State<'_, AppState>, enable: bool) 
     Ok(())
 }
 
-/// Gives the network back after a crash, without restarting the core.
+/// Apply app-specific firewall permits without restarting the proxy core.
+#[tauri::command]
+async fn set_kill_switch_apps(app: AppHandle, st: State<'_, AppState>, paths: Vec<String>) -> Res<()> {
+    if !cfg!(windows) { return Err("断网保护应用例外目前只支持 Windows".into()); }
+    let paths = prism_service::app_exceptions::validate(&paths).map_err(e)?;
+    let _guard = st.lifecycle.lock().await;
+    let old = st.settings().kill_switch_apps;
+    let service = tunsvc::state() == tunsvc::State::Running;
+    if service && !tunsvc::status().await.map_err(e)?.kill_switch_apps_supported { return Err(tunsvc::NEED_UPDATE.into()); }
+    st.update(|s| s.kill_switch_apps = paths.clone())?;
+    if service {
+        if let Err(error) = tunsvc::set_kill_switch_apps(paths.clone()).await {
+            st.update(|s| s.kill_switch_apps = old)?;
+            return Err(e(error));
+        }
+    }
+    st.core.push_log(&app, format!("[prism] 断网保护应用例外已保存：{} 个{}", paths.len(), if service { "，已同步服务" } else { "，将在服务启动时应用" }));
+    Ok(())
+}
+
 #[tauri::command]
 async fn release_kill_switch(app: AppHandle, st: State<'_, AppState>) -> Res<()> {
     tunsvc::stop().await.map_err(e)?;
@@ -1623,13 +1646,13 @@ pub fn run() {
                 let st = handle.state::<AppState>();
                 let mut s = st.settings();
                 if s.active_profile.is_some() {
-                    if s.tun && !tun_allowed() {
+                    if s.tun && !tun_allowed() && !s.kill_switch {
                         // Started with Windows, say: run without TUN rather than not at all.
                         s = st.update(|x| x.tun = false).unwrap_or(s);
                         note(&handle, &st, "TUN 模式需要管理员权限，本次未开启 TUN（可安装 TUN 服务，或以管理员身份重启）".into());
                     }
                     let mut r = start(&handle, &st).await;
-                    if matches!(&r, Err(err) if err.starts_with("NEED_SERVICE_UPDATE")) {
+                    if !s.kill_switch && matches!(&r, Err(err) if err.starts_with("NEED_SERVICE_UPDATE")) {
                         // No UAC prompt at logon: run without TUN this time.
                         s = st.update(|x| x.tun = false).unwrap_or(s);
                         note(&handle, &st, "TUN 服务中的内核需要更新，本次未开启 TUN（在设置页更新 TUN 服务后重新打开）".into());
@@ -1706,6 +1729,7 @@ pub fn run() {
             set_real_ip_rules,
             test_real_ip,
             set_kill_switch,
+            set_kill_switch_apps,
             release_kill_switch,
             set_profile_interval,
             set_autostart,

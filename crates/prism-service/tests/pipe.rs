@@ -75,13 +75,24 @@ async fn runs_a_core_for_its_owner_only() {
     assert!(!st.running);
     assert_eq!(st.cores.get("prism"), sha256_file(&core).as_ref());
     assert!(!st.cores.contains_key("mihomo"));
+    #[cfg(windows)] {
+        assert!(st.kill_switch_apps_supported);
+        let r = request_at(&l, &Request::SetKillSwitchApps { paths: vec![me.to_string_lossy().into_owned()] }).await.unwrap();
+        assert!(r.ok);
+        assert_eq!(r.status.unwrap().kill_switch_apps.len(), 1);
+        let r = request_at(&l, &Request::SetKillSwitchApps { paths: vec!["*.exe".into()] }).await.unwrap();
+        assert!(!r.ok);
+        let st = request_at(&l, &Request::Status).await.unwrap().status.unwrap();
+        assert_eq!(st.kill_switch_apps.len(), 1, "invalid updates must preserve the previous policy");
+        assert!(request_at(&l, &Request::SetKillSwitchApps { paths: vec![] }).await.unwrap().ok);
+    }
 
     // Files outside the allowed list are refused before anything starts.
     let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
     let evil = BTreeMap::from([("../evil.dll".to_string(), b64(b"x"))]);
-    let r = request_at(&l, &Request::Start { core: "prism".into(), config: "{}".into(), files: evil, kill_switch: false, tailscale: false }).await.unwrap();
+    let r = request_at(&l, &Request::Start { core: "prism".into(), config: "{}".into(), files: evil, kill_switch: false, tailscale: false, kill_switch_apps: vec![] }).await.unwrap();
     assert!(!r.ok && r.error.unwrap().contains("not allowed"));
-    let r = request_at(&l, &Request::Start { core: "mihomo".into(), config: "{}".into(), files: BTreeMap::new(), kill_switch: false, tailscale: false }).await.unwrap();
+    let r = request_at(&l, &Request::Start { core: "mihomo".into(), config: "{}".into(), files: BTreeMap::new(), kill_switch: false, tailscale: false, kill_switch_apps: vec![] }).await.unwrap();
     assert!(!r.ok, "mihomo isn't installed");
 
     let (mixed, api) = (free_port(), free_port());
@@ -92,7 +103,7 @@ async fn runs_a_core_for_its_owner_only() {
          rules:\n  - MATCH,DIRECT\n"
     );
     let files = BTreeMap::from([("geosite.dat".to_string(), b64(b"not really geodata"))]);
-    let r = request_at(&l, &Request::Start { core: "prism".into(), config, files, kill_switch: false, tailscale: false }).await.unwrap();
+    let r = request_at(&l, &Request::Start { core: "prism".into(), config, files, kill_switch: false, tailscale: false, kill_switch_apps: vec![] }).await.unwrap();
     assert!(r.ok, "{:?}", r.error);
     let st = r.status.unwrap();
     assert!(st.running && st.core.as_deref() == Some("prism") && st.pid.is_some());

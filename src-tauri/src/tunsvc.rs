@@ -50,6 +50,16 @@ pub async fn status() -> Result<Status> {
     call(&Request::Status).await?.status.context("no status")
 }
 
+pub async fn set_kill_switch_apps(paths: Vec<String>) -> Result<()> {
+    if !status().await?.kill_switch_apps_supported { bail!(NEED_UPDATE); }
+    let response = call(&Request::SetKillSwitchApps { paths: paths.clone() }).await?;
+    let status = response.status.context("保护服务缺少状态")?;
+    if !status.kill_switch_apps_supported || status.kill_switch_apps != paths {
+        bail!("断网保护应用例外未生效，请更新 TUN 服务");
+    }
+    Ok(())
+}
+
 pub async fn tailscale_control(connect: bool) -> Result<prism_service::TailscaleProtection> {
     let status=status().await?;
     if !status.tailscale_supported {bail!(NEED_UPDATE);}
@@ -140,8 +150,10 @@ pub async fn start(store: &Store, s: &Settings, config: String) -> Result<()> {
         }
     }
     let kill_switch = s.kill_switch && s.tun;
+    let apps = if cfg!(windows) { s.kill_switch_apps.clone() } else { Vec::new() };
+    if !apps.is_empty() && !st.kill_switch_apps_supported { bail!(NEED_UPDATE); }
     if kill_switch && s.tailscale_bypass && !st.tailscale_supported {bail!(NEED_UPDATE);}
-    let r = call(&Request::Start { core: kind_name(s.core).into(), config, files, kill_switch, tailscale: s.tailscale_bypass && s.core == CoreKind::Prism }).await?;
+    let r = call(&Request::Start { core: kind_name(s.core).into(), config, files, kill_switch, tailscale: s.tailscale_bypass && s.core == CoreKind::Prism, kill_switch_apps: apps }).await?;
     // A service from before the kill switch ignores the request.
     if kill_switch && !r.status.is_some_and(|st| st.kill_switch) {
         let _ = stop().await;

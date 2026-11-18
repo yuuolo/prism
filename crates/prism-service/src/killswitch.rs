@@ -58,6 +58,7 @@ fn cond(field: GUID, match_type: FWP_MATCH_TYPE, value_type: FWP_DATA_TYPE, valu
 /// A holder of the filters; dropping it removes them.
 pub struct KillSwitch {
     engine: HANDLE,
+    app_filters: Vec<u64>,
     tail_filters: Vec<u64>,
     tail_scope: bool,
     tail_blocks: Vec<u64>,
@@ -74,7 +75,7 @@ impl KillSwitch {
         let mut engine: HANDLE = std::ptr::null_mut();
         check("FwpmEngineOpen0", unsafe { FwpmEngineOpen0(std::ptr::null(), RPC_C_AUTHN_DEFAULT, std::ptr::null(), &session, &mut engine) })?;
         // From here on, dropping closes the session and undoes everything.
-        let ks = KillSwitch { engine, tail_filters: vec![], tail_scope: false, tail_blocks: vec![], tail_permit: None };
+        let ks = KillSwitch { engine, app_filters: vec![], tail_filters: vec![], tail_scope: false, tail_blocks: vec![], tail_permit: None };
         check("FwpmTransactionBegin0", unsafe { FwpmTransactionBegin0(engine, 0) })?;
         ks.add_filters(allowed)?;
         check("FwpmTransactionCommit0", unsafe { FwpmTransactionCommit0(engine) })?;
@@ -94,6 +95,48 @@ impl KillSwitch {
         let mut id = 0;
         check("FwpmFilterAdd0", unsafe { FwpmFilterAdd0(self.engine, &filter, std::ptr::null_mut(), &mut id) })?;
         Ok(id)
+    }
+
+    /// Replace only application permits atomically; base blocks and tailnet
+    /// rules remain installed, including if validation or a transaction fails.
+    pub fn set_apps(&mut self, paths: &[String]) -> Result<()> {
+        let paths = crate::app_exceptions::validate(paths)?;
+        check("应用例外事务", unsafe { FwpmTransactionBegin0(self.engine, 0) })?;
+        let result = (|| -> Result<Vec<u64>> {
+            for id in &self.app_filters {
+                check("撤销应用例外", unsafe { FwpmFilterDeleteById0(self.engine, *id) })?;
+            }
+            let mut ids = Vec::new();
+            for path in paths {
+                let path = wide(&path);
+                let mut blob = std::ptr::null_mut();
+                check("应用例外身份", unsafe { FwpmGetAppIdFromFileName0(path.as_ptr(), &mut blob) })?;
+                let result = (|| -> Result<()> {
+                    for layer in [FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6] {
+                        ids.push(self.add_id(layer, FWP_ACTION_PERMIT, PERMIT_WEIGHT, &mut [cond(FWPM_CONDITION_ALE_APP_ID, FWP_MATCH_EQUAL, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0_0 { byteBlob: blob })])?);
+                    }
+                    Ok(())
+                })();
+                let mut raw = blob.cast();
+                unsafe { FwpmFreeMemory0(&mut raw) };
+                result?;
+            }
+            Ok(ids)
+        })();
+        match result {
+            Ok(ids) => {
+                if let Err(error) = check("提交应用例外", unsafe { FwpmTransactionCommit0(self.engine) }) {
+                    unsafe { FwpmTransactionAbort0(self.engine) };
+                    return Err(error);
+                }
+                self.app_filters = ids;
+                Ok(())
+            }
+            Err(error) => {
+                unsafe { FwpmTransactionAbort0(self.engine) };
+                Err(error)
+            }
+        }
     }
 
     fn add(&self, layer: GUID, action: FWP_ACTION_TYPE, weight: u8, conds: &mut [FWPM_FILTER_CONDITION0]) -> Result<()> {
@@ -253,6 +296,49 @@ impl Drop for KillSwitch {
 mod tailnet_tests {
     use super::*;
     fn guid(a:GUID,b:GUID)->bool {a.data1==b.data1 && a.data2==b.data2 && a.data3==b.data3 && a.data4==b.data4}
+    #[test]
+    fn native_app_exceptions_allow_only_selected_image_and_revoke() {
+        // Never enable global firewall rules on a developer/user workstation.
+        if std::env::var("PRISM_APP_EXCEPTION_WFP_TEST").as_deref() != Ok("1") { return; }
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::Duration;
+        let public: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        let own_connect = || TcpStream::connect_timeout(&public, Duration::from_secs(4)).is_ok();
+        let app = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap()).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let child_connect = || std::process::Command::new(&app).args([
+            "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $c=New-Object Net.Sockets.TcpClient; if($c.ConnectAsync('1.1.1.1',443).Wait(4000)){exit 0}else{exit 1}",
+        ]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap().success();
+        assert!(own_connect() && child_connect(), "baseline internet required");
+        let mut ks = KillSwitch::enable(&[std::env::current_exe().unwrap()]).unwrap();
+        assert!(own_connect());
+        assert!(!child_connect(), "unlisted process must be blocked");
+        ks.set_apps(&[app.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(ks.app_filters.len(), 2, "IPv4 and IPv6 image permits");
+        let mut layers = Vec::new();
+        for id in &ks.app_filters { unsafe {
+            let mut raw = std::ptr::null_mut();
+            assert_eq!(FwpmFilterGetById0(ks.engine, *id, &mut raw), 0);
+            let filter = &*raw;
+            assert_eq!(filter.action.r#type, FWP_ACTION_PERMIT);
+            assert_eq!(filter.numFilterConditions, 1);
+            assert!(guid((*filter.filterCondition).fieldKey, FWPM_CONDITION_ALE_APP_ID));
+            layers.push(filter.layerKey);
+            let mut ptr = raw.cast(); FwpmFreeMemory0(&mut ptr);
+        }}
+        assert!(layers.iter().any(|v| guid(*v, FWPM_LAYER_ALE_AUTH_CONNECT_V4)));
+        assert!(layers.iter().any(|v| guid(*v, FWPM_LAYER_ALE_AUTH_CONNECT_V6)));
+        assert!(child_connect(), "selected executable must be allowed");
+        let installed = ks.app_filters.clone();
+        assert!(ks.set_apps(&["*.exe".into()]).is_err());
+        assert_eq!(ks.app_filters, installed, "invalid updates retain prior policy");
+        assert!(child_connect());
+        ks.set_apps(&[]).unwrap();
+        assert!(ks.app_filters.is_empty());
+        assert!(own_connect(), "core allow rules must survive exception updates");
+        assert!(!child_connect(), "removed executable must be blocked again");
+        drop(ks);
+        assert!(child_connect(), "dynamic filter cleanup restores normal networking");
+    }
     #[test]
     fn native_scope_filters_and_revocation_keep_base_protection() {
         // This briefly enables real global WFP protection. Only run on an
