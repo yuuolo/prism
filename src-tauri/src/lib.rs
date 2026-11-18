@@ -109,6 +109,7 @@ struct Snapshot {
     kill_switch_blocking: bool,
     uptime_secs: u64,
     recovery: watchdog::Status,
+    service_recovery: Option<prism_service::recovery::Status>,
 }
 
 /// Asks the service whatever the setting says now: a block outlives the setting.
@@ -127,6 +128,9 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
     let path = |k| core::core_binary(&st.store, &s, k);
     let running = st.core.running().await;
     let blocking = kill_switch_blocking().await;
+    let service_recovery = if tunsvc::state() == tunsvc::State::Running {
+        tunsvc::status().await.ok().filter(|s| s.recovery_supported).map(|s| s.recovery)
+    } else { None };
     static LAST_BLOCKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if blocking && !LAST_BLOCKING.swap(blocking, std::sync::atomic::Ordering::Relaxed) {
         st.core.push_log(&app, "[prism] 断网保护已触发：内核已退出，网络被拦截".into());
@@ -155,6 +159,7 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
         kill_switch_blocking: blocking,
         uptime_secs: if running.is_some() { st.core.uptime_secs() } else { 0 },
         recovery: st.recovery_status.lock().unwrap().clone(),
+        service_recovery,
     })
 }
 
@@ -230,6 +235,12 @@ async fn save_settings(app: AppHandle, st: State<'_, AppState>, settings: Settin
         || old.tailscale_bypass != new.tailscale_bypass;
     if restart && st.core.running().await.is_some() {
         start(&app, &st).await?;
+    }
+    if old.recovery.enabled != new.recovery.enabled && tunsvc::state() == tunsvc::State::Running {
+        if let Err(error) = tunsvc::set_recovery(new.recovery.enabled).await {
+            st.update(|s| s.recovery = old.recovery.clone())?;
+            return Err(e(error));
+        }
     }
     if new.system_proxy {
         sysproxy::set(true, &format!("127.0.0.1:{}", new.mixed_port), &new.proxy_bypass).map_err(e)?;
@@ -394,6 +405,29 @@ fn export_table(app: AppHandle, table: export::Table, format: String, what: Stri
     let data = export::render(&table, &format).map_err(e)?;
     let path = app.path().download_dir().map_err(e)?.join(export::file_name(&what, &format));
     std::fs::write(&path, data).map_err(e)?;
+    reveal(&path);
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+async fn export_tun_diagnostics(app: AppHandle, st: State<'_, AppState>) -> Res<String> {
+    let settings = st.settings();
+    let live = if settings.core == CoreKind::Prism {
+        tokio::time::timeout(Duration::from_secs(3), core::api(&settings, "GET", "/prism/health", None)).await.ok().and_then(Result::ok)
+            .and_then(|v| v["process_id"].as_u64().and_then(|id| u32::try_from(id).ok()).and_then(|id| prism_service::recovery::project_snapshot(&v, id, 0)))
+    } else { None };
+    let service = if tunsvc::state() == tunsvc::State::Running {
+        tokio::time::timeout(Duration::from_secs(3), tunsvc::status()).await.ok().and_then(Result::ok)
+            .filter(|s| s.recovery_supported).map(|s| json!({"version":s.version,"recovery":s.recovery}))
+    } else { None };
+    let gui = st.recovery_status.lock().unwrap().clone();
+    let report = json!({"schema":1,"captured_at":chrono::Utc::now().timestamp(),"app_version":app.package_info().version.to_string(),
+        "platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"core":settings.core,
+        "tun_requested":settings.tun,"kill_switch_requested":settings.kill_switch,"recovery_enabled":settings.recovery.enabled,
+        "tun_health":live,"service_recovery":service,"gui_recovery":{"phase":gui.phase,"restarts":gui.restarts,"checked_at":gui.checked_at}});
+    let name = format!("Prism-diagnostics-{}-{}.json", chrono::Utc::now().format("%Y%m%d-%H%M%S"), uuid::Uuid::new_v4());
+    let path = app.path().download_dir().map_err(e)?.join(name);
+    std::fs::write(&path, serde_json::to_vec_pretty(&report).map_err(e)?).map_err(e)?;
     reveal(&path);
     Ok(path.display().to_string())
 }
@@ -883,9 +917,13 @@ async fn reload_core(app: &AppHandle, st: &AppState) -> Res<()> {
     for w in cfg.warnings {
         st.core.push_log(app, format!("[prism] {w}"));
     }
-    core::api(&s, "PUT", "/configs", Some(json!({ "path": cfg.path.to_string_lossy() })))
-        .await
-        .map_err(|err| format!("内核未能加载新配置，仍在使用旧配置: {err:#}"))?;
+    let synchronized = if s.core == CoreKind::Prism && core::use_service(&s) {
+        tunsvc::reload(&st.store, std::fs::read_to_string(&cfg.path).map_err(e)?).await.map_err(e)?
+    } else { false };
+    if !synchronized {
+        core::api(&s, "PUT", "/configs", Some(json!({ "path": cfg.path.to_string_lossy() })))
+            .await.map_err(|err| format!("内核未能加载新配置，仍在使用旧配置: {err:#}"))?;
+    }
     if tokio::time::timeout(Duration::from_secs(10), apply_selections(&s)).await.is_err() {
         st.core.push_log(app, "[prism] 恢复节点选择超时，继续监测内核状态".into());
     }
@@ -1750,6 +1788,7 @@ pub fn run() {
             backup_import,
             backup_export,
             export_table,
+            export_tun_diagnostics,
             install_tun_service,
             uninstall_tun_service,
             check_update,

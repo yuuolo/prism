@@ -27,6 +27,7 @@ pub mod provider;
 pub mod rules;
 pub mod sniff;
 pub mod tun;
+pub mod tun_health;
 pub mod tunnel;
 
 use std::collections::{HashMap, HashSet};
@@ -379,6 +380,10 @@ pub async fn run(hub: Arc<hub::Hub>) -> Result<()> {
             }
         });
     }
-    std::future::pending::<()>().await;
-    Ok(())
+    let home = core.home.clone();
+    drop(core);
+    hub.tun_health.failed.cancelled().await;
+    hub.tun_health.stopping();
+    if let Err(error) = hub.tun_health.persist(&home) { tracing::error!("TUN diagnostic snapshot failed: {error}"); }
+    anyhow::bail!("TUN_HEALTH_FATAL: critical data-plane task stopped; snapshot saved when available")
 }

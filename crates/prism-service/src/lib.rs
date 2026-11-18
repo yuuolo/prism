@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 pub mod app_exceptions;
+pub mod recovery;
 
 #[cfg(windows)]
 pub mod killswitch;
@@ -161,6 +162,8 @@ pub enum Request {
         tailscale: bool,
         #[serde(default)]
         kill_switch_apps: Vec<String>,
+        #[serde(default)]
+        recovery: bool,
     },
     /// Stops the core and lifts the kill switch.
     Stop,
@@ -168,6 +171,10 @@ pub enum Request {
     TailscaleConnect { connect: bool },
     /// Update executable exceptions without restarting the core or lifting protection.
     SetKillSwitchApps { paths: Vec<String> },
+    SetRecovery { enabled: bool },
+    Recover,
+    Reload { config: String, files: BTreeMap<String, String> },
+    CoreMutation { method: String, path: String, body: serde_json::Value },
     /// Core output lines after sequence number `since`.
     Logs { since: u64 },
 }
@@ -177,6 +184,8 @@ pub struct Status {
     pub running: bool,
     pub core: Option<String>,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub uptime_secs: u64,
     pub version: String,
     /// kind -> SHA-256 of the installed core.
     pub cores: BTreeMap<String, String>,
@@ -191,6 +200,10 @@ pub struct Status {
     pub kill_switch_apps_supported: bool,
     #[serde(default)]
     pub kill_switch_apps: Vec<String>,
+    #[serde(default)]
+    pub recovery_supported: bool,
+    #[serde(default)]
+    pub recovery: recovery::Status,
     #[serde(default)]
     pub tailscale_supported: bool,
     #[serde(default)]

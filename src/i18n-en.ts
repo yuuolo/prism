@@ -1,5 +1,10 @@
 // English for the interface (keys: the Chinese text used in the components).
 export const EN: Record<string, string> = {
+  "服务独立监护": "Independent service supervision",
+  "服务累计恢复": "Service recoveries",
+  "导出脱敏诊断": "Export sanitized diagnostics",
+  "诊断文件已导出": "Diagnostics exported",
+  "诊断包含收发计数、队列压力、固定故障码及恢复记录，不包含订阅、节点凭据或流量内容。": "Includes packet counters, queue pressure, fixed fault codes and recovery events; excludes subscriptions, node credentials and traffic contents.",
   "断网保护应用例外": "Kill switch app exceptions",
   "应用例外已保存": "App exceptions saved",
   "应用可执行文件完整路径": "Full executable path",

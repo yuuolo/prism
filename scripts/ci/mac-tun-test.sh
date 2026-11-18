@@ -99,6 +99,14 @@ else
   bad "no DNS answer from 223.5.5.5"
 fi
 
+curl -fsS http://127.0.0.1:19090/prism/health | python3 -c '
+import json, sys
+h = json.load(sys.stdin)
+assert h["enabled"] and h["fault"] is None
+assert h["running_pumps"] & 15 == 15
+assert h["rx_packets"] > 0 and h["tx_packets"] > 0
+' && ok "TUN pumps healthy with bidirectional traffic" || bad "TUN health failed"
+
 sudo pkill -f "$CORE" || true
 sleep 2
 ifconfig | grep -q "inet 172.19.0.1 " && bad "utun still up after exit" || ok "utun removed after exit"

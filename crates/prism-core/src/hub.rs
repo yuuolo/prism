@@ -40,6 +40,7 @@ impl Source {
 }
 
 pub struct Hub {
+    pub tun_health: Arc<crate::tun_health::Health>,
     core: RwLock<Arc<Core>>,
     source: Source,
     home: PathBuf,
@@ -52,7 +53,7 @@ impl Hub {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let env = BuildEnv { stats: Arc::new(Stats::default()), reload: tx, fake_pool: Default::default() };
         let core = build(source.apply(profile), &home, &env).await?;
-        let hub = Arc::new(Hub { core: RwLock::new(Arc::new(core)), source, home, env, reload_lock: Default::default() });
+        let hub = Arc::new(Hub { tun_health: Default::default(), core: RwLock::new(Arc::new(core)), source, home, env, reload_lock: Default::default() });
         hub.install();
         // Providers ask for a reload when their content changes.
         let weak = Arc::downgrade(&hub);
@@ -74,6 +75,21 @@ impl Hub {
 
     pub fn home(&self) -> &std::path::Path {
         &self.home
+    }
+
+    /// Restore before listeners/TUN start, so no packets use a default exit.
+    pub fn restore_state(&self, value: serde_json::Value) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct Saved { mode: Option<String>, selections: std::collections::BTreeMap<String, String> }
+        let saved: Saved = serde_json::from_value(value)?;
+        let core = self.core();
+        if let Some(mode) = saved.mode { *core.tunnel.mode.write().unwrap() = config::Mode::parse(&mode).context("invalid saved mode")?; }
+        for (name, selected) in saved.selections {
+            let outbound = core.tunnel.reg.get(&name).context("saved group no longer exists")?;
+            let group = outbound.as_group().context("saved target is not a group")?;
+            group.select(&selected).map_err(|_| anyhow::anyhow!("saved selection no longer exists"))?;
+        }
+        Ok(())
     }
 
     /// Process-wide state that follows the current core.

@@ -472,7 +472,7 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
 }
 
 function RecoveryCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
-  const { snap } = useApp();
+  const { snap, run } = useApp();
   const p = form.recovery ?? DEFAULT_RECOVERY;
   const update = (key: keyof typeof p, value: unknown) => set("recovery", { ...p, [key]: value });
   return <div className="card span-2"><h3>{t("内核自动恢复")}</h3>
@@ -482,6 +482,9 @@ function RecoveryCard({ form, set }: { form: Settings; set: <K extends keyof Set
     <p className="small muted">{t("每三十秒检查代理联网；开启 TUN 时还检查系统路由与 DNS 通路，连接或流量变化不会推迟探测。连续三轮失败才重启，正常空闲不会直接触发重启。无变化阈值仅用于诊断提示。重启间隔至少一分钟，十分钟最多三次。")}</p>
     <p className="small muted">{t("手动停止后不会自动拉起；监控在后台运行，不依赖连接页面。宽限期和冷却期间可能暂时不探测。")}</p>
     <p className="small">{t("监控状态")}: {snap?.recovery?.phase || "idle"} · {snap?.recovery?.message || "—"} · {t("本次自动重启")}: {snap?.recovery?.restarts ?? 0}</p>
+    {snap?.service_recovery && <p className="small">{t("服务独立监护")}: {snap.service_recovery.enabled ? snap.service_recovery.phase : t("未启用")} · {t("服务累计恢复")}: {snap.service_recovery.restarts}</p>}
+    <button className="btn" onClick={() => run(api.exportTunDiagnostics, t("诊断文件已导出"))}>{t("导出脱敏诊断")}</button>
+    <p className="small muted">{t("诊断包含收发计数、队列压力、固定故障码及恢复记录，不包含订阅、节点凭据或流量内容。")}</p>
   </div>;
 }
 

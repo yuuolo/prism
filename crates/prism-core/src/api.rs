@@ -52,6 +52,7 @@ async fn auth(State(hub): St, req: Request, next: Next) -> Response {
 
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
+        .route("/prism/health", get(|State(hub): St| async move { Json(hub.tun_health.snapshot()) }))
         .route("/", get(|| async { Json(json!({ "hello": "prism" })) }))
         .route("/version", get(|| async { Json(json!({ "version": concat!("prism-", env!("CARGO_PKG_VERSION")), "meta": true })) }))
         .route("/configs", get(get_configs).patch(patch_configs).put(reload_configs))

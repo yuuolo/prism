@@ -6,6 +6,9 @@ on:
     paths:
       - 'src-tauri/src/**'
       - 'src-tauri/Cargo.toml'
+      - 'crates/prism-core/**'
+      - 'crates/prism-service/**'
+      - 'scripts/*stability*'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/recovery.yml'
@@ -26,6 +29,14 @@ jobs:
         with:
           key: recovery-windows
       - run: npm ci
+      - name: Observer isolation tests
+        run: python -X utf8 -m unittest discover -s scripts -p test_stability_observe.py
+      - name: Build core and service fixtures
+        run: cargo build -p prism-core -p prism-service --locked
+      - name: Critical task and protocol recovery tests
+        run: cargo test -p prism-core --lib --test tun_health --test network_recovery --test anytls_wire --locked
+      - name: Independent service recovery tests
+        run: cargo test -p prism-service --lib --test pipe --locked
       - name: Desktop recovery and persistence tests
         run: cargo test -p prism --lib --locked
       - name: Frontend build

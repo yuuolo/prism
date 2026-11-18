@@ -315,6 +315,16 @@ pub async fn run(app: AppHandle) {
             .ok()
             .flatten()
             .is_some();
+        if !alive && crate::core::use_service(&s) {
+            match tokio::time::timeout(Duration::from_secs(3), crate::tunsvc::status()).await {
+                Ok(Ok(service)) if service.recovery_supported && service.recovery.enabled => {
+                    diagnostic(&app, &st, "service-recovery", &format!("服务独立监护：{}，累计恢复 {} 次", service.recovery.phase, service.recovery.restarts));
+                    continue;
+                }
+                Err(_) | Ok(Err(_)) => { diagnostic(&app, &st, "service-unavailable", "等待服务状态确认，避免重复启动内核"); continue; }
+                _ => {}
+            }
+        }
         if alive && st.core.uptime_secs() < 30 {
             status(&st, "warming", "内核启动宽限期");
             continue;
@@ -395,7 +405,11 @@ pub async fn run(app: AppHandle) {
         status(&st, "restarting", reason);
         st.core
             .push_log(&app, format!("[prism] 自动恢复：{reason}，重新启动内核"));
-        match crate::start_locked(&app, &st).await {
+        let owned = if crate::core::use_service(&s) {
+            crate::tunsvc::status().await.is_ok_and(|service| service.recovery_supported && service.recovery.enabled)
+        } else { false };
+        let result = if owned { crate::tunsvc::recover().await.map_err(|e| e.to_string()) } else { crate::start_locked(&app, &st).await };
+        match result {
             Ok(()) => {
                 status(&st, "warming", "内核已重启，等待恢复检测");
                 st.core

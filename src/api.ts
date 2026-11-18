@@ -174,6 +174,7 @@ export interface Snapshot {
   kill_switch_blocking: boolean;
   uptime_secs: number;
   recovery: RecoveryStatus;
+  service_recovery?: { enabled: boolean; phase: string; restarts: number; last_exit_pid?: number; last_exit_code?: number } | null;
   platform: "windows" | "macos" | string;
 }
 
@@ -377,6 +378,7 @@ export const api = {
   patchedProfiles: () => invoke<string[]>("patched_profiles"),
   /** Saves to the Downloads folder; returns the file path. */
   exportTable: (table: ExportTable, format: ExportFormat, what: string) => invoke<string>("export_table", { table, format, what }),
+  exportTunDiagnostics: () => invoke<string>("export_tun_diagnostics"),
   webdavSave: (url: string, username: string, password: string | null) => invoke<void>("webdav_save", { url, username, password }),
   webdavTest: () => invoke<void>("webdav_test"),
   backupUpload: () => invoke<string>("backup_upload"),

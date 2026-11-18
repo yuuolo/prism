@@ -65,6 +65,10 @@ try {
   $answer = Resolve-DnsName dns-guard-test.invalid -Type A -Server 172.19.0.2 -DnsOnly -NoHostsFile -QuickTimeout
   if (@($answer | Where-Object IPAddress -eq '203.0.113.7').Count -eq 0) { throw 'DNS failed after reload' }
   Write-Output 'PASS DNS interception survives reload'
+  $health = Invoke-RestMethod -Uri http://127.0.0.1:19091/prism/health
+  if (!$health.enabled -or $health.fault -or $health.rx_packets -lt 1 -or $health.tx_packets -lt 1) { throw 'TUN telemetry did not observe healthy real DNS traffic' }
+  if (($health.running_pumps -band 15) -ne 15) { throw 'critical TUN pumps are not all running' }
+  Write-Output 'PASS actual TUN packet counters and pump liveness survive reload'
 } finally {
   if ($process -and !$process.HasExited) { Stop-Process -Id $process.Id -Force; $process.WaitForExit() }
   if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout }

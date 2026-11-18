@@ -27,6 +27,7 @@ pub struct CoreManager {
     service_logs: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub logs: Arc<Mutex<VecDeque<String>>>,
     started: Mutex<Option<std::time::Instant>>,
+    service_pid: Mutex<Option<u32>>,
     app: Mutex<Option<AppHandle>>,
 }
 
@@ -266,7 +267,14 @@ impl CoreManager {
     pub async fn running(&self) -> Option<CoreKind> {
         if let Some(kind) = *self.service.lock().await {
             return match crate::tunsvc::status().await {
-                Ok(st) if st.running && st.core.as_deref() == Some(crate::tunsvc::kind_name(kind)) => Some(kind),
+                Ok(st) if st.running && st.core.as_deref() == Some(crate::tunsvc::kind_name(kind)) => {
+                    let mut previous = self.service_pid.lock().unwrap();
+                    if st.recovery_supported {
+                        *self.started.lock().unwrap() = std::time::Instant::now().checked_sub(Duration::from_secs(st.uptime_secs));
+                    } else if previous.is_some() && *previous != st.pid { *self.started.lock().unwrap() = Some(std::time::Instant::now()); }
+                    *previous = st.pid;
+                    Some(kind)
+                },
                 Ok(st) => {
                     if let Some(started) = self.started.lock().unwrap().take() {
                         if let Some(app) = self.app.lock().unwrap().as_ref() {
@@ -453,6 +461,11 @@ fn push_log(logs: &Mutex<VecDeque<String>>, app: &AppHandle, line: String) {
 
 /// Calls the running core's Clash API.
 pub async fn api(s: &Settings, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+    let remember = (method == "PATCH" && path == "/configs" && body.as_ref().is_some_and(|b| b.get("mode").is_some()))
+        || (method == "PUT" && path.starts_with("/proxies/"));
+    if remember && s.core == CoreKind::Prism && use_service(s) {
+        if crate::tunsvc::mutation(method, path, body.clone().unwrap_or(Value::Null)).await? { return Ok(Value::Null); }
+    }
     let url = format!("http://127.0.0.1:{}{}", s.controller_port, path);
     let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build()?;
     let mut req = client.request(method.parse()?, &url).bearer_auth(&s.secret);

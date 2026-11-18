@@ -77,6 +77,8 @@ mod stack {
     /// Runs the stack over a device: `from_dev` delivers IP packets read
     /// from the adapter, `to_dev` takes the packets to write to it.
     pub fn run(_cfg: &TunConfig, hub: Arc<Hub>, mut from_dev: mpsc::Receiver<Vec<u8>>, to_dev: mpsc::Sender<Vec<u8>>) -> Result<()> {
+        use crate::tun_health::Pump;
+        let health = hub.tun_health.clone();
         let (stack, runner, udp, tcp) = StackBuilder::default()
             .enable_tcp(true)
             .enable_udp(true)
@@ -85,37 +87,58 @@ mod stack {
             .build()
             .map_err(|e| anyhow!("netstack: {e}"))?;
         if let Some(r) = runner {
-            tokio::spawn(r);
+            let guard = health.guard(Pump::Runner);
+            let runner_health = health.clone();
+            tokio::spawn(async move { let _guard = guard; if let Err(error) = r.await { tracing::error!("TUN stack runner: {error}"); runner_health.fail(Pump::Runner, "stack_runner_error", None); } });
         }
         let (mut stack_sink, mut stack_stream) = stack.split();
+        let input_health = health.clone();
+        let input_guard = health.guard(Pump::ToStack);
         tokio::spawn(async move {
+            let _guard = input_guard;
             while let Some(p) = from_dev.recv().await {
-                if stack_sink.send(p).await.is_err() {
+                if let Err(error) = stack_sink.send(p).await {
+                    tracing::error!("TUN stack input: {error}");
+                    input_health.fail(Pump::ToStack, "stack_input_error", None);
                     break;
                 }
             }
         });
+        let output_health = health.clone();
+        let output_guard = health.guard(Pump::FromStack);
         tokio::spawn(async move {
-            while let Some(Ok(p)) = stack_stream.next().await {
+            let _guard = output_guard;
+            while let Some(result) = stack_stream.next().await {
+                let p = match result {
+                    Ok(p) => p,
+                    Err(error) => { tracing::error!("TUN stack output: {error}"); output_health.fail(Pump::FromStack, "stack_output_error", None); break; }
+                };
                 if p.is_empty() || p.len() > u16::MAX as usize {
                     continue;
                 }
+                let queued = (to_dev.max_capacity() - to_dev.capacity() + 1).min(to_dev.max_capacity());
+                let wait = std::time::Instant::now();
+                output_health.queue(false, queued, std::time::Duration::ZERO);
                 if to_dev.send(p).await.is_err() {
                     break;
                 }
+                output_health.queue(false, queued, wait.elapsed());
             }
         });
 
         if let Some(mut tcp) = tcp {
             let h = hub.clone();
+            let guard = health.guard(Pump::Tcp);
             tokio::spawn(async move {
+                let _guard = guard;
                 while let Some((stream, src, dst)) = tcp.next().await {
                     tokio::spawn(handle_tcp(stream, src, dst, h.core().tunnel.clone()));
                 }
             });
         }
         if let Some(udp) = udp {
-            tokio::spawn(handle_udp(udp, hub));
+            let guard = health.guard(Pump::Udp);
+            tokio::spawn(async move { let _guard = guard; handle_udp(udp, hub).await; });
         }
         Ok(())
     }
@@ -372,27 +395,63 @@ mod win {
         // Windows DNS queries fail and may cause fallback to another adapter.
         wait_addresses(index, ipv6_ready_required).await?;
         tracing::info!("TUN adapter Prism (if {index}) up at {ADDR}/30, outbound bound to if {phys}, auto-route={}", cfg.auto_route);
+        use crate::tun_health::Pump;
+        hub.tun_health.enable();
 
         // adapter -> stack (wintun reads block, so use a thread)
         let (tx, rx) = mpsc::channel::<Vec<u8>>(4096);
         let rs = session.clone();
+        let receive_health = hub.tun_health.clone();
+        let receive_guard = receive_health.guard(Pump::Receive);
         std::thread::Builder::new().name("tun-rx".into()).spawn(move || {
-            while let Ok(p) = rs.receive_blocking() {
-                if tx.blocking_send(p.bytes().to_vec()).is_err() {
-                    break;
+            let _guard = receive_guard;
+            loop {
+                match rs.receive_blocking() {
+                    Ok(packet) => {
+                        let bytes = packet.bytes().to_vec();
+                        drop(packet); // Release the ring slot BEFORE a possibly blocked queue send.
+                        receive_health.received(bytes.len());
+                        let queued = (tx.max_capacity() - tx.capacity() + 1).min(tx.max_capacity());
+                        let wait = std::time::Instant::now();
+                        receive_health.queue(true, queued, std::time::Duration::ZERO);
+                        if tx.blocking_send(bytes).is_err() { break; }
+                        receive_health.queue(true, queued, wait.elapsed());
+                    }
+                    Err(error) => {
+                        let code = match &error { wintun::Error::Io(e) => e.raw_os_error(), _ => None };
+                        tracing::error!("TUN receive failed: {error}");
+                        receive_health.fail(Pump::Receive, "device_receive_error", code);
+                        break;
+                    }
                 }
             }
         })?;
         // stack -> adapter
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(4096);
         let ws = session.clone();
+        let send_health = hub.tun_health.clone();
+        let send_guard = send_health.guard(Pump::Send);
         tokio::spawn(async move {
+            let _guard = send_guard;
             let _keep = adapter; // adapter lives as long as the pump
             let _dns_guard = dns_guard; // survives reloads, removed on TUN shutdown
             while let Some(p) = out_rx.recv().await {
-                if let Ok(mut pkt) = ws.allocate_send_packet(p.len() as u16) {
-                    pkt.bytes_mut().copy_from_slice(&p);
-                    ws.send_packet(pkt);
+                match ws.allocate_send_packet(p.len() as u16) {
+                    Ok(mut pkt) => {
+                        pkt.bytes_mut().copy_from_slice(&p);
+                        ws.send_packet(pkt);
+                        send_health.sent(p.len());
+                    }
+                    Err(wintun::Error::Io(error)) if error.raw_os_error() == Some(111) => {
+                        // ERROR_BUFFER_OVERFLOW: congestion, not a dead adapter.
+                        send_health.ring_full();
+                    }
+                    Err(error) => {
+                        let code = match &error { wintun::Error::Io(e) => e.raw_os_error(), _ => None };
+                        tracing::error!("TUN send failed: {error}");
+                        send_health.fail(Pump::Send, "device_send_error", code);
+                        break;
+                    }
                 }
             }
         });
@@ -563,9 +622,14 @@ mod mac {
         // Safety: `fd` is owned by the AsyncFd from here on and closed only
         // when it is dropped, after deregistration.
         let dev = Arc::new(unsafe { AsyncFd::register(fd) }.map_err(|e| anyhow!("register utun: {}", e.into_parts().1))?);
+        use crate::tun_health::Pump;
+        hub.tun_health.enable();
         let (tx, rx) = mpsc::channel::<Vec<u8>>(4096);
         let rd = dev.clone();
+        let receive_health = hub.tun_health.clone();
+        let receive_guard = receive_health.guard(Pump::Receive);
         tokio::spawn(async move {
+            let _guard = receive_guard;
             let mut buf = vec![0u8; MTU + 4];
             loop {
                 let Ok(mut guard) = rd.readable().await else { return };
@@ -574,13 +638,19 @@ mod mac {
                     if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
                 }) {
                     Ok(Ok(n)) if n > 4 => {
+                        receive_health.received(n - 4);
+                        let queued = (tx.max_capacity() - tx.capacity() + 1).min(tx.max_capacity());
+                        let wait = std::time::Instant::now();
+                        receive_health.queue(true, queued, std::time::Duration::ZERO);
                         if tx.send(buf[4..n].to_vec()).await.is_err() {
                             return;
                         }
+                        receive_health.queue(true, queued, wait.elapsed());
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
                         tracing::warn!("utun read: {e}");
+                        receive_health.fail(Pump::Receive, "device_receive_error", e.raw_os_error());
                         return;
                     }
                     Err(_would_block) => {}
@@ -588,7 +658,10 @@ mod mac {
             }
         });
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(4096);
+        let send_health = hub.tun_health.clone();
+        let send_guard = send_health.guard(Pump::Send);
         tokio::spawn(async move {
+            let _guard = send_guard;
             while let Some(p) = out_rx.recv().await {
                 let pkt = frame(&p);
                 loop {
@@ -597,7 +670,11 @@ mod mac {
                         let n = unsafe { libc::write(fd.as_raw_fd(), pkt.as_ptr() as *const _, pkt.len()) };
                         if n < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
                     }) {
-                        Ok(_) => break, // a failed write drops the packet
+                        Ok(Ok(())) => { send_health.sent(p.len()); break; }
+                        Ok(Err(error)) => {
+                            send_health.fail(Pump::Send, "device_send_error", error.raw_os_error());
+                            return;
+                        }
                         Err(_would_block) => continue,
                     }
                 }
