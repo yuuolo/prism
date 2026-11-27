@@ -1,6 +1,6 @@
 import Help from "../Help";
 import { useEffect, useState } from "react";
-import { api, fmtAgo, fmtBytes, fmtInterval, type Patches, type ProfileMeta } from "../api";
+import { api, ask, fmtAgo, fmtBytes, fmtInterval, type Patches, type ProfileMeta } from "../api";
 import { useApp } from "../state";
 import { t } from "../i18n";
 
@@ -323,7 +323,7 @@ export default function Profiles() {
                 <button
                   className="btn sm danger"
                   disabled={!!busy}
-                  onClick={() => confirm(t("删除订阅「{name}」？", { name: p.name })) && act(p.id, () => api.deleteProfile(p.id), t("已删除"))}
+                  onClick={() => ask(t("删除订阅「{name}」？", { name: p.name })).then((ok) => { if (ok) void act(p.id, () => api.deleteProfile(p.id), t("已删除")); })}
                 >
                   {t("删除")}
                 </button>

@@ -1581,6 +1581,9 @@ pub fn run() {
             })),
     )
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Native yes/no prompts: macOS's WKWebView answers window.confirm
+        // with "Cancel" without showing anything.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, sc, ev| {
@@ -1690,10 +1693,10 @@ pub fn run() {
                         note(&handle, &st, "TUN 模式需要管理员权限，本次未开启 TUN（可安装 TUN 服务，或以管理员身份重启）".into());
                     }
                     let mut r = start(&handle, &st).await;
-                    if !s.kill_switch && matches!(&r, Err(err) if err.starts_with("NEED_SERVICE_UPDATE")) {
+                    if !s.kill_switch && matches!(&r, Err(err) if err.starts_with("NEED_SERVICE_")) {
                         // No UAC prompt at logon: run without TUN this time.
                         s = st.update(|x| x.tun = false).unwrap_or(s);
-                        note(&handle, &st, "TUN 服务中的内核需要更新，本次未开启 TUN（在设置页更新 TUN 服务后重新打开）".into());
+                        note(&handle, &st, "TUN 服务需要更新，本次未开启 TUN（在设置页更新 TUN 服务后重新打开）".into());
                         r = start(&handle, &st).await;
                     }
                     match r {

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ask as askDialog } from "@tauri-apps/plugin-dialog";
 import { t } from "./i18n";
 
 export type CoreKind = "prism" | "mihomo" | "singbox";
@@ -451,4 +452,15 @@ export const CORE_NAMES: Record<CoreKind, string> = {
 
 export function errText(e: unknown): string {
   return typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e);
+}
+
+/** A yes/no question in a native dialog. Not window.confirm: macOS's
+ *  WKWebView answers that with "Cancel" without showing anything. */
+export async function ask(message: string): Promise<boolean> {
+  try {
+    return await askDialog(message, { title: "Prism", kind: "warning", okLabel: t("确定"), cancelLabel: t("取消") });
+  } catch {
+    // The browser dev mock has no dialog plugin.
+    return window.confirm(message);
+  }
 }

@@ -105,6 +105,7 @@ export const EN: Record<string, string> = {
   "保存中…": "Saving…",
   已保存: "Saved",
   取消: "Cancel",
+  确定: "OK",
   关闭: "Close",
   删除: "Delete",
   已删除: "Deleted",
@@ -534,6 +535,8 @@ export const EN: Record<string, string> = {
   "改为以管理员身份重新启动 Prism？": "Restart Prism as administrator instead?",
   "TUN 服务中的内核与当前版本不一致（Prism 或内核更新过）。\n需要管理员授权一次来更新 TUN 服务，现在更新？":
     "The TUN service's cores are out of date (Prism or a core was updated).\nUpdating it needs administrator approval once. Update now?",
+  "TUN 服务是为另一个位置的 Prism 安装的（例如 Prism 被移动、改名，或装了多份），只接受那个 Prism 的请求。\n需要管理员授权一次来为当前 Prism 重新安装 TUN 服务；重新安装后，原来登记的 Prism 将不能再使用 TUN 服务。现在重新安装？":
+    "The TUN service was installed for a Prism in another location (Prism was moved, renamed, or there are several copies) and only takes requests from that one.\nReinstalling it for this Prism needs administrator approval once; afterwards the Prism it was installed for can no longer use the TUN service. Reinstall now?",
   备份与同步: "Backup and sync",
   "WebDAV 地址": "WebDAV URL",
   用户名: "Username",

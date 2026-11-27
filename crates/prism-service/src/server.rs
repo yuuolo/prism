@@ -593,8 +593,8 @@ async fn handle(conn: NamedPipeServer, st: &State) -> Result<()> {
         bail!("no client pid");
     }
     let image = process_image(pid).ok_or_else(|| anyhow!("client {pid} image unknown"))?;
-    let allowed = same_path(&image, &st.owner.gui_path);
-    answer(conn, &image, allowed, st).await
+    let refusal = (!same_path(&image, &st.owner.gui_path)).then(|| not_registered(&image));
+    answer(conn, &image, refusal, st).await
 }
 
 /// Serves requests until `stop` turns true, then stops the core. The
@@ -633,22 +633,34 @@ async fn handle(conn: tokio::net::UnixStream, st: &State) -> Result<()> {
     let cred = conn.peer_cred()?;
     let pid = cred.pid().ok_or_else(|| anyhow!("no client pid"))?;
     let image = process_image(pid as u32).ok_or_else(|| anyhow!("client {pid} image unknown"))?;
-    let allowed = cred.uid().to_string() == st.owner.user_sid && same_path(&image, &st.owner.gui_path);
-    answer(conn, &image, allowed, st).await
+    // Another account is told apart from another Prism: reinstalling would
+    // take the service away from the account that installed it.
+    let refusal = if cred.uid().to_string() != st.owner.user_sid {
+        Some(format!("{} {OTHER_ACCOUNT}", image.display()))
+    } else {
+        (!same_path(&image, &st.owner.gui_path)).then(|| not_registered(&image))
+    };
+    answer(conn, &image, refusal, st).await
 }
 
-/// Reads one request and answers it, or refuses a client that isn't the
-/// registered Prism.
-async fn answer<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(conn: S, image: &Path, allowed: bool, st: &State) -> Result<()> {
+/// Refusal of a client that isn't the Prism registered at install. Prism
+/// matches the end of it to offer reinstalling the service.
+fn not_registered(image: &Path) -> String {
+    format!("{} 不是安装服务时登记的 Prism", image.display())
+}
+
+/// Reads one request and answers it, or refuses the client with `refusal`.
+async fn answer<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(conn: S, image: &Path, refusal: Option<String>, st: &State) -> Result<()> {
+    let allowed = refusal.is_none();
     let (rd, mut wr) = tokio::io::split(conn);
     // Read the request even when refusing (only a little of it), so the
     // client's write doesn't hit a pipe we already closed.
     let limit = if allowed { MAX_MESSAGE as u64 } else { 64 << 10 };
     let mut buf = Vec::new();
     BufReader::new(rd).take(limit).read_until(b'\n', &mut buf).await?;
-    let reply = if !allowed {
+    let reply = if let Some(refusal) = refusal {
         log(&st.layout, &format!("rejected client {}", image.display()));
-        Response::err(format!("{} 不是安装服务时登记的 Prism", image.display()))
+        Response::err(refusal)
     } else {
         match serde_json::from_slice::<Request>(&buf) {
             Ok(req) => dispatch(req, st).await,
