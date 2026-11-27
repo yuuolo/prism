@@ -73,7 +73,7 @@ GUI 只和 Clash 兼容 API 通信；订阅会按所选内核自动转换：
 
 ## 开发
 
-需要 Rust（stable，MSVC）、Node 18+、WebView2。
+需要 Rust（stable）和 Node 18+。Windows 上还需要 MSVC 工具链和 WebView2；macOS 上需要 Xcode Command Line Tools（`xcode-select --install`）。
 
 ```bash
 npm install
@@ -106,6 +106,7 @@ cargo test --workspace
    需要更新签名私钥：默认读取 `%USERPROFILE%\.tauri\prism-updater.key`（或环境变量 `PRISM_SIGNING_KEY` / `TAURI_SIGNING_PRIVATE_KEY`）。可用 `PRISM_RELEASE_NOTES_FILE` 指定写入更新清单的说明。产物在 `target/release/bundle/nsis/`：
    `Prism_<版本>_x64-setup.exe`、`Prism_<版本>_x64-setup.exe.sig`、`latest.json`。
 3. 创建 GitHub Release（tag `v<版本>`），**上传这三个文件**。客户端检查的是 `releases/latest/download/latest.json`。
+4. macOS：在 Mac 上执行同样的 `npm run bundle`（私钥默认读取 `~/.tauri/prism-updater.key`；在 Apple 芯片的 Mac 上用 `PRISM_TARGET=x86_64-apple-darwin` 打 Intel 版）。产物在 `target/<目标>/release/bundle/`（不设 `PRISM_TARGET` 时为 `target/release/bundle/`）：`dmg/` 里的 `.dmg`，以及 `macos/` 里的 `Prism.app.tar.gz` 和 `Prism.app.tar.gz.sig`。按芯片改名为 `Prism_<版本>_aarch64.dmg` / `Prism_<版本>_x64.dmg` 和 `Prism_<版本>_<aarch64|x64>.app.tar.gz`（`.sig` 同名）后上传。`npm run bundle` 只在 `latest.json` 里写 `windows-x86_64`；要让 macOS 也能自动更新，需在 `platforms` 中加入 `darwin-aarch64` 和 `darwin-x86_64`，`signature` 填对应 `.sig` 文件的内容，`url` 指向 Release 中对应的 `.app.tar.gz`。也可以用 `.github/workflows/macos.yml` 构建两种芯片的 dmg 和 `.app.tar.gz`，它不签更新包，`.sig` 需要用私钥在本地生成（`npx tauri signer sign`）。
 
 > **私钥务必备份。** 公钥写在 `src-tauri/tauri.conf.json` 中，已安装的客户端只接受该私钥签名的更新。私钥丢失后无法再推送自动更新，用户需要手动重装一次换了新公钥的版本。
 
