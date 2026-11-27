@@ -72,19 +72,21 @@ impl State {
     #[cfg(windows)]
     fn set_kill_switch(&self, on: bool) -> Result<()> {
         let mut ks = self.kill_switch.lock().unwrap();
-        match (on, ks.is_some()) {
-            (true, false) => {
-                let allowed: Vec<PathBuf> = CORES.iter().map(|(_, file)| self.layout.cores_dir().join(file)).filter(|p| p.exists()).collect();
-                let mut protection = crate::killswitch::KillSwitch::enable(&allowed).context("启用断网保护失败")?;
+        let allowed = || -> Vec<PathBuf> { CORES.iter().map(|(_, file)| self.layout.cores_dir().join(file)).filter(|p| p.exists()).collect() };
+        match (on, ks.as_mut()) {
+            (true, None) => {
+                let mut protection = crate::killswitch::KillSwitch::enable(&allowed()).context("启用断网保护失败")?;
                 protection.set_apps(&self.kill_switch_apps.lock().unwrap())?;
                 *ks = Some(protection);
                 push_log(&self.logs, "[service] 断网保护已启用".into());
             }
-            (false, true) => {
+            // Cores installed since the block went up must reach their nodes too.
+            (true, Some(k)) => k.allow(&allowed()).context("更新断网保护失败")?,
+            (false, Some(_)) => {
                 *ks = None;
                 push_log(&self.logs, "[service] 断网保护已解除".into());
             }
-            _ => {}
+            (false, None) => {}
         }
         Ok(())
     }
@@ -277,12 +279,29 @@ impl State {
         self.set_apps(&available)?;
         #[cfg(windows)] self.tail.lock().unwrap().request(tailscale && kind=="prism");
         #[cfg(not(windows))] let _=tailscale;
-        // Before the old core goes, so a restart has no unprotected moment.
-        if kill_switch {
-            self.set_kill_switch(true)?;
-            #[cfg(windows)] self.refresh_tail().await?;
+        // Before the old core goes, so a restart has no unprotected moment;
+        // a start without it doesn't keep an old block either.
+        let was_on = self.kill_switch_on();
+        self.set_kill_switch(kill_switch)?;
+        let r = async {
+            if kill_switch {
+                #[cfg(windows)] self.refresh_tail().await?;
+            }
+            self.stop_core().await;
+            self.spawn_core(kind, &bin, &config, files, remembered).await
         }
-        self.stop_core().await;
+        .await;
+        // A block this start put up, with no core behind it, would only cut
+        // the machine off.
+        if r.is_err() && kill_switch && !was_on {
+            if let Err(e) = self.set_kill_switch(false) {
+                log(&self.layout, &format!("{e:#}"));
+            }
+        }
+        r
+    }
+
+    async fn spawn_core(&self, kind: &str, bin: &Path, config: &str, files: &BTreeMap<String, String>, remembered: Option<&BTreeMap<String, serde_json::Value>>) -> Result<()> {
         let run = self.layout.run_dir();
         std::fs::create_dir_all(run.join("rule-set"))?;
         for (name, data) in files {
@@ -298,7 +317,7 @@ impl State {
         let cfg = run.join(config_file(kind));
         std::fs::write(&cfg, config)?;
 
-        let mut cmd = Command::new(&bin);
+        let mut cmd = Command::new(bin);
         if kind == "prism" {
             if let Some(remembered) = remembered {
                 let mut selections = BTreeMap::new();
@@ -338,9 +357,6 @@ impl State {
         }
         let pid = child.id().unwrap_or(0);
         *self.core.lock().await = Some(Running { kind: kind.into(), child, started_at: unix_now(), pid, started: std::time::Instant::now() });
-        if !kill_switch {
-            self.set_kill_switch(false)?;
-        }
         Ok(())
     }
 

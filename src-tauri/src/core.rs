@@ -188,11 +188,16 @@ fn app_warnings(w: Vec<String>) -> Vec<String> {
 
 /// Groups, usable chains and nodes of the active profile, as exits for rules.
 pub fn profile_outbounds(store: &Store, s: &Settings) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
-    let mut p = config::parse_any(&active_profile(store, s)?)?;
+    let raw = active_profile(store, s)?;
+    let mut p = config::parse_any(&raw)?;
     let own = p.groups.len();
     p.add_chains(&chains(s));
     let mut groups: Vec<String> = p.groups.into_iter().map(|g| g.name).collect();
-    let usable = groups.split_off(own);
+    let mut usable = groups.split_off(own);
+    // sing-box runs a raw sing-box profile as it is, without the chains.
+    if s.core == CoreKind::Singbox && config::detect(&raw) == Format::SingBox {
+        usable.clear();
+    }
     Ok((groups, usable, p.proxies.into_iter().map(|x| x.name).collect()))
 }
 
@@ -307,9 +312,17 @@ impl CoreManager {
 
     pub async fn start(&self, app: &AppHandle, store: &Store, s: &Settings) -> Result<()> {
         *self.app.lock().unwrap() = Some(app.clone());
+        // Decided once: a service that dies between checks must not send a
+        // kill-switch TUN start down the local, unprotected path.
+        let service = use_service(s);
+        // Only the service has the kill switch: a local TUN core would run
+        // unprotected while the setting still says it is on.
+        if cfg!(windows) && s.tun && s.kill_switch && !service {
+            bail!("断网保护已开启，但 TUN 服务没有运行，为免流量不受保护没有启动 TUN。请在设置页启动 TUN 服务，或先关闭断网保护");
+        }
         // The service replaces its core itself: stopping it first would lift
         // the kill switch for a moment.
-        if use_service(s) {
+        if service {
             self.stop_local().await;
         } else {
             self.stop().await;
@@ -325,7 +338,7 @@ impl CoreManager {
         for w in warnings {
             self.push_log(app, format!("[prism] {w}"));
         }
-        if use_service(s) {
+        if service {
             let since = crate::tunsvc::logs(0).await.ok().and_then(|l| l.last().map(|x| x.0)).unwrap_or(0);
             crate::tunsvc::start(store, s, std::fs::read_to_string(&cfg)?).await?;
             *self.service.lock().await = Some(s.core);

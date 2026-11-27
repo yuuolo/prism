@@ -113,8 +113,13 @@ struct Snapshot {
 }
 
 /// Asks the service whatever the setting says now: a block outlives the setting.
-async fn kill_switch_blocking() -> bool {
-    cfg!(windows) && tunsvc::state() == tunsvc::State::Running && tunsvc::status().await.is_ok_and(|s| s.kill_switch && !s.running)
+/// No answer within `wait` counts as no block.
+async fn kill_switch_blocking(wait: Duration) -> bool {
+    cfg!(windows)
+        && tunsvc::state() == tunsvc::State::Running
+        && tokio::time::timeout(wait, tunsvc::status())
+            .await
+            .is_ok_and(|r| r.is_ok_and(|s| s.kill_switch && !s.running))
 }
 
 #[tauri::command]
@@ -126,11 +131,15 @@ async fn get_state(app: AppHandle, st: State<'_, AppState>) -> Res<Snapshot> {
     }
     let (on, server) = sysproxy::get();
     let path = |k| core::core_binary(&st.store, &s, k);
-    let running = st.core.running().await;
-    let blocking = kill_switch_blocking().await;
-    let service_recovery = if tunsvc::state() == tunsvc::State::Running {
-        tunsvc::status().await.ok().filter(|s| s.recovery_supported).map(|s| s.recovery)
+    // Every snapshot asks the service, so one that hangs must not hold the UI
+    // up: all of these questions share one 2 s deadline.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let running = tokio::time::timeout_at(deadline, st.core.running()).await.ok().flatten();
+    let service = if tunsvc::state() == tunsvc::State::Running {
+        tokio::time::timeout_at(deadline, tunsvc::status()).await.ok().and_then(Result::ok)
     } else { None };
+    let blocking = cfg!(windows) && service.as_ref().is_some_and(|s| s.kill_switch && !s.running);
+    let service_recovery = service.filter(|s| s.recovery_supported).map(|s| s.recovery);
     static LAST_BLOCKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if blocking && !LAST_BLOCKING.swap(blocking, std::sync::atomic::Ordering::Relaxed) {
         st.core.push_log(&app, "[prism] 断网保护已触发：内核已退出，网络被拦截".into());
@@ -1195,7 +1204,8 @@ async fn set_kill_switch(app: AppHandle, st: State<'_, AppState>, enable: bool) 
             st.update(|s| s.kill_switch = was)?;
             return Err(err);
         }
-    } else if !enable && kill_switch_blocking().await {
+    } else if !enable && kill_switch_blocking(Duration::from_secs(60)).await {
+        // The full wait: a slow service must not leave the block up.
         tunsvc::stop().await.map_err(e)?;
     }
     Ok(())
@@ -1248,7 +1258,8 @@ async fn set_real_ip_rules(app: AppHandle, st: State<'_, AppState>, mut rules: V
 /// What the system resolver answers for `host` now, and whether it is a fake-ip.
 #[tauri::command]
 async fn test_real_ip(host: String) -> Res<Value> {
-    let host = host.trim().to_string();
+    // A pasted URL or host:port, as the list itself takes them.
+    let host = ruletest::parse_target(&host).map_err(e)?.host();
     let found = tokio::time::timeout(Duration::from_secs(8), tokio::net::lookup_host((host.as_str(), 0)))
         .await
         .map_err(|_| "超时".to_string())?

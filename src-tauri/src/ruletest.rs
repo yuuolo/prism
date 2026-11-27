@@ -116,6 +116,7 @@ mod tests {
         assert_eq!(t("[2001:db8::1]:53"), "[2001:db8::1]:53");
         assert_eq!(t("2001:db8::1"), "[2001:db8::1]:443");
         assert!(parse_target("  ").is_err());
+        assert_eq!(parse_target("https://wiki.corp.test:8443/x").unwrap().host(), "wiki.corp.test", "the real IP test looks up the host only");
         assert!(is_fake("198.19.0.5".parse().unwrap()) && !is_fake("198.20.0.1".parse().unwrap()));
     }
 }
