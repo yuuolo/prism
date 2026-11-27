@@ -1,7 +1,7 @@
 import Help from "../Help";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, DEFAULT_RECOVERY, DEFAULT_DNS_PRIVACY, CORE_NAMES, errText, fmtBytes, type CoreKind, type RemoteBackup, type Settings } from "../api";
+import { api, ask, DEFAULT_RECOVERY, DEFAULT_DNS_PRIVACY, CORE_NAMES, errText, fmtBytes, type CoreKind, type RemoteBackup, type Settings } from "../api";
 import { useApp } from "../state";
 import { t } from "../i18n";
 
@@ -208,13 +208,14 @@ function BackupCard() {
   const saveLogin = () => act("save", () => api.webdavSave(url, user, pass === "" ? null : pass), t("WebDAV 设置已保存")).then(() => setPass(""));
   const refreshList = () => act("list", async () => setList(await api.backupList()));
   const restore = (name: string) =>
-    confirm(t("用备份「{name}」覆盖当前的设置和订阅？\n本机的内核路径、系统代理和 TUN 开关、WebDAV 登录信息会保留。", { name })) &&
-    act(name, () => api.backupRestore(name), t("已恢复，内核已按备份重新启动"));
+    ask(t("用备份「{name}」覆盖当前的设置和订阅？\n本机的内核路径、系统代理和 TUN 开关、WebDAV 登录信息会保留。", { name })).then(
+      (ok) => { if (ok) void act(name, () => api.backupRestore(name), t("已恢复，内核已按备份重新启动")); },
+    );
   const importFile = (f: File) => {
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const data = String(reader.result).split(",")[1] ?? "";
-      if (confirm(t("用「{name}」覆盖当前的设置和订阅？", { name: f.name }))) act("import", () => api.backupImport(data), t("已从文件恢复"));
+      if (await ask(t("用「{name}」覆盖当前的设置和订阅？", { name: f.name }))) act("import", () => api.backupImport(data), t("已从文件恢复"));
     };
     reader.readAsDataURL(f);
   };
@@ -280,7 +281,7 @@ function BackupCard() {
               <button
                 className="btn sm danger"
                 disabled={!!busy}
-                onClick={() => confirm(t("删除云端备份「{name}」？", { name: b.name })) && act("del", () => api.backupDelete(b.name), t("已删除")).then(refreshList)}
+                onClick={() => ask(t("删除云端备份「{name}」？", { name: b.name })).then((ok) => { if (ok) void act("del", () => api.backupDelete(b.name), t("已删除")).then(refreshList); })}
               >
                 {t("删除")}
               </button>
@@ -323,8 +324,9 @@ function TunServiceCard() {
             className="btn danger"
             disabled={busy}
             onClick={() =>
-              confirm(mac ? t("卸载 TUN 服务？之后需要重新安装才能开启 TUN。") : t("卸载 TUN 服务？之后开启 TUN 需要以管理员身份运行 Prism。")) &&
-              act(api.uninstallTunService, t("TUN 服务已卸载"))
+              ask(mac ? t("卸载 TUN 服务？之后需要重新安装才能开启 TUN。") : t("卸载 TUN 服务？之后开启 TUN 需要以管理员身份运行 Prism。")).then(
+                (ok) => { if (ok) void act(api.uninstallTunService, t("TUN 服务已卸载")); },
+              )
             }
           >
             {t("卸载")}

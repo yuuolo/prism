@@ -1581,6 +1581,9 @@ pub fn run() {
             })),
     )
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Native yes/no prompts: macOS's WKWebView answers window.confirm
+        // with "Cancel" without showing anything.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, sc, ev| {

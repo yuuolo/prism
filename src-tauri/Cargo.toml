@@ -38,6 +38,7 @@ if-addrs = "0.15"
 regex = "1"
 flate2 = "1"
 tar = "0.4"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
