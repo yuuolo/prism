@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
+use serde_json::Value;
 use prism_service::{allowed_file, sha256_file, Request, Response, Status};
 
 use crate::core::core_binary;
@@ -48,6 +49,26 @@ async fn call(req: &Request) -> Result<Response> {
 
 pub async fn status() -> Result<Status> {
     call(&Request::Status).await?.status.context("no status")
+}
+
+pub async fn set_kill_switch_apps(paths: Vec<String>) -> Result<()> {
+    if !status().await?.kill_switch_apps_supported { bail!(NEED_UPDATE); }
+    let response = call(&Request::SetKillSwitchApps { paths: paths.clone() }).await?;
+    let status = response.status.context("保护服务缺少状态")?;
+    if !status.kill_switch_apps_supported || status.kill_switch_apps != paths {
+        bail!("断网保护应用例外未生效，请更新 TUN 服务");
+    }
+    Ok(())
+}
+
+pub async fn tailscale_control(connect: bool) -> Result<prism_service::TailscaleProtection> {
+    let status=status().await?;
+    if !status.tailscale_supported {bail!(NEED_UPDATE);}
+    let response=call(&Request::TailscaleConnect {connect}).await?;
+    let status=response.status.context("保护服务缺少状态")?;
+    if !status.tailscale_supported {bail!(NEED_UPDATE);}
+    if connect && status.kill_switch && !status.tailscale.verified {bail!("Tailscale 身份验证失败：{}",status.tailscale.detail);}
+    Ok(status.tailscale)
 }
 
 /// Copies the cores this Prism uses into the service (installing it if
@@ -100,13 +121,8 @@ pub fn stale(store: &Store, s: &Settings, st: &Status, kind: CoreKind) -> bool {
     cfg!(windows) && kind == CoreKind::Prism && sha256_file(&store.runtime_dir().join("wintun.dll")).as_ref() != st.wintun.as_ref()
 }
 
-/// Starts `kind` in the service with `config`, sending the data files it
-/// lacks (geodata, sing-box rule-sets).
-pub async fn start(store: &Store, s: &Settings, config: String) -> Result<()> {
-    let st = status().await?;
-    if stale(store, s, &st, s.core) {
-        bail!(NEED_UPDATE);
-    }
+/// Data files absent or changed in the service (geodata and rule-sets).
+fn changed_files(store: &Store, st: &Status) -> Result<BTreeMap<String, String>> {
     let rt = store.runtime_dir();
     let mut local: Vec<(String, PathBuf)> = std::fs::read_dir(&rt)
         .into_iter()
@@ -129,8 +145,40 @@ pub async fn start(store: &Store, s: &Settings, config: String) -> Result<()> {
             files.insert(name, base64::engine::general_purpose::STANDARD.encode(bytes));
         }
     }
+    Ok(files)
+}
+
+pub async fn reload(store: &Store, config: String) -> Result<bool> {
+    let st = status().await?;
+    if !st.recovery_supported { return Ok(false); }
+    call(&Request::Reload { config, files: changed_files(store, &st)? }).await?;
+    Ok(true)
+}
+
+pub async fn set_recovery(enabled: bool) -> Result<()> {
+    if status().await?.recovery_supported { call(&Request::SetRecovery { enabled }).await?; }
+    Ok(())
+}
+pub async fn recover() -> Result<()> { call(&Request::Recover).await.map(|_| ()) }
+
+pub async fn mutation(method: &str, path: &str, body: Value) -> Result<bool> {
+    if !status().await?.recovery_supported { return Ok(false); }
+    call(&Request::CoreMutation { method: method.into(), path: path.into(), body }).await?;
+    Ok(true)
+}
+
+/// Starts the selected core with the configuration and changed data files.
+pub async fn start(store: &Store, s: &Settings, config: String) -> Result<()> {
+    let st = status().await?;
+    if stale(store, s, &st, s.core) {
+        bail!(NEED_UPDATE);
+    }
+    let files = changed_files(store, &st)?;
     let kill_switch = s.kill_switch && s.tun;
-    let r = call(&Request::Start { core: kind_name(s.core).into(), config, files, kill_switch }).await?;
+    let apps = if cfg!(windows) { s.kill_switch_apps.clone() } else { Vec::new() };
+    if !apps.is_empty() && !st.kill_switch_apps_supported { bail!(NEED_UPDATE); }
+    if kill_switch && s.tailscale_bypass && !st.tailscale_supported {bail!(NEED_UPDATE);}
+    let r = call(&Request::Start { core: kind_name(s.core).into(), config, files, kill_switch, tailscale: s.tailscale_bypass && s.core == CoreKind::Prism, kill_switch_apps: apps, recovery: s.recovery.enabled && s.core == CoreKind::Prism }).await?;
     // A service from before the kill switch ignores the request.
     if kill_switch && !r.status.is_some_and(|st| st.kill_switch) {
         let _ = stop().await;

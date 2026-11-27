@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useState } from "react";
 import { api, errText, type ChainRule, type Outbounds } from "../api";
 import { useApp } from "../state";
@@ -147,10 +148,10 @@ export default function Chains() {
         </button>
       </div>
 
-      <div className="notice">
+      <Help title={t("链式代理")}><div>
         {t("让流量依次经过多个节点或代理组，网站看到的是最后一跳的 IP。保存后，可以作为应用分流、域名分流的出口，也可以在全局模式下选择。三种内核都支持。")}
         {t("每多一跳，延迟通常更高，任何一个节点出问题都会让整条链路中断。走 UDP 的节点（TUIC、Hysteria2、WireGuard）要求前一跳支持 UDP。")}
-      </div>
+      </div></Help>
 
       {chains.length === 0 && <div className="empty">{t("还没有链路。点「添加链路」，选择流量依次经过的节点或代理组。")}</div>}
 

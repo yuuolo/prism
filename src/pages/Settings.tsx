@@ -1,6 +1,7 @@
+import Help from "../Help";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, CORE_NAMES, errText, fmtBytes, type CoreKind, type RemoteBackup, type Settings } from "../api";
+import { api, DEFAULT_RECOVERY, DEFAULT_DNS_PRIVACY, CORE_NAMES, errText, fmtBytes, type CoreKind, type RemoteBackup, type Settings } from "../api";
 import { useApp } from "../state";
 import { t } from "../i18n";
 
@@ -81,9 +82,9 @@ function UpdateCard({ form, set }: { form: Settings; set: <K extends keyof Setti
           )}
         </div>
       )}
-      <div className="small muted" style={{ marginTop: 10 }}>
+      <Help title={t("软件更新")}><div>
         {t("更新包来自 GitHub Releases，安装前会校验发布签名；内核运行中时经代理下载。安装时会先停止内核。")}
-      </div>
+      </div></Help>
     </div>
   );
 }
@@ -184,9 +185,9 @@ function AppearanceCard({ form, set }: { form: Settings; set: <K extends keyof S
           <HotkeyInput value={form.hotkeys?.[action] ?? ""} onChange={(v) => set("hotkeys", { ...form.hotkeys, [action]: v })} />
         </div>
       ))}
-      <div className="small muted" style={{ marginTop: 8 }}>
+      <Help title={t("外观与快捷键")}><div>
         {t("点击输入框后按下组合键（如 Ctrl+Alt+P），按 Backspace 清除。快捷键在 Prism 最小化到托盘时也有效；保存后生效。")}
-      </div>
+      </div></Help>
     </div>
   );
 }
@@ -293,9 +294,9 @@ function BackupCard() {
           ))}
         </div>
       )}
-      <div className="small muted" style={{ marginTop: 10 }}>
+      <Help title={t("备份与同步")}><div>
         {t("备份包含所有订阅和设置，保存在 WebDAV 的 prism/ 目录下。不包含 WebDAV 密码和本机的内核路径；恢复时本机的系统代理、TUN 开关也保持不变。密码用 Windows 账户加密保存在本机。")}
-      </div>
+      </div></Help>
     </div>
   );
 }
@@ -336,11 +337,15 @@ function TunServiceCard() {
           </button>
         )}
       </div>
-      <div className="small muted" style={{ marginTop: 10 }}>
+      <Help title={t("TUN 服务")}><div>
         {mac
           ? t("macOS 上 TUN 需要这个服务：开启 TUN 时内核由系统后台服务（LaunchDaemon，以 root 运行）运行，Prism 本身不需要管理员权限。安装、更新和卸载各需要输入一次 Mac 的登录密码。服务只运行安装时复制到受保护目录的内核，只接受当前用户的 Prism 的请求。Prism 或内核更新后会提示更新服务。")
           : t("安装后，开启 TUN 时内核由系统服务（Prism TUN Service）运行，Prism 本身不需要管理员权限，开机自启也能直接使用 TUN。安装、更新和卸载各需要一次管理员授权。服务只运行安装时复制到受保护目录的内核，只接受当前 Windows 用户的 Prism 的请求。Prism 或内核更新后会提示更新服务。")}
       </div>
+{!mac && <><div>
+            {t("开启 TUN 时，只允许流量经 TUN、本机和局域网通过。内核崩溃后继续拦截，流量不会变成直连。")}{" "}
+            {t("内核故障时保持互联网阻断；已配置的应用及组网例外按各自规则放行。停止内核或退出 Prism 会解除保护。")}
+          </div></>}</Help>
       {!mac && (
         <div style={{ marginTop: 14 }}>
           <div className="row wrap">
@@ -356,14 +361,48 @@ function TunServiceCard() {
             {st !== "running" && <span className="tag">{t("需要先安装 TUN 服务。")}</span>}
             {st === "running" && snap.settings.kill_switch && !snap.settings.tun && <span className="tag">{t("需要先开启 TUN 模式才会生效。")}</span>}
           </div>
-          <div className="small muted" style={{ marginTop: 6 }}>
-            {t("开启 TUN 时，只允许流量经 TUN、本机和局域网通过。内核崩溃后继续拦截，流量不会变成直连。")}{" "}
-            {t("内核崩溃后，直到重启内核或解除前都上不了网。不走 TUN 的远程控制、其他 VPN 也会被拦截。退出 Prism、停止内核或重启电脑都会解除。")}
-          </div>
+          <KillSwitchApps />
+
         </div>
       )}
     </div>
   );
+}
+
+/** Exact executable identities allowed by the Windows kill switch. */
+function KillSwitchApps() {
+  const { snap, run, refresh } = useApp();
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [processes, setProcesses] = useState<string[] | null>(null);
+  const [search, setSearch] = useState("");
+  const paths = snap?.settings.kill_switch_apps ?? [];
+  const save = async (next: string[]) => {
+    setBusy(true);
+    try {
+      const ok = await run(async () => { await api.setKillSwitchApps(next); await refresh(); }, t("应用例外已保存"));
+      if (ok) setPath("");
+    } finally { setBusy(false); }
+  };
+  return <div style={{ marginTop: 12 }}>
+    <b>{t("断网保护应用例外")}</b> <span className="muted small">{paths.length}/32</span>
+
+    {paths.map(p => <div className="row" key={p} style={{ marginBottom: 6 }}>
+      <span className="small" style={{ flex: 1, overflowWrap: "anywhere" }}>{p}</span>
+      <button className="btn danger" disabled={busy} aria-label={`${t("移除")}: ${p}`} onClick={() => save(paths.filter(item => item !== p))}>{t("移除")}</button>
+    </div>)}
+    <div className="row wrap">
+      <input className="input" style={{ flex: 1, minWidth: 230 }} aria-label={t("应用可执行文件完整路径")} placeholder="C:\\Program Files\\Remote App\\app.exe" value={path} onChange={e => setPath(e.target.value)} disabled={busy} />
+      <button className="btn" disabled={busy || !path.trim() || paths.length >= 32} onClick={() => save([...paths, path.trim()])}>{t("添加例外")}</button>
+      <button className="btn" disabled={busy} onClick={() => run(async () => { const items = await api.listProcesses(); setProcesses([...new Set(items.map(p => p.path).filter(p => /\.exe$/i.test(p)))].sort()); })}>{t("从运行程序选择")}</button>
+    </div>
+    {processes !== null && <div style={{ marginTop: 8 }}>
+      <div className="row"><input className="input" style={{ flex: 1 }} aria-label={t("搜索正在运行的程序")} placeholder={t("搜索正在运行的程序")} value={search} onChange={e => setSearch(e.target.value)} /><button className="btn" onClick={() => setProcesses(null)}>{t("关闭")}</button></div>
+      <div className="proc-list">{processes.filter(p => p.toLowerCase().includes(search.toLowerCase())).slice(0, 80).map(p => <button className="btn" style={{ display: "block", width: "100%", textAlign: "left", overflowWrap: "anywhere" }} key={p} onClick={() => { setPath(p); setProcesses(null); }}>{p}</button>)}</div>
+    </div>}
+    <Help title={t("断网保护应用例外")}><div>{t("仅解除指定程序的断网保护拦截，不改变代理或 TUN 路由；TUN 故障时不保证联网。DNS 防泄漏仍独立生效。请只添加可信程序，服务和子进程需分别添加。")}</div>
+<div>{t("保存后同步新版 TUN 服务，无需重启内核；服务未运行时在下次启动应用。移除例外后，新的连接重新受保护，已有连接可能需要重新连接。")}</div></Help>
+  </div>;
 }
 
 /** Custom geodata sources; the built-in addresses show as placeholders. */
@@ -395,23 +434,23 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
             className={`switch ${snap.autostart ? "on" : ""}`}
             onClick={() => run(() => api.setAutostart(!snap.autostart), snap.autostart ? t("已关闭开机自启") : t("已开启开机自启"))}
           />
-          <span className="small muted">{mac ? t("登录 Mac 时启动 Prism（立即生效）") : t("登录 Windows 时启动 Prism（立即生效）")}</span>
+          <Help title={t("开机自启")} compact><div>{mac ? t("登录 Mac 时启动 Prism（立即生效）") : t("登录 Windows 时启动 Prism（立即生效）")}</div></Help>
         </div>
       </div>
       <div className="field">
         <label>{t("静默启动")}</label>
         <div className="row">
           <button className={`switch ${form.silent_start ? "on" : ""}`} onClick={() => set("silent_start", !form.silent_start)} />
-          <span className="small muted">{t("开机自启时只在托盘运行，不弹出主界面")}</span>
+          <Help title={t("静默启动")} compact><div>{t("开机自启时只在托盘运行，不弹出主界面")}</div></Help>
         </div>
       </div>
       <div className="field">
         <label>{mac ? t("菜单栏网速") : t("托盘图标显示网速")}</label>
         <div className="row">
           <button className={`switch ${form.tray_speed ? "on" : ""}`} onClick={() => set("tray_speed", !form.tray_speed)} />
-          <span className="small muted">
+          <Help title={t("托盘图标显示网速")} compact><div>
             {mac ? t("在菜单栏图标旁显示 ↑↓ 实时速度") : t("托盘图标改为上传 / 下载速度（鼠标悬停提示中始终显示网速）")}
-          </span>
+          </div></Help>
         </div>
       </div>
       {!mac && <div className="field">
@@ -423,22 +462,66 @@ function StartupCard({ form, set }: { form: Settings; set: <K extends keyof Sett
               run(() => api.setClashLinks(!snap.clash_links), snap.clash_links ? t("clash:// 链接已还给原来的程序") : t("clash:// 链接将由 Prism 打开"))
             }
           />
-          <span className="small muted">
+          <Help title={t("接管 clash:// 链接")} compact><div>
             {snap.clash_links
               ? t("机场面板的「一键导入 Clash」会打开 Prism；关闭后还给原来的程序")
               : handler
                 ? t("当前由 {app} 打开；开启后由 Prism 打开，关闭时还原", { app: handler })
                 : t("开启后机场面板的「一键导入 Clash」会打开 Prism")}
-          </span>
+          </div></Help>
         </div>
       </div>}
-      <div className="small muted" style={{ marginTop: 8 }}>
+      <Help title={t("启动与链接")}><div>
         {mac
           ? t("prism:// 和 clash:// 链接由 Prism 打开（装有其他 Clash 客户端时，clash:// 可能由 macOS 选定的程序打开）。通过链接导入订阅前都会先弹窗确认。")
           : t("prism:// 链接始终由 Prism 打开（安装版）。通过链接导入订阅前都会先弹窗确认。")}
-      </div>
+      </div></Help>
     </div>
   );
+}
+
+function RecoveryCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+  const { snap, run } = useApp();
+  const p = form.recovery ?? DEFAULT_RECOVERY;
+  const update = (key: keyof typeof p, value: unknown) => set("recovery", { ...p, [key]: value });
+  return <div className="card span-2"><h3>{t("内核自动恢复")}</h3>
+    <div className="row"><b>{t("异常退出与无响应自动重启")}</b><span className="spacer" /><button aria-label={t("异常退出与无响应自动重启")} className={`switch ${p.enabled ? "on" : ""}`} onClick={() => update("enabled", !p.enabled)} /></div>
+    <div className="field"><label>{t("连接与流量无变化诊断（秒）")}</label><input className="input" type="number" min={60} max={3600} value={p.stall_secs} onChange={e => update("stall_secs", Number(e.target.value))} /></div>
+    <div className="field"><label>{t("联网探测地址")}</label><textarea className="input" rows={2} value={p.probe_urls.join("\n")} onChange={e => update("probe_urls", e.target.value.split("\n"))} /></div>
+
+    <p className="small">{t("监控状态")}: {snap?.recovery?.phase || "idle"} · {snap?.recovery?.message || "—"} · {t("本次自动重启")}: {snap?.recovery?.restarts ?? 0}</p>
+    {snap?.service_recovery && <p className="small">{t("服务独立监护")}: {snap.service_recovery.enabled ? snap.service_recovery.phase : t("未启用")} · {t("服务累计恢复")}: {snap.service_recovery.restarts}</p>}
+    <button className="btn" onClick={() => run(api.exportTunDiagnostics, t("诊断文件已导出"))}>{t("导出脱敏诊断")}</button>
+    <Help title={t("内核自动恢复")}><div>{t("联网探测地址（每行一个，最多四个）")}</div><div>{t("每三十秒检查代理联网；开启 TUN 时还检查系统路由与 DNS 通路，连接或流量变化不会推迟探测。连续三轮失败才重启，正常空闲不会直接触发重启。无变化阈值仅用于诊断提示。重启间隔至少一分钟，十分钟最多三次。")}</div>
+<div>{t("手动停止后不会自动拉起；监控在后台运行，不依赖连接页面。宽限期和冷却期间可能暂时不探测。")}</div>
+<div>{t("诊断包含收发计数、队列压力、固定故障码及恢复记录，不包含订阅、节点凭据或流量内容。")}</div></Help>
+  </div>;
+}
+
+function DnsPrivacyCard({ form, set }: { form: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+  const p = form.dns_privacy ?? DEFAULT_DNS_PRIVACY;
+  const change = (key: keyof typeof p, value: unknown) => set("dns_privacy", { ...p, [key]: value });
+  const prism = form.core === "prism";
+  return <div className="card span-2">
+    <h3>{t("Prism DNS 与 IPv6 保护")}</h3>
+    {!prism && <p className="small muted">{t("此组设置只作用于 Prism 内核，其他内核继续使用各自配置。")}</p>}
+    <div className="row wrap"><b>{t("覆盖订阅 DNS 配置")}</b><span className="spacer" />
+      <button aria-label={t("覆盖订阅 DNS 配置")} className={`switch ${p.enabled ? "on" : ""}`} disabled={!prism} onClick={() => change("enabled", !p.enabled)} /></div>
+    {p.enabled && prism && <>
+      <div className="field"><label>{t("DNS 经代理查询")}</label><button aria-label={t("DNS 经代理查询")} className={`switch ${p.via_proxy ? "on" : ""}`} onClick={() => change("via_proxy", !p.via_proxy)} /></div>
+      {!p.via_proxy && <p className="small muted">{t("当前为直连 DoH：查询已加密，但 DNS 出口仍可能与代理出口不同。")}</p>}
+      <div className="field"><label>{t("DNS 出口")}</label><input className="input" disabled={!p.via_proxy} placeholder={t("留空自动使用节点选择组，可填写节点或代理组名称")} value={p.outbound} onChange={e => change("outbound", e.target.value)} /></div>
+      <div className="field"><label>{t("DoH 上游")}</label><textarea className="input" rows={3} value={p.nameservers.join("\n")} onChange={e => change("nameservers", e.target.value.split("\n"))} /></div>
+      <div className="field"><label>{t("节点引导 DoH")}</label><textarea className="input" rows={2} value={p.bootstrap.join("\n")} onChange={e => change("bootstrap", e.target.value.split("\n"))} /></div>
+      {([["fake_ip", "使用 fake-IP"], ["ipv6", "允许 DNS AAAA 查询"], ["block_ipv6", "阻止客户端 IPv6 目标连接"]] as const).map(([key, label]) => <div className="field" key={key}>
+        <label>{t(label)}</label><button aria-label={t(label)} className={`switch ${p[key] ? "on" : ""}`} disabled={key === "ipv6" && p.block_ipv6} onClick={() => change(key, !p[key])} />
+      </div>)}
+
+    </>}
+    <Help title={t("Prism DNS 与 IPv6 保护")}><div>{t("DoH 上游（每行一个，直连模式须使用 IP 地址）")}</div><div>{t("节点引导 DoH（直连，仅解析代理服务器域名，使用 IP 地址）")}</div><div>{t("开启后覆盖订阅的 DNS 策略和 fallback；真实 IP 页面中明确设置的 DNS 例外仍保留。DNS 代理出口选中 DIRECT、不可用或为链式组时拒绝查询，不回退直连。")}</div>
+<div>{t("IPv6 阻断会保留 TUN IPv6 路由，并在内核拒绝 IPv6 目标；关闭 AAAA 查询本身不等于禁用 IPv6。系统代理模式无法接管所有应用的 DNS，建议配合 TUN。")}</div>
+<div>{t("修改后点击页面顶部保存，运行中的内核会重新启动。浏览器自带 DoH 按普通 HTTPS 连接分流；此开关不会更改系统或浏览器设置。")}</div></Help>
+  </div>;
 }
 
 export default function SettingsPage() {
@@ -521,9 +604,9 @@ export default function SettingsPage() {
               </div>
             </div>
           ))}
-          <div className="small muted" style={{ marginTop: 8 }}>
+          <Help title={t("内核")}><div>
             {t("内核从 GitHub Releases 下载；内核运行中时会通过代理下载。")}
-          </div>
+          </div></Help>
         </div>
 
         <div className="card">
@@ -568,7 +651,7 @@ export default function SettingsPage() {
             <label>{t("统一延迟")}</label>
             <div className="row">
               <button className={`switch ${form.unified_delay ? "on" : ""}`} onClick={() => set("unified_delay", !form.unified_delay)} />
-              <span className="small muted">{t("只计第二次请求，排除握手耗时（Prism / mihomo 内核）")}</span>
+              <Help title={t("系统代理与测速")} compact><div>{t("只计第二次请求，排除握手耗时（Prism / mihomo 内核）")}</div></Help>
             </div>
           </div>
         </div>
@@ -603,10 +686,10 @@ export default function SettingsPage() {
               </div>
             ))}
           </div>
-          <div className="small muted">
+          <Help title={t("数据")}>
             {t("留空使用内置地址（输入框中的灰色文字）。填写后优先从这里下载，失败时仍会尝试内置地址。sing-box 规则集地址用 {} 代表分类名；订阅自带地址的规则集不受影响。修改后请先保存，再点「更新 GeoSite / GeoIP」。")}
-            {GEO_SOURCES.some(({ key }) => badGeoUrl(key, form[key])) && <span style={{ color: "var(--bad)" }}> {t("地址需以 http:// 或 https:// 开头，sing-box 规则集地址要包含 {}。")}</span>}
-          </div>
+          </Help>
+          {GEO_SOURCES.some(({ key }) => badGeoUrl(key, form[key])) && <div className="small" style={{ color: "var(--bad)" }}>{t("地址需以 http:// 或 https:// 开头，sing-box 规则集地址要包含 {}。")}</div>}
         </div>
 
         <AppearanceCard form={form} set={set} />
@@ -617,6 +700,8 @@ export default function SettingsPage() {
 
         <BackupCard />
 
+        <RecoveryCard form={form} set={set} />
+        <DnsPrivacyCard form={form} set={set} />
         <UpdateCard form={form} set={set} />
       </div>
 

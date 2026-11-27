@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::wire;
 use crate::common::{other, Address, BoxedStream};
 use crate::outbound::tls::Tls;
-use crate::outbound::RegistryCell;
+use crate::outbound::{RegistryCell, Outbound};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const POOL: usize = 4;
@@ -48,6 +48,7 @@ pub struct Upstream {
     path: String,
     /// Outbound (proxy or group) the queries go through; None = direct.
     pub detour: Option<String>,
+    proxy_only: bool,
     tls: Option<Tls>,
     bootstrap: Arc<Vec<SocketAddr>>,
     reg: RegistryCell,
@@ -110,6 +111,7 @@ impl Upstream {
             port,
             path,
             detour,
+            proxy_only: spec.split_once('#').is_some_and(|(_, f)| f.split('&').any(|p| p == "proxy-only=true")),
             tls,
             bootstrap,
             reg,
@@ -125,6 +127,10 @@ impl Upstream {
 
     /// Sends `query` and returns the response (any rcode).
     pub async fn exchange(&self, query: &[u8]) -> io::Result<Vec<u8>> {
+        if self.proxy_only {
+            let name = self.detour.as_deref().ok_or_else(|| other("DNS REJECT: proxy-only requires an outbound"))?;
+            self.proxy_outbound(name)?;
+        }
         let res = tokio::time::timeout(TIMEOUT, async {
             match self.kind {
                 Kind::Udp => self.exchange_udp(query).await,
@@ -138,6 +144,15 @@ impl Upstream {
             return Err(other(format!("dns {}: mismatched response", self.url)));
         }
         Ok(res)
+    }
+
+    fn proxy_outbound(&self, name: &str) -> io::Result<Arc<dyn Outbound>> {
+        let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
+        let (out, _) = reg.resolve(name, &self.target())?;
+        if self.proxy_only && !reg.configs.contains_key(out.name()) {
+            return Err(other("DNS REJECT: selected outbound is not a proxy node (DIRECT/REJECT/relay forbidden)"));
+        }
+        Ok(out)
     }
 
     fn target(&self) -> Address {
@@ -162,8 +177,7 @@ impl Upstream {
 
     async fn exchange_udp(&self, query: &[u8]) -> io::Result<Vec<u8>> {
         if let Some(d) = &self.detour {
-            let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
-            let (out, _) = reg.resolve(d, &self.target())?;
+            let out = self.proxy_outbound(d)?;
             let mut pipe = out.connect_udp(&self.target()).await?;
             pipe.tx.send(query.to_vec()).await.map_err(|_| other("dns: udp session closed"))?;
             return pipe.rx.recv().await.ok_or_else(|| other("dns: no response"));
@@ -175,8 +189,7 @@ impl Upstream {
     async fn connect(&self) -> io::Result<BoxedStream> {
         let raw: BoxedStream = match &self.detour {
             Some(d) => {
-                let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
-                let (out, _) = reg.resolve(d, &self.target())?;
+                let out = self.proxy_outbound(d)?;
                 out.connect(&self.target()).await?
             }
             None => {
@@ -200,8 +213,7 @@ impl Upstream {
         }
         let datagrams = match &self.detour {
             Some(d) => {
-                let reg = self.reg.get().ok_or_else(|| other("registry not ready"))?;
-                let (out, _) = reg.resolve(d, &self.target())?;
+                let out = self.proxy_outbound(d)?;
                 crate::outbound::dialer::Datagrams::Pipe(out.connect_udp(&self.target()).await?)
             }
             None => {
@@ -321,10 +333,18 @@ impl Upstream {
                 Some(s) => s,
                 None => self.connect().await?,
             };
-            match self.one(&mut s, query).await {
-                Ok(r) => {
+            // A silently dead keep-alive socket must leave time for a fresh
+            // connection within the overall query deadline.
+            let result = if fresh {
+                self.one(&mut s, query).await
+            } else {
+                tokio::time::timeout(Duration::from_secs(2), self.one(&mut s, query))
+                    .await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "stale DNS pooled connection")))
+            };
+            match result {
+                Ok((r, reusable)) => {
                     let mut pool = self.pool.lock().unwrap();
-                    if pool.len() < POOL {
+                    if reusable && pool.len() < POOL {
                         pool.push(s);
                     }
                     return Ok(r);
@@ -336,7 +356,7 @@ impl Upstream {
         Err(other(format!("dns {}: failed", self.url)))
     }
 
-    async fn one(&self, s: &mut BoxedStream, query: &[u8]) -> io::Result<Vec<u8>> {
+    async fn one(&self, s: &mut BoxedStream, query: &[u8]) -> io::Result<(Vec<u8>, bool)> {
         if self.kind == Kind::Https {
             let host = if self.port == 443 { self.host.clone() } else { format!("{}:{}", self.host, self.port) };
             let mut req = format!(
@@ -351,10 +371,9 @@ impl Upstream {
             if resp.status != 200 {
                 return Err(other(format!("dns {}: HTTP {}", self.url, resp.status)));
             }
-            if resp.header("connection").is_some_and(|c| c.eq_ignore_ascii_case("close")) {
-                return Err(other("connection closed")); // don't pool it
-            }
-            return Ok(resp.body);
+            let reusable = !resp.header("connection").is_some_and(|c| c.split(',').any(|v| v.trim().eq_ignore_ascii_case("close")));
+            // Connection: close controls reuse, not whether this answer is valid.
+            return Ok((resp.body, reusable));
         }
         let mut msg = (query.len() as u16).to_be_bytes().to_vec();
         msg.extend_from_slice(query);
@@ -363,7 +382,7 @@ impl Upstream {
         let len = s.read_u16().await? as usize;
         let mut resp = vec![0u8; len];
         s.read_exact(&mut resp).await?;
-        Ok(resp)
+        Ok((resp, true))
     }
 }
 
@@ -382,11 +401,10 @@ pub async fn udp_query(server: SocketAddr, query: &[u8]) -> io::Result<Vec<u8>> 
 }
 
 /// Resolves a DNS server hostname with the bootstrap (default) nameservers,
-/// or the system resolver when none are configured.
+/// failing closed when no bootstrap is configured to avoid system DNS leaks.
 pub async fn bootstrap_lookup(servers: &[SocketAddr], host: &str) -> io::Result<IpAddr> {
     if servers.is_empty() {
-        let mut it = tokio::net::lookup_host((host, 0)).await?;
-        return it.next().map(|a| a.ip()).ok_or_else(|| other(format!("cannot resolve {host}")));
+        return Err(other(format!("DNS bootstrap for {host} requires an explicit default-nameserver; system DNS fallback refused")));
     }
     let q = wire::query(rand::random(), host, wire::TYPE_A);
     let tries = servers.iter().map(|s| {
@@ -406,6 +424,47 @@ mod tests {
 
     fn up(spec: &str) -> Upstream {
         Upstream::parse(spec, Arc::new(vec![]), Arc::new(std::sync::OnceLock::new())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn silent_pooled_socket_retries_a_fresh_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let u = up(&format!("tcp://{}", listener.local_addr().unwrap()));
+        let (stale, _silent_peer) = tokio::io::duplex(4096);
+        u.pool.lock().unwrap().push(Box::new(stale));
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let len = socket.read_u16().await.unwrap();
+            let mut request = vec![0; len as usize];
+            socket.read_exact(&mut request).await.unwrap();
+            socket.write_u16(12).await.unwrap();
+            socket.write_all(&request).await.unwrap();
+        });
+        let answer = tokio::time::timeout(TIMEOUT, u.exchange_stream(&[0; 12])).await.unwrap().unwrap();
+        assert_eq!(answer, vec![0; 12]);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn doh_connection_close_preserves_answer_without_pooling() {
+        let u = up("https://1.1.1.1/dns-query");
+        let (client, mut server) = tokio::io::duplex(4096);
+        u.pool.lock().unwrap().push(Box::new(client));
+        let task = tokio::spawn(async move {
+            let mut req = vec![0; 4096];
+            server.read(&mut req).await.unwrap();
+            server.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nabcdefghijkl").await.unwrap();
+        });
+        let answer = u.exchange_stream(&[0; 12]).await.unwrap();
+        assert_eq!(answer, b"abcdefghijkl");
+        assert!(u.pool.lock().unwrap().is_empty());
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_implicit_system_dns() {
+        let err = bootstrap_lookup(&[], "example.com").await.unwrap_err();
+        assert!(err.to_string().contains("system DNS fallback refused"));
     }
 
     #[test]

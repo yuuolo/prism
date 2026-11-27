@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useMemo, useState } from "react";
 import { api, type NodeStats, type ProxyItem } from "../api";
 import { t } from "../i18n";
@@ -96,9 +97,9 @@ export default function QualityDialog({
     <div className="modal-bg" onClick={onClose}>
       <div className="modal quality-modal" onClick={(e) => e.stopPropagation()}>
         <h2>{t("节点质量")}</h2>
-        <div className="small muted">
+        <Help title={t("节点质量")}><div>
           {t("记录最近 24 小时的测速结果：自动测速组的定时测试、手动测速，以及每 5 分钟对正在使用的节点的测试。按稳定性排序（延迟 + 2×抖动 + 丢包惩罚）。")}
-        </div>
+        </div></Help>
         <div className="row">
           <select className="input" style={{ maxWidth: 260 }} value={group} onChange={(e) => setGroup(e.target.value)}>
             {groups.map((x) => (
