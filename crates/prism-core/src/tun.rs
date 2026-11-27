@@ -490,7 +490,8 @@ mod mac {
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use anyhow::{anyhow, bail, Context, Result};
     use tokio::io::unix::AsyncFd;
@@ -587,10 +588,14 @@ mod mac {
     }
 
     /// Gateway of the default route scoped to `iface`, if there is one.
+    /// Without one, `route get -ifscope` answers with the unscoped default
+    /// route (flags without IFSCOPE), which bound sockets can't use here.
     fn scoped_default(v6: bool, iface: &str) -> Option<String> {
         let family = if v6 { "-inet6" } else { "-inet" };
         let out = run("/sbin/route", &["-n", "get", family, "-ifscope", iface, "default"]).ok()?;
-        out.lines().find_map(|l| l.trim().strip_prefix("gateway:").map(|g| g.trim().to_string()))
+        let field = |k: &str| out.lines().find_map(|l| l.trim().strip_prefix(k).map(|v| v.trim().to_string()));
+        field("flags:").filter(|f| f.contains("IFSCOPE"))?;
+        field("gateway:")
     }
 
     /// The IPv6 scoped default route on `phys`, when the IPv6 default route
@@ -630,16 +635,19 @@ mod mac {
         }
         let weak = Arc::downgrade(hub);
         let rt = tokio::runtime::Handle::current();
+        let recovery = Arc::new(Mutex::new(crate::network::Recovery::new(uplink(initial.0, initial.1.as_deref()))));
+        // A repair in flight, and one still wanted (failed, or asked for
+        // while another ran): retried on the next wake-up.
+        let busy = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(AtomicBool::new(false));
         std::thread::spawn(move || {
-            let mut recovery = crate::network::Recovery::new(uplink(initial.0, initial.1.as_deref()));
-            let mut pending = false;
             let mut buf = [0u8; 2048];
             loop {
                 let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, buf.len()) };
                 if n < 0 {
                     match io::Error::last_os_error().kind() {
                         io::ErrorKind::Interrupted => continue,
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut if pending => {}
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut if pending.load(Ordering::Acquire) => {}
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => continue,
                         _ => return,
                     }
@@ -656,9 +664,11 @@ mod mac {
                 let current = default_interface().ok().filter(|(name, ..)| *name != tun);
                 let next = current.as_ref().map(|(_, index, gw)| uplink(*index, gw.as_deref()));
                 let Some((name, index, gateway)) = current else {
-                    recovery.needed(None, false); // offline: remember to repair once back
+                    recovery.lock().unwrap().needed(None, false); // offline: repair once back
                     continue;
                 };
+                // Rebinding and the routes come first and never wait for a
+                // repair: they are what lets the core's connections out.
                 if net::bind_interface() != index {
                     tracing::info!("TUN: the network moved to {name}, outbound now bound to it (if {index})");
                     net::set_bind_interface(index);
@@ -667,26 +677,37 @@ mod mac {
                 if ipv6 {
                     ensure_scoped_default6(&name);
                 }
-                if !recovery.needed(next.as_ref(), false) {
-                    pending = false;
+                if !recovery.lock().unwrap().needed(next.as_ref(), false) {
+                    pending.store(false, Ordering::Release);
                     continue;
                 }
+                pending.store(true, Ordering::Release);
+                if busy.swap(true, Ordering::AcqRel) {
+                    continue; // retried when the running one is done
+                }
+                let next = next.unwrap();
                 tracing::info!("网络恢复: uplink changed to {name} (gateway {}), rebuilding DNS and outbound sessions", gateway.as_deref().unwrap_or("none"));
-                let started = std::time::Instant::now();
-                match rt.block_on(tokio::time::timeout(std::time::Duration::from_secs(30), hub.repair())) {
-                    Ok(Ok(())) => {
-                        hub.tun_health.network_repaired(true, started.elapsed());
+                let (recovery, busy, pending) = (recovery.clone(), busy.clone(), pending.clone());
+                rt.spawn(async move {
+                    let started = std::time::Instant::now();
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(30), hub.repair()).await;
+                    let ok = matches!(result, Ok(Ok(())));
+                    hub.tun_health.network_repaired(ok, started.elapsed());
+                    if ok {
                         hub.core().tunnel.stats.close_all();
-                        recovery.applied(next.unwrap());
-                        pending = false;
+                        // Applied only if the network is still that one;
+                        // otherwise the next wake-up repairs again.
+                        let still = default_interface().ok().map(|(_, i, g)| uplink(i, g.as_deref()));
+                        if still.as_ref() == Some(&next) {
+                            recovery.lock().unwrap().applied(next);
+                            pending.store(false, Ordering::Release);
+                        }
                         tracing::info!("网络恢复: DNS and outbound sessions rebuilt successfully");
-                    }
-                    result => {
-                        hub.tun_health.network_repaired(false, started.elapsed());
-                        pending = true;
+                    } else {
                         tracing::warn!("网络恢复: rebuild failed ({result:?}), retrying");
                     }
-                }
+                    busy.store(false, Ordering::Release);
+                });
             }
         });
     }
