@@ -55,6 +55,9 @@ async fn call(req: &Request) -> Result<Response> {
         if refused_client(&error) {
             bail!(NEED_REINSTALL);
         }
+        if error.ends_with(prism_service::OTHER_ACCOUNT) {
+            bail!("TUN 服务是本机另一个账户安装的，只接受那个账户的 Prism。需要在这个账户使用 TUN 时，请先在那个账户卸载 TUN 服务，再在这里安装");
+        }
         bail!("TUN 服务: {error}");
     }
     Ok(r)
@@ -218,5 +221,8 @@ mod tests {
         // The text prism-service's `answer` sends to an unregistered client.
         assert!(refused_client("/Applications/Prism copy.app/Contents/MacOS/prism 不是安装服务时登记的 Prism"));
         assert!(!refused_client("unsupported state mutation"));
+        // Another account: reinstalling would take the service away from it.
+        assert!(!refused_client(&format!("/Applications/Prism.app/Contents/MacOS/prism {}", prism_service::OTHER_ACCOUNT)));
     }
 }
+

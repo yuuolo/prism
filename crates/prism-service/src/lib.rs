@@ -41,6 +41,9 @@ pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/dev.prism.service.plist"
 pub const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 /// Requests carry data files (geodata), so they can be large.
 pub const MAX_MESSAGE: usize = 128 << 20;
+/// End of the refusal of a client run by another account than the one the
+/// service was installed for (macOS checks the account as well as the path).
+pub const OTHER_ACCOUNT: &str = "所属的账户不是安装服务时登记的账户";
 
 /// `%ProgramFiles%\Prism Service`: the service and its cores (admin-only).
 #[cfg(windows)]
