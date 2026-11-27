@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useCallback, useEffect, useState } from "react";
 import { api, delayClass, enc, errText, lastDelay, type ProxyItem, type UnlockCheck } from "../api";
 import { useApp } from "../state";
@@ -75,7 +76,7 @@ function UnlockDialog({ onClose }: { onClose: () => void }) {
     <div className="modal-bg" onClick={onClose}>
       <div className="modal unlock-modal" onClick={(e) => e.stopPropagation()}>
         <h2>{t("解锁检测")}</h2>
-        <div className="small muted">{t("经当前的规则和所选节点访问各服务（与浏览器使用系统代理时一致）。")}</div>
+        <Help title={t("解锁检测")}><div>{t("经当前的规则和所选节点访问各服务（与浏览器使用系统代理时一致）。")}</div></Help>
         {error && <div className="notice">{error}</div>}
         {!list && !error && <div className="muted">{t("检测中，约 10 秒…")}</div>}
         {list && (

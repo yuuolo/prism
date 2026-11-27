@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useState } from "react";
 import { api, errText, type RouteKind, type RouteRule } from "../api";
 import { useApp } from "../state";
@@ -103,12 +104,12 @@ export function RouteRuleDialog({
             <span>{t("也匹配解析到这些 IP 的域名（需要先解析域名，会慢一些；sing-box 内核不支持）")}</span>
           </label>
         )}
-        <div className="small muted">
+        <Help title={t("域名 / IP 分流")}>
           {kind === "DOMAIN-SUFFIX" && t("可以直接粘贴网址，会自动取出域名。")}
           {(kind === "GEOSITE" || kind === "GEOIP") && t("分类名见 geosite.dat / geoip.dat（MetaCubeX meta-rules-dat）。")}{" "}
           {t("规则模式下生效，排在应用分流之后、订阅规则之前，从上到下第一条匹配的生效。")}
-          {bad.length > 0 && <span style={{ color: "var(--bad)" }}> {t("格式不对：{v}", { v: bad.slice(0, 3).join("、") })}</span>}
-        </div>
+        </Help>
+        {bad.length > 0 && <div className="small" style={{ color: "var(--bad)" }}>{t("格式不对：{v}", { v: bad.slice(0, 3).join("、") })}</div>}
         <div className="row">
           <span className="spacer" />
           <button className="btn" onClick={onClose}>
@@ -167,10 +168,10 @@ export default function Routes() {
         </button>
       </div>
 
-      <div className="notice">
+      <Help title={t("域名 / IP 分流")}><div>
         {t("让指定的网站或 IP 走固定出口：直连、拒绝，或某个代理组 / 节点。规则模式下生效，排在应用分流之后、订阅规则之前；三种内核都支持，换订阅也保留。")}
         {t("IP 规则默认只匹配直接按 IP 访问的连接。")}
-      </div>
+      </div></Help>
 
       {rules.length === 0 && <div className="empty">{t("还没有分流规则。点「添加规则」，或在「连接」页从某条连接直接添加。")}</div>}
 

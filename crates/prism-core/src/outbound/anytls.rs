@@ -32,6 +32,7 @@ use rand::Rng;
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::tls::Tls;
 use super::{Dialer, Outbound};
@@ -53,6 +54,7 @@ const CMD_SERVER_SETTINGS: u8 = 10;
 const MAX_FRAME: usize = 16 * 1024;
 /// sing-box UDP-over-TCP v2: a stream to this address carries datagrams.
 const UOT_MAGIC: &str = "sp.v2.udp-over-tcp.arpa";
+const MAX_IDLE_SESSIONS: usize = 32;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SYNACK_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -177,6 +179,7 @@ struct Session {
     streams: Mutex<HashMap<u32, mpsc::Sender<Event>>>,
     next_sid: AtomicU32,
     closed: AtomicBool,
+    cancel: CancellationToken,
     idle_since: Mutex<Instant>,
     /// Protocol version the server announced; 0 until it did.
     peer_version: AtomicU8,
@@ -200,6 +203,7 @@ impl Session {
     /// closes the connection and the reader exits.
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
+        self.cancel.cancel();
         self.out.lock().unwrap().take();
         self.streams.lock().unwrap().clear();
         self.synack_received();
@@ -327,6 +331,7 @@ impl AnyTls {
             streams: Mutex::new(HashMap::new()),
             next_sid: AtomicU32::new(1),
             closed: AtomicBool::new(false),
+            cancel: CancellationToken::new(),
             idle_since: Mutex::new(Instant::now()),
             peer_version: AtomicU8::new(0),
             synack_watch: Mutex::new(None),
@@ -335,8 +340,9 @@ impl AnyTls {
         // Writer: batches whatever is queued, flushes once per batch.
         let ws = Arc::downgrade(&session);
         let padding = self.padding.clone();
+        let writer_cancel = session.cancel.clone();
         tokio::spawn(async move {
-            let res: io::Result<()> = async {
+            let work = async {
                 let mut pkt = 0u32;
                 let mut padding_on = true;
                 let mut first = Some(settings);
@@ -365,8 +371,11 @@ impl AnyTls {
                     wr.flush().await?;
                 }
                 wr.shutdown().await
-            }
-            .await;
+            };
+            let res: io::Result<()> = tokio::select! {
+                _ = writer_cancel.cancelled() => return,
+                res = work => res,
+            };
             if res.is_err() {
                 if let Some(s) = ws.upgrade() {
                     s.close();
@@ -378,7 +387,7 @@ impl AnyTls {
         let rs = session.clone();
         let padding = self.padding.clone();
         tokio::spawn(async move {
-            let res: io::Result<()> = async {
+            let work = async {
                 let mut head = [0u8; 7];
                 let mut data = vec![0u8; 65535];
                 loop {
@@ -431,8 +440,11 @@ impl AnyTls {
                         _ => {}
                     }
                 }
-            }
-            .await;
+            };
+            let res: io::Result<()> = tokio::select! {
+                _ = rs.cancel.cancelled() => return,
+                res = work => res,
+            };
             if let Err(e) = res {
                 if e.kind() != io::ErrorKind::UnexpectedEof {
                     tracing::debug!("anytls session closed: {e}");
@@ -456,6 +468,14 @@ impl AnyTls {
         frame(&mut f, CMD_PSH, sid, &dest);
         out.send(f).await.map_err(|_| other("anytls: session closed"))?;
         Ok((sid, erx))
+    }
+}
+
+impl Drop for AnyTls {
+    fn drop(&mut self) {
+        for session in self.idle.lock().unwrap().drain(..) {
+            session.close();
+        }
     }
 }
 
@@ -546,7 +566,9 @@ impl Outbound for AnyTls {
             session.streams.lock().unwrap().remove(&sid);
             if res.is_ok() && !session.is_closed() {
                 *session.idle_since.lock().unwrap() = Instant::now();
-                pool.lock().unwrap().push(session);
+                let mut idle = pool.lock().unwrap();
+                if idle.len() < MAX_IDLE_SESSIONS { idle.push(session); }
+                else { session.close(); }
             } else {
                 session.close();
             }
@@ -558,6 +580,30 @@ impl Outbound for AnyTls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closing_session_cancels_blocked_io_and_streams() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (events, mut receiver) = mpsc::channel(1);
+        let s = Session {
+            out: Mutex::new(Some(tx)), streams: Mutex::new(HashMap::from([(1, events)])),
+            next_sid: AtomicU32::new(2), closed: AtomicBool::new(false),
+            cancel: CancellationToken::new(), idle_since: Mutex::new(Instant::now()),
+            peer_version: AtomicU8::new(2), synack_watch: Mutex::new(None),
+        };
+        let cancel = s.cancel.clone();
+        let blocked = tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => true,
+                _ = std::future::pending::<()>() => false,
+            }
+        });
+        s.close();
+        s.close(); // cleanup is idempotent
+        assert!(tokio::time::timeout(Duration::from_secs(1), blocked).await.unwrap().unwrap());
+        assert!(receiver.recv().await.is_none());
+        assert!(s.sender().is_none());
+    }
 
     #[test]
     fn frame_layout() {

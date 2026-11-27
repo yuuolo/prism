@@ -19,9 +19,13 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+pub mod app_exceptions;
+pub mod recovery;
 
 #[cfg(windows)]
 pub mod killswitch;
+#[cfg(windows)]
+pub mod tailguard;
 
 pub const SERVICE_NAME: &str = "PrismService";
 #[cfg(windows)]
@@ -154,9 +158,23 @@ pub enum Request {
         files: BTreeMap<String, String>,
         #[serde(default)]
         kill_switch: bool,
+        #[serde(default)]
+        tailscale: bool,
+        #[serde(default)]
+        kill_switch_apps: Vec<String>,
+        #[serde(default)]
+        recovery: bool,
     },
     /// Stops the core and lifts the kill switch.
     Stop,
+    /// Explicit, bounded permission for the verified Tailscale daemon to connect.
+    TailscaleConnect { connect: bool },
+    /// Update executable exceptions without restarting the core or lifting protection.
+    SetKillSwitchApps { paths: Vec<String> },
+    SetRecovery { enabled: bool },
+    Recover,
+    Reload { config: String, files: BTreeMap<String, String> },
+    CoreMutation { method: String, path: String, body: serde_json::Value },
     /// Core output lines after sequence number `since`.
     Logs { since: u64 },
 }
@@ -166,6 +184,8 @@ pub struct Status {
     pub running: bool,
     pub core: Option<String>,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub uptime_secs: u64,
     pub version: String,
     /// kind -> SHA-256 of the installed core.
     pub cores: BTreeMap<String, String>,
@@ -176,6 +196,30 @@ pub struct Status {
     /// The kill switch is on (blocking everything if `running` is false).
     #[serde(default)]
     pub kill_switch: bool,
+    #[serde(default)]
+    pub kill_switch_apps_supported: bool,
+    #[serde(default)]
+    pub kill_switch_apps: Vec<String>,
+    #[serde(default)]
+    pub recovery_supported: bool,
+    #[serde(default)]
+    pub recovery: recovery::Status,
+    #[serde(default)]
+    pub tailscale_supported: bool,
+    #[serde(default)]
+    pub tailscale: TailscaleProtection,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TailscaleProtection {
+    pub requested: bool,
+    pub verified: bool,
+    pub connected: bool,
+    pub phase: String,
+    pub detail: String,
+    pub interface_index: Option<u32>,
+    pub peer_addresses: usize,
+    pub lease_seconds: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

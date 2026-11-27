@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { api, type LanAddr } from "../api";
@@ -67,7 +68,7 @@ export default function LanShareDialog({ onClose }: { onClose: () => void }) {
         )}
         {!on && addrs && addrs.length > 0 && <div className="small muted">{t("打开上方开关后，其他设备才能连接。")}</div>}
 
-        <div className="small lan-help">
+        <Help title={t("手机上设置")}>
           <b>{t("手机上设置")}</b>
           <div>
             <b>iPhone / iPad</b>：{t("设置 → 无线局域网 → 当前网络旁的 ⓘ → 配置代理 → 手动，填入上面的服务器和端口。")}
@@ -81,7 +82,7 @@ export default function LanShareDialog({ onClose }: { onClose: () => void }) {
               ? t("连不上时：在「系统设置 → 网络 → 防火墙」中允许 Prism 的内核接收连接。")
               : t("连不上时：在 Windows 防火墙中允许 prism-core / mihomo / sing-box 通过「专用网络」。")}
           </div>
-        </div>
+        </Help>
 
         <div className="row">
           <span className="spacer" />

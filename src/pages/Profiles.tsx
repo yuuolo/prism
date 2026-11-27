@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useState } from "react";
 import { api, fmtAgo, fmtBytes, fmtInterval, type Patches, type ProfileMeta } from "../api";
 import { useApp } from "../state";
@@ -95,11 +96,11 @@ function PatchesEditor({ profile, live, onClose }: { profile: ProfileMeta | null
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>{profile ? t("覆写 · {name}", { name: profile.name }) : t("全局覆写")}</h2>
-        <div className="small muted">
+        <Help title={t("订阅")}><div>
           {profile
             ? t("只对这个订阅生效，在全局覆写之后应用（先 Merge，后 Script）。远程订阅更新后也会保留。")
             : t("对所有订阅生效，在生成内核配置前应用（先 Merge，后 Script）。远程订阅更新后也会保留。")}
-        </div>
+        </div></Help>
         <div className="row">
           <div className="seg">
             <button className={tab === "merge" ? "on" : ""} onClick={() => setTab("merge")}>
@@ -120,11 +121,11 @@ function PatchesEditor({ profile, live, onClose }: { profile: ProfileMeta | null
           value={tab === "merge" ? p.merge : p.script}
           onChange={(e) => setP({ ...p, [tab]: e.target.value })}
         />
-        <div className="small muted">
+        <Help title={t("订阅")}><div>
           {tab === "merge"
             ? t("prepend-rules / append-rules（加在 MATCH 之前）、prepend-proxies / append-proxies、prepend-proxy-groups / append-proxy-groups 增加条目；其他键直接覆盖，字典逐项合并。")
             : t("function main(config, profileName) { … return config; }。config 是订阅转换成的 Clash 配置；不能联网或读写文件。")}
-        </div>
+        </div></Help>
         <div className="row">
           <span className="small muted">{profile ? t("保存前会先用这个订阅试运行，出错不会保存。") : t("保存前会先用当前订阅试运行，出错不会保存。")}</span>
           <span className="spacer" />
@@ -140,8 +141,30 @@ function PatchesEditor({ profile, live, onClose }: { profile: ProfileMeta | null
   );
 }
 
+function SingleNodeDialog({ onClose }: { onClose: () => void }) {
+  const { run } = useApp();
+  const [content, setContent] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    const ok = await run(() => api.addSingleNode(content, name), t("节点已添加"));
+    setBusy(false);
+    if (ok) onClose();
+  };
+  return <div className="modal-bg"><div className="modal">
+    <h2>{t("添加单个节点")}</h2>
+    <input className="input" placeholder={t("名称（可选）")} value={name} onChange={e => setName(e.target.value)} />
+    <textarea className="input" rows={6} placeholder={t("粘贴单个节点分享链接，或只含一个节点的 Clash / sing-box 配置")} value={content} onChange={e => setContent(e.target.value)} />
+    <Help title={t("订阅")}><div>{t("节点独立保存到本地，并加入当前订阅的节点选择和自动选择组。")}</div></Help>
+    <div className="row"><span className="spacer" /><button className="btn" disabled={busy} onClick={onClose}>{t("取消")}</button>
+      <button className="btn primary" disabled={busy || !content.trim()} onClick={save}>{busy ? t("保存中…") : t("添加")}</button></div>
+  </div></div>;
+}
+
 export default function Profiles() {
   const { snap, run } = useApp();
+  const [addingNode, setAddingNode] = useState(false);
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<ProfileMeta | null | undefined>(undefined);
@@ -189,8 +212,10 @@ export default function Profiles() {
 
   return (
     <>
+      {addingNode && <SingleNodeDialog onClose={() => setAddingNode(false)} />}
       <div className="page-head">
         <h1>{t("订阅")}</h1>
+        <button className="btn" onClick={() => setAddingNode(true)}>{t("添加单个节点")}</button>
         <button className="btn" disabled={!!busy} onClick={updateAll}>
           {busy === "all" ? t("更新中…") : t("全部更新")}
         </button>
