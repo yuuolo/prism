@@ -11,6 +11,8 @@ pub mod common;
 pub mod config;
 pub mod delay;
 pub mod dns;
+#[cfg(windows)]
+mod dns_guard;
 pub mod domain;
 pub mod geo;
 pub mod http;
@@ -18,12 +20,16 @@ pub mod hub;
 pub mod mrs;
 pub mod inbound;
 pub mod net;
+mod network;
+#[cfg(windows)]
+mod network_changes;
 pub mod outbound;
 pub mod process;
 pub mod provider;
 pub mod rules;
 pub mod sniff;
 pub mod tun;
+pub mod tun_health;
 pub mod tunnel;
 
 use std::collections::{HashMap, HashSet};
@@ -310,6 +316,8 @@ pub async fn build(mut profile: Profile, home: &Path, env: &BuildEnv) -> Result<
         stats: env.stats.clone(),
         dns: resolver.clone(),
         find_process: tunnel::FindProcess::parse(&profile.general.find_process_mode),
+        block_ipv6: profile.general.block_ipv6,
+        tailscale_bypass: profile.general.tailscale_bypass,
     });
     Ok(Core {
         general: profile.general,
@@ -374,6 +382,10 @@ pub async fn run(hub: Arc<hub::Hub>) -> Result<()> {
             }
         });
     }
-    std::future::pending::<()>().await;
-    Ok(())
+    let home = core.home.clone();
+    drop(core);
+    hub.tun_health.failed.cancelled().await;
+    hub.tun_health.stopping();
+    if let Err(error) = hub.tun_health.persist(&home) { tracing::error!("TUN diagnostic snapshot failed: {error}"); }
+    anyhow::bail!("TUN_HEALTH_FATAL: critical data-plane task stopped; snapshot saved when available")
 }

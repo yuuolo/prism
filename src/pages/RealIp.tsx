@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useState } from "react";
 import { api, errText, type RealIpResult, type RealIpRule } from "../api";
 import { useApp } from "../state";
@@ -70,13 +71,13 @@ function RealIpDialog({ initial, onClose, onSave }: { initial: Partial<RealIpRul
             </div>
           </>
         )}
-        <div className="small muted">
+        <Help title={t("真实 IP")}>
           {kind === "domain"
             ? t("只有公司 DNS 才能解析的内网域名，请填写公司 DNS。留空时用订阅的 DNS 解析。这个域名的连接会直连。")
             : t("这个网段的连接会直连，不走代理。按 IP 访问时不经过 DNS，不需要其他设置。")}
-          {bad && <span style={{ color: "var(--bad)" }}> {t("格式不对：{v}", { v: clean })}</span>}
-          {dnsBad && <span style={{ color: "var(--bad)" }}> {t("DNS 地址格式不对，可以写 10.1.1.1、tcp://10.1.1.1 或 https://dns.example/dns-query。")}</span>}
-        </div>
+        </Help>
+        {bad && <div className="small" style={{ color: "var(--bad)" }}>{t("格式不对：{v}", { v: clean })}</div>}
+        {dnsBad && <div className="small" style={{ color: "var(--bad)" }}>{t("DNS 地址格式不对，可以写 10.1.1.1、tcp://10.1.1.1 或 https://dns.example/dns-query。")}</div>}
         <div className="row">
           <span className="spacer" />
           <button className="btn" onClick={onClose}>
@@ -136,9 +137,9 @@ export default function RealIp() {
         </button>
       </div>
 
-      <div className="notice">
+      <Help title={t("真实 IP")}><div>
         {t("让公司内网等地址拿到真实 IP 并直连：域名不再返回 198.18.x.x 这样的假 IP，还可以指定用公司 DNS 解析。优先于应用分流和域名分流；三种内核都支持，换订阅也保留。")}
-      </div>
+      </div></Help>
       {mode !== "rule" && <div className="notice">{t("当前不是规则模式：真实 IP 的解析设置仍然生效，但直连规则要在规则模式下才起作用。")}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>

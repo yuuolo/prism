@@ -5,9 +5,9 @@
 //! TCP streams and UDP datagrams:
 //!   * TCP: the first bytes are sniffed (TLS SNI / HTTP Host) so rules can
 //!     match domains, then the connection goes through the normal tunnel.
-//!   * UDP 53: DNS queries are forwarded upstream over pinned sockets.
-//!   * UDP 443 (QUIC) is dropped so browsers fall back to TCP.
-//!   * Other UDP is relayed only when the rules send it to DIRECT.
+//!   * TCP/UDP 53: queries are handled by the configured DNS resolver.
+//!   * Other UDP follows the selected outbound through the UDP relay.
+//! Windows also prevents ordinary apps sending port 53 outside the TUN.
 //!
 //! auto-route adds 0.0.0.0/1 + 128.0.0.0/1 on the adapter (and ::/1 +
 //! 8000::/1 with `inet6-address`, so IPv6 can't bypass the rules); the
@@ -30,11 +30,19 @@ pub use win::start;
 #[cfg(target_os = "macos")]
 pub use mac::start;
 
-/// The adapter's address, and the DNS server it advertises (queries to it
-/// are hijacked).
+#[cfg(target_os = "android")]
+#[path = "tun_android.rs"]
+mod android;
+#[cfg(target_os = "android")]
+pub use android::attach as attach_android;
+#[cfg(target_os = "android")]
+pub use android::packet_counts as android_packet_counts;
+
+/// The adapter's address. DNS on port 53 is always intercepted.
 #[cfg(any(windows, target_os = "macos"))]
 const ADDR: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 1);
-#[cfg(any(windows, target_os = "macos"))]
+/// Peer address required by macOS point-to-point utun configuration.
+#[cfg(target_os = "macos")]
 const DNS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(172, 19, 0, 2);
 /// The adapter's IPv6 address (unique local, /126).
 #[cfg(any(windows, target_os = "macos"))]
@@ -42,12 +50,12 @@ const ADDR6: &str = "fdfe:dcba:9876::1";
 /// IPv6 split default routes.
 #[cfg(any(windows, target_os = "macos"))]
 const ROUTES6: [&str; 2] = ["::/1", "8000::/1"];
-#[cfg(any(windows, target_os = "macos"))]
-const MTU: usize = 9000;
+#[cfg(any(windows, target_os = "macos", target_os = "android"))]
+const MTU: usize = if cfg!(target_os = "android") { 1500 } else { 9000 };
 
 /// The platform-independent part: the userspace stack and what happens to
 /// the connections it produces.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "android"))]
 mod stack {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
@@ -56,10 +64,10 @@ mod stack {
     use anyhow::{anyhow, Result};
     use futures::{SinkExt, StreamExt};
     use netstack_smoltcp::{StackBuilder, UdpSocket as StackUdp};
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
-    use super::{ADDR, DNS, MTU};
+    use super::MTU;
     use crate::common::Address;
     use crate::config::TunConfig;
     use crate::hub::Hub;
@@ -68,7 +76,9 @@ mod stack {
 
     /// Runs the stack over a device: `from_dev` delivers IP packets read
     /// from the adapter, `to_dev` takes the packets to write to it.
-    pub fn run(cfg: &TunConfig, hub: Arc<Hub>, mut from_dev: mpsc::Receiver<Vec<u8>>, to_dev: mpsc::Sender<Vec<u8>>) -> Result<()> {
+    pub fn run(_cfg: &TunConfig, hub: Arc<Hub>, mut from_dev: mpsc::Receiver<Vec<u8>>, to_dev: mpsc::Sender<Vec<u8>>) -> Result<()> {
+        use crate::tun_health::Pump;
+        let health = hub.tun_health.clone();
         let (stack, runner, udp, tcp) = StackBuilder::default()
             .enable_tcp(true)
             .enable_udp(true)
@@ -77,43 +87,83 @@ mod stack {
             .build()
             .map_err(|e| anyhow!("netstack: {e}"))?;
         if let Some(r) = runner {
-            tokio::spawn(r);
+            let guard = health.guard(Pump::Runner);
+            let runner_health = health.clone();
+            tokio::spawn(async move { let _guard = guard; if let Err(error) = r.await { tracing::error!("TUN stack runner: {error}"); runner_health.fail(Pump::Runner, "stack_runner_error", None); } });
         }
         let (mut stack_sink, mut stack_stream) = stack.split();
+        let input_health = health.clone();
+        let input_guard = health.guard(Pump::ToStack);
         tokio::spawn(async move {
+            let _guard = input_guard;
             while let Some(p) = from_dev.recv().await {
-                if stack_sink.send(p).await.is_err() {
+                if let Err(error) = stack_sink.send(p).await {
+                    tracing::error!("TUN stack input: {error}");
+                    input_health.fail(Pump::ToStack, "stack_input_error", None);
                     break;
                 }
             }
         });
+        let output_health = health.clone();
+        let output_guard = health.guard(Pump::FromStack);
         tokio::spawn(async move {
-            while let Some(Ok(p)) = stack_stream.next().await {
+            let _guard = output_guard;
+            while let Some(result) = stack_stream.next().await {
+                let p = match result {
+                    Ok(p) => p,
+                    Err(error) => { tracing::error!("TUN stack output: {error}"); output_health.fail(Pump::FromStack, "stack_output_error", None); break; }
+                };
                 if p.is_empty() || p.len() > u16::MAX as usize {
                     continue;
                 }
+                let queued = (to_dev.max_capacity() - to_dev.capacity() + 1).min(to_dev.max_capacity());
+                let wait = std::time::Instant::now();
+                output_health.queue(false, queued, std::time::Duration::ZERO);
                 if to_dev.send(p).await.is_err() {
                     break;
                 }
+                output_health.queue(false, queued, wait.elapsed());
             }
         });
 
         if let Some(mut tcp) = tcp {
             let h = hub.clone();
+            let guard = health.guard(Pump::Tcp);
             tokio::spawn(async move {
+                let _guard = guard;
                 while let Some((stream, src, dst)) = tcp.next().await {
                     tokio::spawn(handle_tcp(stream, src, dst, h.core().tunnel.clone()));
                 }
             });
         }
         if let Some(udp) = udp {
-            let upstream = cfg.dns_upstream();
-            tokio::spawn(handle_udp(udp, hub, upstream));
+            let guard = health.guard(Pump::Udp);
+            tokio::spawn(async move { let _guard = guard; handle_udp(udp, hub).await; });
         }
         Ok(())
     }
 
     async fn handle_tcp(mut s: netstack_smoltcp::TcpStream, src: SocketAddr, dst: SocketAddr, tunnel: Arc<Tunnel>) {
+        // Intercept DNS over TCP before sniffing or applying routing rules.
+        if dst.port() == 53 {
+            let _ = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let len = s.read_u16().await? as usize;
+                    if len < 12 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short DNS query")); }
+                    let mut query = vec![0; len];
+                    s.read_exact(&mut query).await?;
+                    let Some(resolver) = tunnel.dns.clone() else {
+                        tracing::warn!("DNS REJECT: TCP resolver unavailable; refusing direct upstream fallback");
+                        return Ok::<(), std::io::Error>(());
+                    };
+                    let Some(answer) = resolver.handle(&query).await else { return Ok(()); };
+                    let size = u16::try_from(answer.len()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "DNS response too large"))?;
+                    s.write_u16(size).await?;
+                    s.write_all(&answer).await?;
+                }
+            }).await;
+            return;
+        }
         // Sniff: wait briefly for the client's first bytes (server-first
         // protocols simply time out and are routed by IP).
         let mut buf = vec![0u8; 16 * 1024];
@@ -143,7 +193,7 @@ mod stack {
         }
     }
 
-    async fn handle_udp(udp: StackUdp, hub: Arc<Hub>, upstream: Vec<IpAddr>) {
+    async fn handle_udp(udp: StackUdp, hub: Arc<Hub>) {
         let (mut rd, mut wr) = udp.split();
         let (reply_tx, mut reply_rx) = mpsc::channel::<UdpPacket>(4096);
         tokio::spawn(async move {
@@ -157,7 +207,7 @@ mod stack {
         let nat = UdpNat::new("Tun", reply_tx.clone());
         while let Some((data, src, dst)) = rd.next().await {
             if dst.port() == 53 {
-                tokio::spawn(dns_query(hub.clone(), data, src, dst, upstream.clone(), reply_tx.clone()));
+                tokio::spawn(dns_query(hub.clone(), data, src, dst, reply_tx.clone()));
                 continue;
             }
             if dst.ip().is_multicast() || dst.ip() == IpAddr::V4(Ipv4Addr::BROADCAST) {
@@ -167,26 +217,13 @@ mod stack {
         }
     }
 
-    /// DNS hijack: the DNS module answers when enabled (fake-ip etc.);
-    /// otherwise the query is forwarded to the server the client asked (or
-    /// the default upstream for the TUN's own DNS address).
-    async fn dns_query(hub: Arc<Hub>, query: Vec<u8>, src: SocketAddr, dst: SocketAddr, upstream: Vec<IpAddr>, reply: mpsc::Sender<UdpPacket>) {
+    /// DNS hijack fails closed if the configured resolver is unavailable.
+    async fn dns_query(hub: Arc<Hub>, query: Vec<u8>, src: SocketAddr, dst: SocketAddr, reply: mpsc::Sender<UdpPacket>) {
         let resp = match hub.core().dns.clone() {
             Some(r) => r.handle(&query).await,
             None => {
-                let target = if dst.ip() == IpAddr::V4(DNS) || dst.ip() == IpAddr::V4(ADDR) {
-                    SocketAddr::new(upstream.first().copied().unwrap_or(IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5))), 53)
-                } else {
-                    dst
-                };
-                match tokio::time::timeout(Duration::from_secs(5), crate::dns::upstream::udp_query(target, &query)).await {
-                    Ok(Ok(r)) => Some(r),
-                    Ok(Err(e)) => {
-                        tracing::debug!("dns {target}: {e}");
-                        None
-                    }
-                    Err(_) => None,
-                }
+                tracing::warn!("DNS REJECT: resolver unavailable; refusing direct upstream fallback");
+                None
             }
         };
         if let Some(data) = resp {
@@ -237,15 +274,56 @@ mod win {
         Ok(())
     }
 
-    /// Interface currently used for the default route (before we add ours).
-    fn default_interface() -> Result<u32> {
-        let mut index = 0u32;
-        let dest = u32::from_ne_bytes([1, 1, 1, 1]);
-        let r = unsafe { windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterface(dest, &mut index) };
-        if r != 0 {
-            bail!("no default network interface (GetBestInterface error {r})");
-        }
-        Ok(index)
+    fn monitor_uplink(hub: &Arc<Hub>, index: u32, initial: crate::network::Uplink) {
+        let weak = Arc::downgrade(hub);
+        let changes = match crate::network_changes::Changes::register(index, initial.index) {
+            Ok(changes) => Some(changes),
+            Err(error) => { tracing::warn!("网络恢复: {error}; using periodic route scans"); None }
+        };
+        tokio::spawn(async move {
+            let mut recovery = crate::network::Recovery::new(initial);
+            let mut last_attempt: Option<tokio::time::Instant> = None;
+            loop {
+                // Measure only time waiting for a scan. A slow reload/cooldown
+                // must not masquerade as another resume on the next iteration.
+                let waiting = std::time::SystemTime::now();
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+                    _ = async { match &changes { Some(c) => c.changed().await, None => std::future::pending::<()>().await } } => {
+                        // Fixed coalescing window: an event storm cannot keep
+                        // postponing the scan, nor cause a reload per callback.
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+                if let Some(last) = last_attempt { tokio::time::sleep_until(last + std::time::Duration::from_secs(3)).await; }
+                let Some(hub) = weak.upgrade() else { break };
+                let resumed = waiting.elapsed().unwrap_or_default().as_secs() > 15;
+                let invalidated = changes.as_ref().is_some_and(|c| c.take_invalidation());
+                let next = crate::network::uplink(index).ok();
+                if !recovery.needed(next.as_ref(), resumed || invalidated) { continue; }
+                let next = next.unwrap();
+                last_attempt = Some(tokio::time::Instant::now());
+                if let Some(changes) = &changes { changes.applied(next.index); }
+                net::set_bind_interface(next.index);
+                tracing::info!("网络恢复: uplink changed or resumed, rebinding to interface {}", next.index);
+                // Rebuild protocol pools and DNS caches, keeping fake-IP mappings,
+                // selector choices, mode, API, TUN device and firewall protection.
+                let started = std::time::Instant::now();
+                match tokio::time::timeout(std::time::Duration::from_secs(30), hub.repair()).await {
+                    Ok(Ok(())) => {
+                        hub.tun_health.network_repaired(true, started.elapsed());
+                        hub.core().tunnel.stats.close_all();
+                        recovery.applied(next);
+                        tracing::info!("网络恢复: DNS and outbound sessions rebuilt successfully");
+                    }
+                    result => {
+                        hub.tun_health.network_repaired(false, started.elapsed());
+                        tracing::warn!("网络恢复: rebuild failed ({result:?}), retrying after cooldown");
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
+                }
+            }
+        });
     }
 
     fn find_wintun(home: &Path) -> Result<PathBuf> {
@@ -257,12 +335,56 @@ mod win {
             .ok_or_else(|| anyhow!("wintun.dll not found (put it in {} or next to prism-core)", home.display()))
     }
 
+    fn ready_addresses(index: u32) -> Result<(bool, bool)> {
+        use windows_sys::Win32::{NetworkManagement::IpHelper::*, Networking::WinSock::*};
+        let v6 = ADDR6.parse::<std::net::Ipv6Addr>().unwrap().octets();
+        unsafe {
+            let mut table = std::ptr::null_mut();
+            let code = GetUnicastIpAddressTable(AF_UNSPEC, &mut table);
+            if code != 0 { bail!("read TUN address state: Windows error {code}"); }
+            let mut ready = (false, false);
+            let mut duplicate = false;
+            for row in std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) {
+                if row.InterfaceIndex != index { continue; }
+                let target = match row.Address.si_family {
+                    AF_INET if row.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() == ADDR.octets() => Some(&mut ready.0),
+                    AF_INET6 if row.Address.Ipv6.sin6_addr.u.Byte == v6 => Some(&mut ready.1),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    duplicate |= row.DadState == IpDadStateDuplicate;
+                    *target = row.DadState == IpDadStatePreferred;
+                }
+            }
+            FreeMibTable(table.cast());
+            if duplicate { bail!("TUN address conflict detected on interface {index}"); }
+            Ok(ready)
+        }
+    }
+
+    async fn wait_addresses(index: u32, ipv6: bool) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (v4_ready, v6_ready) = ready_addresses(index)?;
+            if v4_ready && (!ipv6 || v6_ready) { return Ok(()); }
+            if tokio::time::Instant::now() >= deadline { bail!("TUN addresses not ready after 10s (IPv4={v4_ready}, IPv6={v6_ready})"); }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn start(cfg: &TunConfig, home: &Path, hub: Arc<Hub>) -> Result<()> {
-        let phys = default_interface()?;
+        let initial = crate::network::uplink(0)?;
+        let phys = initial.index;
         let wintun = unsafe { wintun::load_from_path(find_wintun(home)?) }.context("load wintun.dll")?;
         let adapter = wintun::Adapter::create(&wintun, "Prism", "Prism", Some(GUID))
             .map_err(|e| anyhow!("create TUN adapter: {e} (TUN mode needs administrator rights)"))?;
         let index = adapter.get_adapter_index().map_err(|e| anyhow!("adapter index: {e}"))?;
+        // Install before publishing TUN routes/DNS. Windows may otherwise
+        // query a LAN DNS server directly through a more-specific route.
+        let dns_guard = if cfg.auto_route { Some(crate::dns_guard::DnsGuard::enable(index)?) } else { None };
+        // Bring the link up before configuring addresses so Windows can
+        // perform duplicate-address detection while configuration proceeds.
+        let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY).map_err(|e| anyhow!("TUN session: {e}"))?);
         let name = format!("name={index}");
         netsh(&["interface", "ipv4", "set", "address", &name, "source=static", "address=172.19.0.1", "mask=255.255.255.252"])?;
         netsh(&["interface", "ipv4", "set", "subinterface", &index.to_string(), &format!("mtu={MTU}"), "store=active"])?;
@@ -278,37 +400,83 @@ mod win {
                 netsh(&["interface", "ipv4", "add", "route", &format!("prefix={prefix}"), &iface, "nexthop=0.0.0.0", "metric=1", "store=active"])?;
             }
         }
-        if cfg.ipv6 {
-            if let Err(e) = ipv6(index, cfg.auto_route) {
-                tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
+        let ipv6_ready_required = if cfg.ipv6 {
+            match ipv6(index, cfg.auto_route) {
+                Ok(()) => true,
+                Err(e) => {
+                    if hub.core().general.block_ipv6 { bail!("IPv6 protection requires TUN IPv6 routes: {e:#}"); }
+                    tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
+                    false
+                }
             }
-        }
-        let session = Arc::new(adapter.start_session(wintun::MAX_RING_CAPACITY).map_err(|e| anyhow!("TUN session: {e}"))?);
+        } else { false };
+        // A live Wintun session is insufficient: a Tentative address makes
+        // Windows DNS queries fail and may cause fallback to another adapter.
+        wait_addresses(index, ipv6_ready_required).await?;
         tracing::info!("TUN adapter Prism (if {index}) up at {ADDR}/30, outbound bound to if {phys}, auto-route={}", cfg.auto_route);
+        use crate::tun_health::Pump;
+        hub.tun_health.enable();
 
         // adapter -> stack (wintun reads block, so use a thread)
         let (tx, rx) = mpsc::channel::<Vec<u8>>(4096);
         let rs = session.clone();
+        let receive_health = hub.tun_health.clone();
+        let receive_guard = receive_health.guard(Pump::Receive);
         std::thread::Builder::new().name("tun-rx".into()).spawn(move || {
-            while let Ok(p) = rs.receive_blocking() {
-                if tx.blocking_send(p.bytes().to_vec()).is_err() {
-                    break;
+            let _guard = receive_guard;
+            loop {
+                match rs.receive_blocking() {
+                    Ok(packet) => {
+                        let bytes = packet.bytes().to_vec();
+                        drop(packet); // Release the ring slot BEFORE a possibly blocked queue send.
+                        receive_health.received(bytes.len());
+                        let queued = (tx.max_capacity() - tx.capacity() + 1).min(tx.max_capacity());
+                        let wait = std::time::Instant::now();
+                        receive_health.queue(true, queued, std::time::Duration::ZERO);
+                        if tx.blocking_send(bytes).is_err() { break; }
+                        receive_health.queue(true, queued, wait.elapsed());
+                    }
+                    Err(error) => {
+                        let code = match &error { wintun::Error::Io(e) => e.raw_os_error(), _ => None };
+                        tracing::error!("TUN receive failed: {error}");
+                        receive_health.fail(Pump::Receive, "device_receive_error", code);
+                        break;
+                    }
                 }
             }
         })?;
         // stack -> adapter
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(4096);
         let ws = session.clone();
+        let send_health = hub.tun_health.clone();
+        let send_guard = send_health.guard(Pump::Send);
         tokio::spawn(async move {
+            let _guard = send_guard;
             let _keep = adapter; // adapter lives as long as the pump
+            let _dns_guard = dns_guard; // survives reloads, removed on TUN shutdown
             while let Some(p) = out_rx.recv().await {
-                if let Ok(mut pkt) = ws.allocate_send_packet(p.len() as u16) {
-                    pkt.bytes_mut().copy_from_slice(&p);
-                    ws.send_packet(pkt);
+                match ws.allocate_send_packet(p.len() as u16) {
+                    Ok(mut pkt) => {
+                        pkt.bytes_mut().copy_from_slice(&p);
+                        ws.send_packet(pkt);
+                        send_health.sent(p.len());
+                    }
+                    Err(wintun::Error::Io(error)) if error.raw_os_error() == Some(111) => {
+                        // ERROR_BUFFER_OVERFLOW: congestion, not a dead adapter.
+                        send_health.ring_full();
+                    }
+                    Err(error) => {
+                        let code = match &error { wintun::Error::Io(e) => e.raw_os_error(), _ => None };
+                        tracing::error!("TUN send failed: {error}");
+                        send_health.fail(Pump::Send, "device_send_error", code);
+                        break;
+                    }
                 }
             }
         });
-        super::stack::run(cfg, hub, rx, out_tx)
+        super::stack::run(cfg, hub.clone(), rx, out_tx)?;
+        monitor_uplink(&hub, index, initial);
+        Ok(())
     }
 }
 
@@ -496,6 +664,7 @@ mod mac {
         }
         if cfg.ipv6 {
             if let Err(e) = ipv6(&name, &phys_name, cfg.auto_route) {
+                if hub.core().general.block_ipv6 { anyhow::bail!("IPv6 protection requires TUN IPv6 routes: {e:#}"); }
                 tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
             }
         }
@@ -504,9 +673,14 @@ mod mac {
         // Safety: `fd` is owned by the AsyncFd from here on and closed only
         // when it is dropped, after deregistration.
         let dev = Arc::new(unsafe { AsyncFd::register(fd) }.map_err(|e| anyhow!("register utun: {}", e.into_parts().1))?);
+        use crate::tun_health::Pump;
+        hub.tun_health.enable();
         let (tx, rx) = mpsc::channel::<Vec<u8>>(4096);
         let rd = dev.clone();
+        let receive_health = hub.tun_health.clone();
+        let receive_guard = receive_health.guard(Pump::Receive);
         tokio::spawn(async move {
+            let _guard = receive_guard;
             let mut buf = vec![0u8; MTU + 4];
             loop {
                 let Ok(mut guard) = rd.readable().await else { return };
@@ -515,13 +689,19 @@ mod mac {
                     if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
                 }) {
                     Ok(Ok(n)) if n > 4 => {
+                        receive_health.received(n - 4);
+                        let queued = (tx.max_capacity() - tx.capacity() + 1).min(tx.max_capacity());
+                        let wait = std::time::Instant::now();
+                        receive_health.queue(true, queued, std::time::Duration::ZERO);
                         if tx.send(buf[4..n].to_vec()).await.is_err() {
                             return;
                         }
+                        receive_health.queue(true, queued, wait.elapsed());
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
                         tracing::warn!("utun read: {e}");
+                        receive_health.fail(Pump::Receive, "device_receive_error", e.raw_os_error());
                         return;
                     }
                     Err(_would_block) => {}
@@ -529,7 +709,10 @@ mod mac {
             }
         });
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(4096);
+        let send_health = hub.tun_health.clone();
+        let send_guard = send_health.guard(Pump::Send);
         tokio::spawn(async move {
+            let _guard = send_guard;
             while let Some(p) = out_rx.recv().await {
                 let pkt = frame(&p);
                 loop {
@@ -538,7 +721,11 @@ mod mac {
                         let n = unsafe { libc::write(fd.as_raw_fd(), pkt.as_ptr() as *const _, pkt.len()) };
                         if n < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
                     }) {
-                        Ok(_) => break, // a failed write drops the packet
+                        Ok(Ok(())) => { send_health.sent(p.len()); break; }
+                        Ok(Err(error)) => {
+                            send_health.fail(Pump::Send, "device_send_error", error.raw_os_error());
+                            return;
+                        }
                         Err(_would_block) => continue,
                     }
                 }

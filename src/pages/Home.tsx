@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useRef, useState } from "react";
 import { api, CORE_NAMES, fmtBytes, fmtSpeed, type AppTotal, type ConnectionsResp, type CoreKind, type Mode, type ProxyItem, type TrafficDay } from "../api";
 import { useApp, usePoll } from "../state";
@@ -232,6 +233,7 @@ export default function Home({ go }: { go: (p: PageKey) => void }) {
             <span className="small muted">
               {running && <i className="core-toggle-dot" />}
               {snap.running ? t("{core} 运行中", { core: t(CORE_NAMES[snap.running]) }) : t(CORE_NAMES[s.core])}
+              {running && <span> · {t("持续运行")} {Math.floor((snap.uptime_secs ?? 0) / 3600)}h {Math.floor(((snap.uptime_secs ?? 0) % 3600) / 60)}m {(snap.uptime_secs ?? 0) % 60}s</span>}
             </span>
           </div>
           <button
@@ -371,11 +373,11 @@ export default function Home({ go }: { go: (p: PageKey) => void }) {
               </button>
             ))}
           </div>
-          <div className="small muted" style={{ marginTop: 10 }}>
+          <Help title={t("代理模式")}><div>
             {s.mode === "rule" && t("按订阅规则分流：国内直连，其余走代理")}
             {s.mode === "global" && t("所有流量走 GLOBAL 组选中的节点")}
             {s.mode === "direct" && t("所有流量直连，不经过代理")}
-          </div>
+          </div></Help>
         </div>
 
         <div className="card">
