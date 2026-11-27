@@ -17,6 +17,15 @@ pub use prism_service::client::State;
 
 /// Error prefix the UI recognises to offer refreshing the service's cores.
 pub const NEED_UPDATE: &str = "NEED_SERVICE_UPDATE: TUN 服务中的内核与当前版本不一致，需要更新服务";
+/// Error prefix the UI recognises to offer reinstalling the service for
+/// this Prism: the service only answers the Prism it was installed from.
+pub const NEED_REINSTALL: &str = "NEED_SERVICE_REINSTALL: TUN 服务是为另一个位置的 Prism 安装的，需要为当前 Prism 重新安装服务";
+
+/// Whether the service refused us as not the Prism registered at install
+/// (see prism-service's `answer`).
+fn refused_client(error: &str) -> bool {
+    error.ends_with("不是安装服务时登记的 Prism")
+}
 
 pub fn kind_name(k: CoreKind) -> &'static str {
     match k {
@@ -42,7 +51,11 @@ fn service_binary() -> Result<PathBuf> {
 async fn call(req: &Request) -> Result<Response> {
     let r = tokio::time::timeout(Duration::from_secs(60), prism_service::client::request(req)).await.context("TUN 服务无响应")??;
     if !r.ok {
-        bail!("TUN 服务: {}", r.error.unwrap_or_default());
+        let error = r.error.unwrap_or_default();
+        if refused_client(&error) {
+            bail!(NEED_REINSTALL);
+        }
+        bail!("TUN 服务: {error}");
     }
     Ok(r)
 }
@@ -194,4 +207,16 @@ pub async fn stop() -> Result<()> {
 /// Core output after line `since`.
 pub async fn logs(since: u64) -> Result<Vec<(u64, String)>> {
     Ok(call(&Request::Logs { since }).await?.lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refused_client;
+
+    #[test]
+    fn recognises_the_service_refusal() {
+        // The text prism-service's `answer` sends to an unregistered client.
+        assert!(refused_client("/Applications/Prism copy.app/Contents/MacOS/prism 不是安装服务时登记的 Prism"));
+        assert!(!refused_client("unsupported state mutation"));
+    }
 }
