@@ -1,5 +1,10 @@
 // English for the interface (keys: the Chinese text used in the components).
 export const EN: Record<string, string> = {
+  "帮助": "Help",
+  "联网探测地址": "Connectivity probe URLs",
+  "DoH 上游": "DoH upstreams",
+  "节点引导 DoH": "Node bootstrap DoH",
+  "出口异常时拒绝": "Reject when the exit fails",
   "服务独立监护": "Independent service supervision",
   "服务累计恢复": "Service recoveries",
   "导出脱敏诊断": "Export sanitized diagnostics",
