@@ -88,7 +88,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               if (await installTunService()) return attempt(true);
             }
           } else if (msg.startsWith("NEED_SERVICE_REINSTALL") && !retried) {
-            if (confirm(t("TUN 服务是为另一个位置的 Prism 安装的（例如 Prism 被移动、改名，或装了多份），只接受那个 Prism 的请求。\n需要管理员授权一次来为当前 Prism 重新安装 TUN 服务，现在重新安装？"))) {
+            if (await ask(t("TUN 服务是为另一个位置的 Prism 安装的（例如 Prism 被移动、改名，或装了多份），只接受那个 Prism 的请求。\n需要管理员授权一次来为当前 Prism 重新安装 TUN 服务，现在重新安装？"))) {
               if (await installTunService()) return attempt(true);
             }
           } else {
