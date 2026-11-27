@@ -71,6 +71,7 @@ smoltcp = { version = "0.12", default-features = false, features = ["std", "log"
 libc = "0.2"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 rcgen = "0.13"
 
 [target.'cfg(windows)'.dependencies]

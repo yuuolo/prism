@@ -56,6 +56,8 @@ const MAX_FRAME: usize = 16 * 1024;
 const UOT_MAGIC: &str = "sp.v2.udp-over-tcp.arpa";
 const MAX_IDLE_SESSIONS: usize = 32;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a stream waits, silent, for the server's FIN after sending ours.
+const FIN_WAIT: Duration = Duration::from_secs(30);
 const SYNACK_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// anytls-go's default padding scheme.
@@ -523,7 +525,8 @@ impl Outbound for AnyTls {
         Ok(pump(move |local| async move {
             let (mut lrd, mut lwr) = tokio::io::split(local);
             let out = session.sender().ok_or_else(|| other("anytls: session closed"))?;
-            let upload = async move {
+            let fin_sent = tokio_util::sync::CancellationToken::new();
+            let upload = async {
                 let mut buf = vec![0u8; MAX_FRAME];
                 loop {
                     let n = lrd.read(&mut buf).await?;
@@ -531,15 +534,27 @@ impl Outbound for AnyTls {
                     frame(&mut f, if n == 0 { CMD_FIN } else { CMD_PSH }, sid, &buf[..n]);
                     out.send(f).await.map_err(|_| other("anytls: session closed"))?;
                     if n == 0 {
+                        fin_sent.cancel();
                         return Ok::<_, io::Error>(());
                     }
                 }
             };
             let download = async {
                 // If the local side goes away, keep draining until the
-                // server's FIN so the session stays clean for reuse.
+                // server's FIN so the session stays clean for reuse. Servers
+                // need not send it after ours (the target may never close):
+                // give up after [`FIN_WAIT`] of silence and drop the session,
+                // which would otherwise stay open, out of the pool, forever.
                 let mut local_open = true;
-                while let Some(ev) = events.recv().await {
+                loop {
+                    let ev = tokio::select! {
+                        ev = events.recv() => ev,
+                        _ = async {
+                            fin_sent.cancelled().await;
+                            tokio::time::sleep(FIN_WAIT).await;
+                        } => return Err(other("anytls: no FIN from the server")),
+                    };
+                    let Some(ev) = ev else { break };
                     match ev {
                         Event::Data(d) => {
                             if local_open && lwr.write_all(&d).await.is_err() {
