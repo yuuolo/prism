@@ -289,9 +289,10 @@ impl Tunnel {
                 conn.upload.fetch_add(initial.len() as u64, Ordering::Relaxed);
                 stats.upload.fetch_add(initial.len() as u64, Ordering::Relaxed);
             }
+            let (up_done, down_done) = (CancellationToken::new(), CancellationToken::new());
             tokio::try_join!(
-                copy_count(cr, rw, &conn.upload, &stats.upload),
-                copy_count(rr, cw, &conn.download, &stats.download),
+                copy_count(cr, rw, &conn.upload, &stats.upload, &up_done, &down_done),
+                copy_count(rr, cw, &conn.download, &stats.download, &down_done, &up_done),
             )
         };
         tokio::select! {
@@ -306,16 +307,38 @@ impl Tunnel {
     }
 }
 
-async fn copy_count<R, W>(mut r: R, mut w: W, conn: &AtomicU64, total: &AtomicU64) -> io::Result<()>
+/// How long one direction may stay quiet once the other has finished. A
+/// client that half-closes (sends FIN) usually wants the reply and then the
+/// end, but many servers (IMAP, say) never close on their own: without a
+/// limit such a connection, and its proxy session, stayed open forever.
+const HALF_CLOSE_IDLE: Duration = Duration::from_secs(30);
+
+/// Copies `r` to `w` until EOF, then marks `done`. Once `peer_done` (the
+/// other direction finished), gives up after [`HALF_CLOSE_IDLE`] without data.
+async fn copy_count<R, W>(
+    mut r: R,
+    mut w: W,
+    conn: &AtomicU64,
+    total: &AtomicU64,
+    done: &CancellationToken,
+    peer_done: &CancellationToken,
+) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut buf = vec![0u8; 32 * 1024];
     loop {
-        let n = r.read(&mut buf).await?;
+        let n = tokio::select! {
+            n = r.read(&mut buf) => n?,
+            _ = async {
+                peer_done.cancelled().await;
+                tokio::time::sleep(HALF_CLOSE_IDLE).await;
+            } => 0,
+        };
         if n == 0 {
             let _ = w.shutdown().await;
+            done.cancel();
             return Ok(());
         }
         w.write_all(&buf[..n]).await?;
@@ -407,5 +430,43 @@ impl UdpNat {
             }
         }
         tunnel.stats.conns.lock().unwrap().remove(&conn.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The client half-closes and the server never answers nor closes (an
+    /// IMAP server, say): the relay ends HALF_CLOSE_IDLE later, not never.
+    /// A server still sending keeps it going.
+    #[tokio::test(start_paused = true)]
+    async fn half_closed_relay_ends_when_quiet() {
+        let (client, mut app) = tokio::io::duplex(1024);
+        let (upstream, mut server) = tokio::io::duplex(1024);
+        let (cr, cw) = tokio::io::split(client);
+        let (rr, rw) = tokio::io::split(upstream);
+        let (n, total) = (AtomicU64::new(0), AtomicU64::new(0));
+        let (up, down) = (CancellationToken::new(), CancellationToken::new());
+        let relay = async {
+            tokio::try_join!(
+                copy_count(cr, rw, &n, &total, &up, &down),
+                copy_count(rr, cw, &n, &total, &down, &up),
+            )
+        };
+        let peers = async {
+            app.shutdown().await.unwrap();
+            let mut b = [0u8; 8];
+            assert_eq!(server.read(&mut b).await.unwrap(), 0, "the server sees our FIN");
+            // Still sending 20 s later: the reply goes through.
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            server.write_all(b"late").await.unwrap();
+            assert_eq!(app.read(&mut b).await.unwrap(), 4);
+            (app, server)
+        };
+        let start = tokio::time::Instant::now();
+        let (r, _keep) = tokio::join!(relay, peers);
+        r.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(20) + HALF_CLOSE_IDLE);
     }
 }

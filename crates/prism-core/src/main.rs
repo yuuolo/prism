@@ -111,6 +111,8 @@ fn main() -> Result<()> {
         .or_else(|| args.config.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
     tracing::info!("prism-core {} home={}", env!("CARGO_PKG_VERSION"), home.display());
+    #[cfg(unix)]
+    raise_fd_limit();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
@@ -136,4 +138,30 @@ fn main() -> Result<()> {
         }
         prism_core::run(hub).await
     })
+}
+
+/// Every connection takes a file descriptor, two when it is proxied, and the
+/// soft limit is 256 on macOS (launchd daemons such as the TUN service, and
+/// apps started from the Finder): in TUN mode a browser plus the system's
+/// own traffic run past it, and then every new connection fails. Raise it
+/// toward the hard limit like mihomo and sing-box do. macOS refuses more
+/// than kern.maxfilesperproc, hence the smaller second try.
+#[cfg(unix)]
+fn raise_fd_limit() {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 {
+        return;
+    }
+    let old = r.rlim_cur;
+    for want in [65536, 10240].map(|n: libc::rlim_t| n.min(r.rlim_max)) {
+        if want <= old {
+            return;
+        }
+        let new = libc::rlimit { rlim_cur: want, rlim_max: r.rlim_max };
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new) } == 0 {
+            tracing::info!("open file limit raised from {old} to {want}");
+            return;
+        }
+    }
+    tracing::warn!("open file limit stays at {old}; many connections at once may fail");
 }
