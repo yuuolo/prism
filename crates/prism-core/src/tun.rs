@@ -490,7 +490,8 @@ mod mac {
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use anyhow::{anyhow, bail, Context, Result};
     use tokio::io::unix::AsyncFd;
@@ -573,15 +574,200 @@ mod mac {
     /// the scoped default route explicitly (it applies to bound sockets
     /// only, so other traffic is unaffected).
     fn ensure_scoped_default(iface: &str, gateway: Option<&str>) {
+        if scoped_default(false, iface).is_some_and(|g| gateway.is_none_or(|gw| g == gw)) {
+            return;
+        }
         let r = match gateway {
-            Some(gw) => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", gw]),
-            None => run("/sbin/route", &["-n", "add", "-ifscope", iface, "default", "-interface", iface]),
+            Some(gw) => add_or_replace(&["-ifscope", iface, "default", gw]),
+            None => add_or_replace(&["-ifscope", iface, "default", "-interface", iface]),
         };
         match r {
-            Ok(_) => tracing::info!("added a scoped default route on {iface} for the core's own connections"),
-            Err(e) if format!("{e:#}").contains("File exists") => {}
+            Ok(_) => tracing::info!("set a scoped default route on {iface} for the core's own connections"),
             Err(e) => tracing::warn!("no scoped default route on {iface}, the core's own connections may fail: {e:#}"),
         }
+    }
+
+    /// Gateway of the default route scoped to `iface`, if there is one.
+    /// Without one, `route get -ifscope` answers with the unscoped default
+    /// route (flags without IFSCOPE), which bound sockets can't use here.
+    fn scoped_default(v6: bool, iface: &str) -> Option<String> {
+        let family = if v6 { "-inet6" } else { "-inet" };
+        let out = run("/sbin/route", &["-n", "get", family, "-ifscope", iface, "default"]).ok()?;
+        let field = |k: &str| out.lines().find_map(|l| l.trim().strip_prefix(k).map(|v| v.trim().to_string()));
+        field("flags:").filter(|f| f.contains("IFSCOPE"))?;
+        field("gateway:")
+    }
+
+    /// The IPv6 scoped default route on `phys`, when the IPv6 default route
+    /// is on it (see ensure_scoped_default).
+    fn ensure_scoped_default6(phys: &str) {
+        let Ok(out) = run("/sbin/route", &["-n", "get", "-inet6", "default"]) else { return };
+        let field = |k: &str| out.lines().find_map(|l| l.trim().strip_prefix(k).map(|n| n.trim().to_string()));
+        let (Some(gw), Some(iface)) = (field("gateway:"), field("interface:")) else { return };
+        if iface != phys || scoped_default(true, phys).as_deref() == Some(gw.as_str()) {
+            return;
+        }
+        if let Err(e) = add_or_replace(&["-inet6", "-ifscope", phys, "default", &gw]) {
+            tracing::warn!("no scoped IPv6 default route on {phys}: {e:#}");
+        }
+    }
+
+    /// A network change (Wi-Fi off and on, another network, a cable) takes
+    /// away the scoped default routes made for the old address, and may
+    /// move the default route to another interface: from then on none of
+    /// the core's own connections get out, proxied or direct. Watches the
+    /// routing socket and sets both up again for the new network. When the
+    /// uplink itself changed (interface or gateway, or back after being
+    /// offline), also rebuilds DNS and outbound sessions like Windows does,
+    /// instead of waiting for the health probe to restart the core.
+    fn follow_network(tun: String, ipv6: bool, hub: &Arc<Hub>, initial: (u32, Option<String>)) {
+        let fd = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
+        if fd < 0 {
+            tracing::warn!("TUN: not watching for network changes: {}", io::Error::last_os_error());
+            return;
+        }
+        // Safety: a new socket, owned here only.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // Wake every few seconds to retry a repair that failed.
+        let tv = libc::timeval { tv_sec: 3, tv_usec: 0 };
+        unsafe {
+            libc::setsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVTIMEO, &tv as *const _ as *const _, std::mem::size_of::<libc::timeval>() as u32);
+        }
+        let weak = Arc::downgrade(hub);
+        let rt = tokio::runtime::Handle::current();
+        let recovery = Arc::new(Mutex::new(crate::network::Recovery::new(uplink(initial.0, initial.1.as_deref()))));
+        // A repair in flight, and one still wanted (failed, or asked for
+        // while another ran): retried on the next wake-up.
+        let busy = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            loop {
+                let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, buf.len()) };
+                if n < 0 {
+                    match io::Error::last_os_error().kind() {
+                        io::ErrorKind::Interrupted => continue,
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut if pending.load(Ordering::Acquire) => {}
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => continue,
+                        _ => return,
+                    }
+                } else if n == 0 {
+                    return;
+                } else if !network_changed(&buf[..n as usize]) {
+                    continue;
+                } else {
+                    // Changes come in bursts: let them settle, then drop the rest.
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    while unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, buf.len(), libc::MSG_DONTWAIT) } > 0 {}
+                }
+                let Some(hub) = weak.upgrade() else { return };
+                let current = default_interface().ok().filter(|(name, ..)| *name != tun);
+                let next = current.as_ref().map(|(_, index, gw)| uplink(*index, gw.as_deref()));
+                let Some((name, index, gateway)) = current else {
+                    recovery.lock().unwrap().needed(None, false); // offline: repair once back
+                    continue;
+                };
+                // Rebinding and the routes come first and never wait for a
+                // repair: they are what lets the core's connections out.
+                if net::bind_interface() != index {
+                    tracing::info!("TUN: the network moved to {name}, outbound now bound to it (if {index})");
+                    net::set_bind_interface(index);
+                }
+                ensure_scoped_default(&name, gateway.as_deref());
+                if ipv6 {
+                    ensure_scoped_default6(&name);
+                }
+                if !recovery.lock().unwrap().needed(next.as_ref(), false) {
+                    pending.store(false, Ordering::Release);
+                    continue;
+                }
+                pending.store(true, Ordering::Release);
+                if busy.swap(true, Ordering::AcqRel) {
+                    continue; // retried when the running one is done
+                }
+                let next = next.unwrap();
+                tracing::info!("网络恢复: uplink changed to {name} (gateway {}), rebuilding DNS and outbound sessions", gateway.as_deref().unwrap_or("none"));
+                let (recovery, busy, pending) = (recovery.clone(), busy.clone(), pending.clone());
+                rt.spawn(async move {
+                    let started = std::time::Instant::now();
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(30), hub.repair()).await;
+                    let ok = matches!(result, Ok(Ok(())));
+                    hub.tun_health.network_repaired(ok, started.elapsed());
+                    if ok {
+                        hub.core().tunnel.stats.close_all();
+                        // Applied only if the network is still that one;
+                        // otherwise the next wake-up repairs again.
+                        let still = default_interface().ok().map(|(_, i, g)| uplink(i, g.as_deref()));
+                        if still.as_ref() == Some(&next) {
+                            recovery.lock().unwrap().applied(next);
+                            pending.store(false, Ordering::Release);
+                        }
+                        tracing::info!("网络恢复: DNS and outbound sessions rebuilt successfully");
+                    } else {
+                        tracing::warn!("网络恢复: rebuild failed ({result:?}), retrying");
+                    }
+                    busy.store(false, Ordering::Release);
+                });
+            }
+        });
+    }
+
+    /// The uplink as recovery compares it: interface and IPv4 gateway.
+    fn uplink(index: u32, gateway: Option<&str>) -> crate::network::Uplink {
+        let gateway = gateway.and_then(|g| g.parse::<std::net::Ipv4Addr>().ok()).map_or(0, u32::from);
+        crate::network::Uplink { index, gateway, source: 0 }
+    }
+
+    /// Whether a routing socket message may mean another network: an
+    /// address or interface change, or a route added or removed by hand or
+    /// by the system. Not the host routes cloned for every new destination
+    /// or neighbour, which come all the time.
+    fn network_changed(msg: &[u8]) -> bool {
+        // rt_msghdr / ifa_msghdr: type at byte 3; rt_msghdr flags at 8.
+        let Some(&kind) = msg.get(3) else { return false };
+        match kind as libc::c_int {
+            libc::RTM_NEWADDR | libc::RTM_DELADDR | libc::RTM_IFINFO => true,
+            libc::RTM_ADD | libc::RTM_DELETE | libc::RTM_CHANGE => {
+                let Some(f) = msg.get(8..12) else { return false };
+                let flags = i32::from_ne_bytes(f.try_into().unwrap());
+                flags & (libc::RTF_WASCLONED | libc::RTF_HOST | libc::RTF_LLINFO) == 0
+            }
+            _ => false,
+        }
+    }
+
+    /// `route add`, replacing the route when it is there already: a scoped
+    /// default route stays after the core exits (it is on the physical
+    /// interface, not the utun), and the gateway may have changed since
+    /// (another Wi-Fi, say). `args` end with `default <gateway>…`; the
+    /// existing route is deleted by everything up to `default`.
+    fn add_or_replace(args: &[&str]) -> Result<()> {
+        match route_add(args) {
+            Err(e) if format!("{e:#}").ends_with("File exists") => {
+                let upto = args.iter().position(|a| *a == "default").map_or(args, |i| &args[..=i]);
+                run("/sbin/route", &[&["-n", "delete"], upto].concat())?;
+                route_add(args)
+            }
+            r => r,
+        }
+    }
+
+    /// `route -n add`, failing when route(8) printed an error.
+    fn route_add(args: &[&str]) -> Result<()> {
+        let out = run("/sbin/route", &[&["-n", "add"], args].concat())?;
+        match route_error(&out) {
+            Some(e) => bail!("route add {}: {e}", args.join(" ")),
+            None => Ok(()),
+        }
+    }
+
+    /// The error route(8) printed, if any. It exits 0 either way and prints
+    /// on stdout: `add net default: gateway 192.168.1.1` when it worked,
+    /// `…: gateway 192.168.1.1: File exists` when it didn't.
+    fn route_error(stdout: &str) -> Option<&str> {
+        let line = stdout.lines().find(|l| l.contains(": gateway "))?;
+        let after = &line[line.find(": gateway ")? + ": gateway ".len()..];
+        after.split_once(": ").map(|(_, e)| e.trim())
     }
 
     /// IPv6 address and split default routes on the utun; the physical
@@ -589,20 +775,10 @@ mod mac {
     /// core's own pinned sockets, like IPv4.
     fn ipv6(name: &str, phys: &str, auto_route: bool) -> Result<()> {
         run("/sbin/ifconfig", &[name, "inet6", ADDR6, "prefixlen", "126"])?;
-        if let Ok(out) = run("/sbin/route", &["-n", "get", "-inet6", "default"]) {
-            let field = |k: &str| out.lines().find_map(|l| l.trim().strip_prefix(k).map(|n| n.trim().to_string()));
-            if let (Some(gw), Some(iface)) = (field("gateway:"), field("interface:")) {
-                if iface == phys {
-                    match run("/sbin/route", &["-n", "add", "-inet6", "-ifscope", phys, "default", &gw]) {
-                        Err(e) if !format!("{e:#}").contains("File exists") => tracing::warn!("no scoped IPv6 default route on {phys}: {e:#}"),
-                        _ => {}
-                    }
-                }
-            }
-        }
+        ensure_scoped_default6(phys);
         if auto_route {
             for net in ROUTES6 {
-                run("/sbin/route", &["-n", "add", "-inet6", "-net", net, "-interface", name])?;
+                route_add(&["-inet6", "-net", net, "-interface", name])?;
             }
         }
         Ok(())
@@ -627,7 +803,7 @@ mod mac {
         net::set_bind_interface(phys);
         if cfg.auto_route {
             for net in ["0.0.0.0/1", "128.0.0.0/1"] {
-                run("/sbin/route", &["-n", "add", "-net", net, "-interface", &name])?;
+                route_add(&["-net", net, "-interface", &name])?;
             }
         }
         if cfg.ipv6 {
@@ -636,6 +812,7 @@ mod mac {
                 tracing::warn!("TUN: IPv6 not set up, IPv6 traffic bypasses the TUN: {e:#}");
             }
         }
+        follow_network(name.clone(), cfg.ipv6, &hub, (phys, gateway.clone()));
         tracing::info!("TUN {name} up at {ADDR}, outbound bound to {phys_name} (if {phys}), auto-route={}, ipv6={}", cfg.auto_route, cfg.ipv6);
 
         // Safety: `fd` is owned by the AsyncFd from here on and closed only
@@ -708,6 +885,97 @@ mod mac {
         fn utun_header() {
             assert_eq!(&super::frame(&[0x45, 0, 0, 20])[..4], &[0, 0, 0, 2]);
             assert_eq!(&super::frame(&[0x60, 0, 0, 0])[..4], &[0, 0, 0, 30]);
+        }
+
+        /// route(8)'s stdout, as printed by newroute() in Apple's route.c.
+        #[test]
+        fn route_errors_from_stdout() {
+            assert_eq!(super::route_error("add net default: gateway 172.20.15.252\n"), None);
+            assert_eq!(super::route_error("add net default: gateway 172.20.15.252: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error("add net default: gateway en0\n"), None);
+            assert_eq!(super::route_error("add net default: gateway fe80::1%en0: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error("add net default: gateway fe80::1%en0\n"), None);
+            assert_eq!(super::route_error("delete net default: gateway 10.0.0.1: not in table\n"), Some("not in table"));
+            // The split routes into the utun: `-net … -interface utunN`.
+            assert_eq!(super::route_error("add net 0.0.0.0: gateway utun4\n"), None);
+            assert_eq!(super::route_error("add net 0.0.0.0: gateway utun4: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error("add net ::/1: gateway utun4\n"), None);
+            assert_eq!(super::route_error("add net 8000::/1: gateway utun4: File exists\n"), Some("File exists"));
+            assert_eq!(super::route_error(""), None);
+        }
+
+        #[test]
+        fn which_route_messages_mean_another_network() {
+            let msg = |kind: libc::c_int, flags: libc::c_int| {
+                let mut m = vec![0u8; 92];
+                m[3] = kind as u8;
+                m[8..12].copy_from_slice(&flags.to_ne_bytes());
+                m
+            };
+            let scoped_default = libc::RTF_UP | libc::RTF_GATEWAY | libc::RTF_STATIC;
+            assert!(super::network_changed(&msg(libc::RTM_DELETE, scoped_default)));
+            assert!(super::network_changed(&msg(libc::RTM_ADD, scoped_default)));
+            assert!(super::network_changed(&msg(libc::RTM_NEWADDR, 0)));
+            assert!(super::network_changed(&msg(libc::RTM_DELADDR, 0)));
+            assert!(super::network_changed(&msg(libc::RTM_IFINFO, 0)));
+            // Cloned per destination, neighbours, lookups: all the time.
+            assert!(!super::network_changed(&msg(libc::RTM_ADD, libc::RTF_UP | libc::RTF_HOST | libc::RTF_WASCLONED)));
+            assert!(!super::network_changed(&msg(libc::RTM_DELETE, libc::RTF_HOST | libc::RTF_LLINFO)));
+            assert!(!super::network_changed(&msg(libc::RTM_MISS, 0)));
+            assert!(!super::network_changed(&msg(libc::RTM_GET, scoped_default)));
+            assert!(!super::network_changed(&[0, 0, 0]));
+        }
+
+        /// scoped_default (route get) sees what netstat lists.
+        #[test]
+        fn reads_the_scoped_default_route() {
+            let Ok((iface, _, _)) = super::default_interface() else { return };
+            assert_eq!(super::scoped_default(false, &iface), scoped_gateway(&iface));
+            assert_eq!(super::scoped_default(false, "lo0"), None);
+        }
+
+        /// Gateway of the default route scoped to `iface` (flag I), if any.
+        fn scoped_gateway(iface: &str) -> Option<String> {
+            let out = super::run("/usr/sbin/netstat", &["-rn", "-f", "inet"]).unwrap();
+            out.lines().find_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                (f.len() >= 4 && f[0] == "default" && f[2].contains('I') && f[3] == iface).then(|| f[1].to_string())
+            })
+        }
+
+        /// A scoped default route left with an old gateway (another network)
+        /// is pointed at the current one. Changes this Mac's routes for a
+        /// moment (only sockets bound to the interface use them) and puts
+        /// them back, so root and PRISM_ROUTE_LIVE=1 only:
+        /// `cargo test -p prism-core --lib --no-run`, then
+        /// `sudo PRISM_ROUTE_LIVE=1 <test binary> scoped_default --ignored --nocapture`.
+        #[test]
+        #[ignore]
+        fn live_scoped_default_follows_the_gateway() {
+            if std::env::var_os("PRISM_ROUTE_LIVE").is_none() {
+                return;
+            }
+            let (iface, _, gw) = super::default_interface().unwrap();
+            let gw = gw.expect("default route has an IPv4 gateway");
+            let ip: std::net::Ipv4Addr = gw.parse().unwrap();
+            let [a, b, c, d] = ip.octets();
+            let old = std::net::Ipv4Addr::new(a, b, c, if d >= 254 { d - 1 } else { d + 1 }).to_string();
+            let before = scoped_gateway(&iface);
+            let _ = super::run("/sbin/route", &["-n", "delete", "-ifscope", &iface, "default"]);
+            super::run("/sbin/route", &["-n", "add", "-ifscope", &iface, "default", &old]).unwrap();
+            let stale = scoped_gateway(&iface);
+            super::ensure_scoped_default(&iface, Some(&gw));
+            let after = scoped_gateway(&iface);
+            // Put back what was there.
+            let _ = super::run("/sbin/route", &["-n", "delete", "-ifscope", &iface, "default"]);
+            if let Some(g) = &before {
+                super::run("/sbin/route", &["-n", "add", "-ifscope", &iface, "default", g]).unwrap();
+            }
+            let restored = scoped_gateway(&iface);
+            println!("{iface}: before {before:?}, stale {stale:?}, after ensure {after:?}, restored {restored:?}");
+            assert_eq!(stale.as_deref(), Some(old.as_str()));
+            assert_eq!(after.as_deref(), Some(gw.as_str()), "the old gateway was kept");
+            assert_eq!(restored, before);
         }
     }
 }
