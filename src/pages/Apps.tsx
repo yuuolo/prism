@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useMemo, useState } from "react";
 import { api, errText, type AppRule, type Outbounds, type ProcessInfo } from "../api";
 import { useApp } from "../state";
@@ -48,15 +49,18 @@ export function TargetSelect({ value, outs, onChange }: { value: string; outs: O
 export function StrictOption({ target, outs, value, onChange }: { target: string; outs: Outbounds | null; value: boolean; onChange: (v: boolean) => void }) {
   if (target === "DIRECT" || target === "REJECT") return null;
   return (
+    <div>
     <label className="row small" style={{ gap: 8, cursor: "pointer", alignItems: "flex-start" }}>
       <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
-      <span>
-        {t("出口异常时拒绝：出口连不上或已从订阅中消失时，连接直接失败，不直连，也不改走其他规则。")}
+      <span>{t("出口异常时拒绝")}</span>
+    </label>
+    <Help title={t("出口异常时拒绝")}>
+      {t("出口异常时拒绝：出口连不上或已从订阅中消失时，连接直接失败，不直连，也不改走其他规则。")}
+    </Help>
         {value && outs?.groups.includes(target) && (
           <span style={{ color: "var(--bad)" }}> {t("出口是代理组时，组内其他节点或 DIRECT 仍可能接管；要完全锁定请选具体节点。")}</span>
         )}
-      </span>
-    </label>
+    </div>
   );
 }
 
@@ -181,10 +185,10 @@ export function AppRuleDialog({
           <TargetSelect value={target} outs={outs} onChange={setTarget} />
         </div>
         <StrictOption target={target} outs={outs} value={strict} onChange={setStrict} />
-        <div className="small muted">
+        <Help title={t("应用分流")}>
           {byPath ? t("只匹配这个路径的程序。") : t("所有同名程序都会匹配（不区分大小写）。")} {t("规则模式下生效，优先于订阅中的规则。")}
-          {value.includes(",") && <span style={{ color: "var(--bad)" }}> {t("不能包含逗号。")}</span>}
-        </div>
+        </Help>
+        {value.includes(",") && <div className="small" style={{ color: "var(--bad)" }}>{t("不能包含逗号。")}</div>}
 
         <div className="row">
           <span className="spacer" />
@@ -230,10 +234,10 @@ export default function Apps() {
         </button>
       </div>
 
-      <div className="notice">
+      <Help title={t("应用分流")}><div>
         {t("指定程序的连接走固定出口：直连、拒绝，或某个代理组 / 节点。规则模式下生效，排在订阅规则之前；三种内核都支持。")}
         {t("系统代理只对走系统代理的程序有效，其他程序（游戏、命令行等）请开启 TUN 模式。")}
-      </div>
+      </div></Help>
 
       {rules.length === 0 && <div className="empty">{t("还没有应用规则。点「添加应用」从正在运行的程序中选择，或在「连接」页从某条连接直接添加。")}</div>}
 

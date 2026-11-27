@@ -7,6 +7,8 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
+    #[arg(long, hide = true)]
+    restore_state: Option<PathBuf>,
     /// Config file (Clash/mihomo YAML, sing-box JSON or a share-link list)
     #[arg(short = 'f', long = "config")]
     config: PathBuf,
@@ -127,6 +129,13 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let hub = prism_core::hub::Hub::new(source, home, profile).await?;
+        if let Some(path) = args.restore_state {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)?.take(1048577).read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= 1048576, "saved runtime state too large");
+            hub.restore_state(serde_json::from_slice(&bytes)?)?;
+        }
         prism_core::run(hub).await
     })
 }
