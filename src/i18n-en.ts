@@ -105,6 +105,7 @@ export const EN: Record<string, string> = {
   "保存中…": "Saving…",
   已保存: "Saved",
   取消: "Cancel",
+  确定: "OK",
   关闭: "Close",
   删除: "Delete",
   已删除: "Deleted",
