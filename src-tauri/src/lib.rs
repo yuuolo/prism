@@ -780,9 +780,26 @@ async fn subscription_scheduler(app: AppHandle) {
     }
 }
 
+/// Renaming a merged profile renames its nodes that clashed (`名字 [订阅名]`):
+/// references to them follow, and a running core reloads.
 #[tauri::command]
-fn rename_profile(st: State<'_, AppState>, id: String, name: String) -> Res<()> {
-    st.store.rename(&id, &name).map_err(e)
+async fn rename_profile(app: AppHandle, st: State<'_, AppState>, id: String, name: String) -> Res<()> {
+    let s = st.settings();
+    if !s.merged().contains(&id) {
+        return st.store.rename(&id, &name).map_err(e);
+    }
+    let before = core::merged_node_names(&st.store, &s).ok();
+    st.store.rename(&id, &name).map_err(e)?;
+    let after = core::merged_node_names(&st.store, &s).ok();
+    // Same nodes in the same order; only the names of clashing ones differ.
+    if let Some((before, after)) = before.zip(after).filter(|(b, a)| b.len() == a.len()) {
+        let renamed: HashMap<String, String> = before.into_iter().zip(after).filter(|(a, b)| a != b).collect();
+        if !renamed.is_empty() {
+            st.update(|s| s.rename_nodes(&renamed))?;
+            reload_core(&app, &st).await?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

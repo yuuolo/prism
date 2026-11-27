@@ -31,7 +31,50 @@ fn names(seq: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// A group's `filter` / `exclude-filter` / `exclude-type`, read the way
+/// mihomo does: several patterns may be joined with a backtick, any one of
+/// them matching counts; types are joined with `|` and ignore case.
+struct NodeFilter {
+    keep: Vec<Regex>,
+    drop: Vec<Regex>,
+    drop_types: Vec<String>,
+}
 
+/// Whether a group takes every node by itself (`include-all` / `include-all-proxies`).
+fn includes_all(m: &Mapping) -> bool {
+    ["include-all", "include-all-proxies"].iter().any(|k| m.get(*k).and_then(Value::as_bool) == Some(true))
+}
+
+/// mihomo's name for a node type (what `exclude-type` is compared with), lowercase.
+fn adapter_type(ty: &str) -> String {
+    match ty.to_lowercase().as_str() {
+        "ss" => "shadowsocks".into(),
+        "ssr" => "shadowsocksr".into(),
+        other => other.into(),
+    }
+}
+
+impl NodeFilter {
+    /// Err(pattern) when a pattern can't be compiled here (look-around and
+    /// other syntax mihomo's regexp2 accepts but Rust's regex doesn't).
+    fn of(m: &Mapping) -> std::result::Result<Self, String> {
+        let compile = |k: &str| -> std::result::Result<Vec<Regex>, String> {
+            match s(m, k).filter(|f| !f.is_empty()) {
+                None => Ok(Vec::new()),
+                Some(f) => f.split('`').filter(|p| !p.is_empty()).map(|p| Regex::new(p).map_err(|_| p.to_string())).collect(),
+            }
+        };
+        let drop_types = s(m, "exclude-type").map(|t| t.split('|').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+        Ok(NodeFilter { keep: compile("filter")?, drop: compile("exclude-filter")?, drop_types })
+    }
+
+    /// `ty` is the node's Clash `type`.
+    fn allows(&self, name: &str, ty: &str) -> bool {
+        (self.keep.is_empty() || self.keep.iter().any(|r| r.is_match(name)))
+            && !self.drop.iter().any(|r| r.is_match(name))
+            && !self.drop_types.contains(&adapter_type(ty))
+    }
+}
 
 /// The profile with the parts' nodes merged in (Clash YAML), plus warnings.
 /// Without parts the profile is returned unchanged.
@@ -39,17 +82,19 @@ pub fn merge(raw: &str, parts: &[Part]) -> Result<(String, Vec<String>)> {
     if parts.is_empty() {
         return Ok((raw.to_string(), Vec::new()));
     }
-    let mut doc: Value = match config::detect(raw) {
+    let format = config::detect(raw);
+    let mut doc: Value = match format {
         Format::Clash => serde_yaml::from_str(raw)?,
         _ => clash::emit(&config::parse_any(raw)?),
     };
     let mut warnings = Vec::new();
     let root = doc.as_mapping_mut().ok_or_else(|| anyhow::anyhow!("订阅不是有效的 Clash 配置"))?;
-    let own_nodes: HashSet<String> = match root.get("proxies") {
+    // In the profile's order: frozen groups list them the way include-all would.
+    let own_nodes: Vec<String> = match root.get("proxies") {
         Some(Value::Sequence(v)) => v.iter().filter_map(|p| p.as_mapping().and_then(|m| s(m, "name"))).collect(),
-        _ => HashSet::new(),
+        _ => Vec::new(),
     };
-    let mut taken: HashSet<String> = own_nodes.clone();
+    let mut taken: HashSet<String> = own_nodes.iter().cloned().collect();
     if let Some(Value::Sequence(v)) = root.get("proxy-groups") {
         taken.extend(v.iter().filter_map(|g| g.as_mapping().and_then(|m| s(m, "name"))));
     }
@@ -69,6 +114,9 @@ pub fn merge(raw: &str, parts: &[Part]) -> Result<(String, Vec<String>)> {
             warnings.push(format!("合并订阅「{}」：没有可用的节点", part.name));
             continue;
         }
+        // New name per node, by position: a profile may repeat a name, and
+        // each copy needs its own. References (dialer-proxy) go to the first.
+        let mut new_names: Vec<String> = Vec::with_capacity(profile.proxies.len());
         let mut rename: HashMap<String, String> = HashMap::new();
         for p in &profile.proxies {
             let mut name = p.name.clone();
@@ -81,12 +129,13 @@ pub fn merge(raw: &str, parts: &[Part]) -> Result<(String, Vec<String>)> {
                 }
             }
             taken.insert(name.clone());
-            rename.insert(p.name.clone(), name);
+            rename.entry(p.name.clone()).or_insert_with(|| name.clone());
+            new_names.push(name);
         }
         let mut dropped_detour = false;
-        for p in &profile.proxies {
+        for (p, name) in profile.proxies.iter().zip(new_names) {
             let mut p = p.clone();
-            p.name = rename[&p.name].clone();
+            p.name = name;
             // A dialer-proxy naming one of its own nodes follows the rename;
             // one naming a group of the other profile can't be kept.
             if let Some(d) = p.dialer_proxy.take() {
@@ -104,14 +153,37 @@ pub fn merge(raw: &str, parts: &[Part]) -> Result<(String, Vec<String>)> {
         }
     }
     if new_nodes.is_empty() {
-        return Ok((serde_yaml::to_string(&doc)?, warnings));
+        // Nothing added: same as having nothing to merge.
+        return Ok((raw.to_string(), warnings));
     }
 
+    if format == Format::SingBox {
+        warnings.push("当前订阅是 sing-box 原始配置，合并后按通用配置重新生成，它自己的 DNS 等 sing-box 专有设置不会保留".into());
+    }
     let root = doc.as_mapping_mut().unwrap();
     match root.entry(Value::from("proxies")).or_insert_with(|| Value::Sequence(Vec::new())) {
         Value::Sequence(v) => v.extend(new_nodes),
         other => *other = Value::Sequence(new_nodes),
     }
+    let types: HashMap<String, String> = match root.get("proxies") {
+        Some(Value::Sequence(v)) => v
+            .iter()
+            .filter_map(|p| p.as_mapping())
+            .filter_map(|m| Some((s(m, "name")?, s(m, "type").unwrap_or_default())))
+            .collect(),
+        _ => HashMap::new(),
+    };
+    let ty_of = |n: &str| types.get(n).map(String::as_str).unwrap_or("");
+    // The group the MATCH rule sends traffic to (rules after the first are never reached).
+    let fallback: Option<String> = match root.get("rules") {
+        Some(Value::Sequence(v)) => v
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|r| r.trim().strip_prefix("MATCH,"))
+            .map(|t| t.split(',').next().unwrap_or("").trim().to_string())
+            .next(),
+        _ => None,
+    };
 
     let mut hit = 0;
     if let Some(Value::Sequence(groups)) = root.get_mut("proxy-groups") {
@@ -120,37 +192,49 @@ pub fn merge(raw: &str, parts: &[Part]) -> Result<(String, Vec<String>)> {
             let name = s(m, "name").unwrap_or_default();
             let canonical = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
             let ty = s(m, "type").unwrap_or_default();
-            let target = (ty == "select" && ["节点选择", "手动选择", "proxy", "proxyselect", "nodeselect", "节点", "选择"].contains(&canonical.as_str()))
-                || (ty == "url-test" && ["自动选择", "自动测速", "自动优选", "auto", "autoselect", "urltest"].contains(&canonical.as_str()));
-            if !target {
-                // Freeze implicit all-node membership, otherwise added nodes would
-                // still leak into service/region groups through include-all.
-                let all = m.get("include-all").and_then(Value::as_bool) == Some(true);
-                let all_nodes = m.get("include-all-proxies").and_then(Value::as_bool) == Some(true);
-                if all || all_nodes {
-                    m.remove("include-all");
-                    m.remove("include-all-proxies");
-                    if all { m.insert(Value::from("include-all-providers"), Value::Bool(true)); }
-                    let mut members = names(m.get("proxies"));
-                    let mut own: Vec<_> = own_nodes.iter().cloned().collect();
-                    own.sort();
-                    for name in own { if !members.contains(&name) { members.push(name); } }
-                    m.insert(Value::from("proxies"), Value::Sequence(members.into_iter().map(Value::from).collect()));
+            let listed = names(m.get("proxies"));
+            let target = (ty == "select"
+                && ["节点选择", "手动选择", "代理选择", "手动切换", "节点切换", "选择节点", "选择代理", "代理", "proxy", "proxies", "proxyselect", "nodeselect", "节点", "选择"]
+                    .contains(&canonical.as_str()))
+                || (ty == "url-test" && ["自动选择", "自动测速", "自动优选", "延迟最低", "最低延迟", "auto", "autoselect", "urltest"].contains(&canonical.as_str()))
+                // Whatever it's called, the select group MATCH goes to is the entry
+                // when it holds nodes itself (a service group of DIRECT isn't).
+                || (ty == "select" && fallback.as_deref() == Some(name.as_str()) && (includes_all(m) || listed.iter().any(|n| own_nodes.contains(n))));
+            if !target && !includes_all(m) {
+                continue;
+            }
+            let f = match NodeFilter::of(m) {
+                Ok(f) => f,
+                Err(p) => {
+                    warnings.push(if includes_all(m) {
+                        // Can't tell which nodes it holds: left as is, mihomo still
+                        // filters it (merged nodes that match may show up too).
+                        format!("代理组「{name}」的筛选规则 {p} 无法解析，保持原样，匹配它的合并节点也可能出现在该组")
+                    } else {
+                        format!("代理组「{name}」的筛选规则 {p} 无法解析，合并的节点没有加入该组")
+                    });
+                    continue;
                 }
+            };
+            // Spell out include-all as the profile's own nodes: otherwise merged
+            // nodes leak into service / region groups through it, and the
+            // sing-box and Prism cores don't expand it at all. mihomo doesn't
+            // apply `filter` to listed nodes, so the list is filtered here.
+            if includes_all(m) {
+                let all = m.get("include-all").and_then(Value::as_bool) == Some(true);
+                m.remove("include-all");
+                m.remove("include-all-proxies");
+                if all { m.insert(Value::from("include-all-providers"), Value::Bool(true)); }
+                let mut members = listed;
+                for n in own_nodes.iter().filter(|n| f.allows(n, ty_of(n))) {
+                    if !members.contains(n) { members.push(n.clone()); }
+                }
+                m.insert(Value::from("proxies"), Value::Sequence(members.into_iter().map(Value::from).collect()));
+            }
+            if !target {
                 continue;
             }
-            // These pick up every node by themselves in mihomo.
-            if m.get("include-all").or(m.get("include-all-proxies")).and_then(|v| v.as_bool()) == Some(true) {
-                hit += 1;
-                continue;
-            }
-            let keep = s(m, "filter").and_then(|f| Regex::new(&f).ok());
-            let skip = s(m, "exclude-filter").and_then(|f| Regex::new(&f).ok());
-            let extra: Vec<Value> = added
-                .iter()
-                .filter(|n| keep.as_ref().is_none_or(|r| r.is_match(n)) && skip.as_ref().is_none_or(|r| !r.is_match(n)))
-                .map(|n| Value::from(n.as_str()))
-                .collect();
+            let extra: Vec<Value> = added.iter().filter(|n| f.allows(n, ty_of(n))).map(|n| Value::from(n.as_str())).collect();
             if extra.is_empty() {
                 continue;
             }
@@ -261,4 +345,132 @@ rules: ['MATCH,选择']
         assert!(group(&doc, "全部").is_empty(), "non-entry include-all groups must not pick up merged nodes");
         assert!(w.is_empty(), "{w:?}");
     }
+
+    #[test]
+    fn frozen_groups_keep_their_filters_and_order() {
+        let main = "proxies:
+  - {name: 香港 01, type: ss, server: 1.1.1.1, port: 1, cipher: aes-128-gcm, password: x}
+  - {name: 东京, type: ss, server: 1.1.1.2, port: 1, cipher: aes-128-gcm, password: x}
+  - {name: HK 03, type: ss, server: 1.1.1.3, port: 1, cipher: aes-128-gcm, password: x}
+proxy-groups:
+  - {name: 节点选择, type: select, proxies: [DIRECT]}
+  - {name: 香港组, type: select, include-all: true, filter: '香港|HK', exclude-filter: '03'}
+  - {name: 多条, type: select, include-all-proxies: true, filter: '东京`HK'}
+  - {name: 全部, type: select, include-all-proxies: true}
+rules: ['MATCH,节点选择']
+";
+        let (out, w) = merge(main, &[part("B", "ss://YWVzLTI1Ni1nY206cHc@3.3.3.3:8388#HK%2009")]).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(group(&doc, "香港组"), ["香港 01"], "filter / exclude-filter still apply after freezing");
+        assert_eq!(group(&doc, "多条"), ["东京", "HK 03"], "backtick-joined patterns: any one matches");
+        assert_eq!(group(&doc, "全部"), ["香港 01", "东京", "HK 03"], "the profile's own order");
+        assert_eq!(group(&doc, "节点选择"), ["DIRECT", "HK 09"]);
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn repeated_names_inside_a_part_stay_distinct() {
+        let b = "proxies:
+  - {name: x, type: trojan, server: 2.2.2.1, port: 443, password: p}
+  - {name: x, type: trojan, server: 2.2.2.2, port: 443, password: p}
+  - {name: y, type: trojan, server: 2.2.2.3, port: 443, password: p, dialer-proxy: x}
+";
+        let (out, _) = merge(MAIN, &[part("B", b)]).unwrap();
+        let p = config::parse_any(&out).unwrap();
+        let names: Vec<_> = p.proxies.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["东京", "香港", "x", "x [B]", "y"]);
+        let node = |n: &str| p.proxies.iter().find(|x| x.name == n).unwrap().clone();
+        assert_eq!(node("x").server, "2.2.2.1");
+        assert_eq!(node("x [B]").server, "2.2.2.2");
+        assert_eq!(node("y").dialer_proxy.as_deref(), Some("x"), "a reference goes to the first copy");
+    }
+
+    #[test]
+    fn unsupported_filter_syntax_adds_nothing_and_warns() {
+        let main = "proxies:
+  - {name: 香港 01, type: ss, server: 1.1.1.1, port: 1, cipher: aes-128-gcm, password: x}
+proxy-groups:
+  - {name: 节点选择, type: select, proxies: [DIRECT], filter: '^(?!.*美国)'}
+  - {name: 非美, type: select, include-all: true, filter: '^(?!.*美国)'}
+rules: ['MATCH,节点选择']
+";
+        let (out, w) = merge(main, &[part("B", "ss://YWVzLTI1Ni1nY206cHc@3.3.3.3:8388#美国")]).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(group(&doc, "节点选择"), ["DIRECT"], "never falls back to adding every node");
+        let g = doc["proxy-groups"][1].as_mapping().unwrap();
+        assert_eq!(g.get("include-all").and_then(Value::as_bool), Some(true), "left for the core to filter");
+        assert!(w.iter().any(|x| x.contains("节点选择")) && w.iter().any(|x| x.contains("非美")), "{w:?}");
+    }
+
+    #[test]
+    fn the_match_group_is_an_entry_when_it_lists_nodes() {
+        let main = "proxies:
+  - {name: 东京, type: ss, server: 1.1.1.1, port: 1, cipher: aes-128-gcm, password: x}
+proxy-groups:
+  - {name: 🌍 我的出口, type: select, proxies: [东京, DIRECT]}
+  - {name: 代理选择, type: select, proxies: [我的出口2]}
+  - {name: 我的出口2, type: select, proxies: [DIRECT]}
+rules: ['MATCH,🌍 我的出口']
+";
+        let (out, w) = merge(main, &[part("B", "ss://YWVzLTI1Ni1nY206cHc@3.3.3.3:8388#x")]).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(group(&doc, "🌍 我的出口"), ["东京", "DIRECT", "x"]);
+        assert_eq!(group(&doc, "代理选择"), ["我的出口2", "x"], "a common entry name");
+        assert_eq!(group(&doc, "我的出口2"), ["DIRECT"]);
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn exclude_type_applies_to_frozen_and_entry_groups() {
+        let main = "proxies:
+  - {name: a, type: ss, server: 1.1.1.1, port: 1, cipher: aes-128-gcm, password: x}
+  - {name: b, type: trojan, server: 1.1.1.2, port: 443, password: x}
+proxy-groups:
+  - {name: 节点选择, type: select, proxies: [DIRECT], exclude-type: 'Shadowsocks|http'}
+  - {name: 非SS, type: select, include-all-proxies: true, exclude-type: shadowsocks}
+rules: ['MATCH,节点选择']
+";
+        let b = "proxies:
+  - {name: c, type: ss, server: 2.2.2.1, port: 1, cipher: aes-128-gcm, password: x}
+  - {name: d, type: vless, server: 2.2.2.2, port: 443, uuid: 00000000-0000-0000-0000-000000000000}
+";
+        let (out, _) = merge(main, &[part("B", b)]).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(group(&doc, "节点选择"), ["DIRECT", "d"]);
+        assert_eq!(group(&doc, "非SS"), ["b"]);
+    }
+
+    #[test]
+    fn a_raw_sing_box_profile_warns_about_what_is_lost() {
+        let sb = r#"{"outbounds":[{"type":"shadowsocks","tag":"东京","server":"4.4.4.4","server_port":8388,"method":"aes-256-gcm","password":"pw"},{"type":"selector","tag":"proxy","outbounds":["东京"]}]}"#;
+        let (out, w) = merge(sb, &[part("B", "ss://YWVzLTI1Ni1nY206cHc@3.3.3.3:8388#x")]).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(group(&doc, "proxy"), ["东京", "x"]);
+        assert!(w.iter().any(|x| x.contains("sing-box")), "{w:?}");
+    }
+
+    #[test]
+    fn the_first_match_counts_and_may_include_all() {
+        let main = "proxies:
+  - {name: 东京, type: ss, server: 1.1.1.1, port: 1, cipher: aes-128-gcm, password: x}
+proxy-groups:
+  - {name: 🚀 出口, type: select, include-all-proxies: true}
+  - {name: 其他, type: select, include-all: false, include-all-proxies: true}
+rules: ['MATCH,🚀 出口', 'MATCH,其他']
+";
+        let (out, w) = merge(main, &[part("B", "ss://YWVzLTI1Ni1nY206cHc@3.3.3.3:8388#x")]).unwrap();
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(group(&doc, "🚀 出口"), ["东京", "x"], "spelled out: sing-box and Prism don't expand include-all");
+        assert_eq!(group(&doc, "其他"), ["东京"], "unreachable MATCH: frozen like any other group");
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn nothing_added_keeps_the_profile_as_is() {
+        let sb = r#"{"outbounds":[{"type":"shadowsocks","tag":"东京","server":"4.4.4.4","server_port":8388,"method":"aes-256-gcm","password":"pw"}]}"#;
+        let (out, w) = merge(sb, &[part("坏的", "not a profile")]).unwrap();
+        assert_eq!(out, sb);
+        assert_eq!(w.len(), 1, "{w:?}");
+    }
 }
+
