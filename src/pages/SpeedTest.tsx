@@ -1,3 +1,4 @@
+import Help from "../Help";
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, errText, type ProxyItem, type SpeedProgress } from "../api";
@@ -73,9 +74,9 @@ export default function SpeedDialog({ proxies, groups, onClose }: { proxies: Rec
     <div className="modal-bg" onClick={running ? undefined : onClose}>
       <div className="modal quality-modal" onClick={(e) => e.stopPropagation()}>
         <h2>{t("带宽测速")}</h2>
-        <div className="small muted">
+        <Help title={t("带宽测速")}><div>
           {t("逐个经节点下载测试文件，测量实际下载速度（会消耗流量：每个节点最多约 {s} 秒的下载量）。", { s: secs })}
-        </div>
+        </div></Help>
         <div className="row">
           <select className="input" style={{ maxWidth: 220 }} value={group} disabled={!!running} onChange={(e) => setGroup(e.target.value)}>
             {groups.map((x) => (

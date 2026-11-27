@@ -38,6 +38,7 @@ pub fn create(store: &Store, s: &Settings) -> Result<Vec<u8>> {
     portable.webdav = WebDav::default();
     portable.mihomo_path = None;
     portable.singbox_path = None;
+    portable.kill_switch_apps.clear();
     zip.start_file("settings.json", opts)?;
     zip.write_all(&serde_json::to_vec_pretty(&portable)?)?;
     zip.start_file("profiles.json", opts)?;
@@ -86,6 +87,7 @@ pub fn restore(store: &Store, current: &Settings, bytes: &[u8]) -> Result<Settin
     s.webdav = current.webdav.clone();
     s.mihomo_path = current.mihomo_path.clone();
     s.singbox_path = current.singbox_path.clone();
+    s.kill_switch_apps = current.kill_switch_apps.clone();
     s.system_proxy = current.system_proxy;
     s.tun = current.tun;
     // Profiles not in the backup go away with their files.
@@ -374,6 +376,7 @@ mod tests {
         s.active_profile = Some(p.id.clone());
         s.mixed_port = 7000;
         s.mihomo_path = Some(r"C:\old\mihomo.exe".into());
+        s.kill_switch_apps = vec![r"C:\old\remote.exe".into()];
         s.webdav = WebDav { url: "https://dav.example".into(), username: "u".into(), password: "stored-secret".into() };
         let zip = create(&store, &s).unwrap();
         let text = String::from_utf8_lossy(&zip).to_string();
@@ -384,12 +387,14 @@ mod tests {
         let mut here = store.settings();
         here.mixed_port = 1;
         here.mihomo_path = Some(r"D:\new\mihomo.exe".into());
+        here.kill_switch_apps = vec![r"D:\local\remote.exe".into()];
         here.system_proxy = true;
         here.webdav = WebDav { url: "https://mine".into(), username: "me".into(), password: String::new() };
         let restored = restore(&store, &here, &zip).unwrap();
         assert_eq!(restored.mixed_port, 7000);
         assert_eq!(restored.active_profile, Some(p.id.clone()));
         assert_eq!(restored.mihomo_path.as_deref(), Some(r"D:\new\mihomo.exe"));
+        assert_eq!(restored.kill_switch_apps, here.kill_switch_apps);
         assert!(restored.system_proxy);
         assert_eq!(restored.webdav.url, "https://mine");
         let ids: Vec<String> = store.profiles().into_iter().map(|p| p.id).collect();

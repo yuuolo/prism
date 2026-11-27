@@ -52,6 +52,7 @@ async fn auth(State(hub): St, req: Request, next: Next) -> Response {
 
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
+        .route("/prism/health", get(|State(hub): St| async move { Json(hub.tun_health.snapshot()) }))
         .route("/", get(|| async { Json(json!({ "hello": "prism" })) }))
         .route("/version", get(|| async { Json(json!({ "version": concat!("prism-", env!("CARGO_PKG_VERSION")), "meta": true })) }))
         .route("/configs", get(get_configs).patch(patch_configs).put(reload_configs))
@@ -80,7 +81,8 @@ pub fn router(hub: Arc<Hub>) -> Router {
 }
 
 /// `PUT /configs`: reload the config file (or `{"path": ...}` /
-/// `{"payload": ...}`) without dropping listeners.
+/// `{"payload": ...}`) without dropping listeners. `{"repair": true}` rebuilds
+/// the last applied profile, without importing file edits.
 async fn reload_configs(State(hub): St, body: Option<Json<Value>>) -> Response {
     let body = body.map(|Json(b)| b).unwrap_or(Value::Null);
     let payload = match (body.get("payload").and_then(|p| p.as_str()), body.get("path").and_then(|p| p.as_str())) {
@@ -91,7 +93,10 @@ async fn reload_configs(State(hub): St, body: Option<Json<Value>>) -> Response {
         },
         _ => None,
     };
-    match hub.reload(payload).await {
+    let result = if body.get("repair").and_then(Value::as_bool) == Some(true) {
+        hub.repair().await
+    } else { hub.reload(payload).await };
+    match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
     }
@@ -129,7 +134,7 @@ async fn refresh_provider(hub: &Arc<Hub>, url: Option<String>, path: Option<std:
     let (Some(url), Some(path)) = (url, path) else { return StatusCode::NO_CONTENT.into_response() };
     let out = via.and_then(|n| hub.core().tunnel.reg.get(&n));
     match provider::fetch_to_file(&url, &path, out.as_ref()).await {
-        Ok(true) => match hub.reload(None).await {
+        Ok(true) => match hub.repair().await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
         },

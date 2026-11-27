@@ -75,13 +75,24 @@ async fn runs_a_core_for_its_owner_only() {
     assert!(!st.running);
     assert_eq!(st.cores.get("prism"), sha256_file(&core).as_ref());
     assert!(!st.cores.contains_key("mihomo"));
+    #[cfg(windows)] {
+        assert!(st.kill_switch_apps_supported);
+        let r = request_at(&l, &Request::SetKillSwitchApps { paths: vec![me.to_string_lossy().into_owned()] }).await.unwrap();
+        assert!(r.ok);
+        assert_eq!(r.status.unwrap().kill_switch_apps.len(), 1);
+        let r = request_at(&l, &Request::SetKillSwitchApps { paths: vec!["*.exe".into()] }).await.unwrap();
+        assert!(!r.ok);
+        let st = request_at(&l, &Request::Status).await.unwrap().status.unwrap();
+        assert_eq!(st.kill_switch_apps.len(), 1, "invalid updates must preserve the previous policy");
+        assert!(request_at(&l, &Request::SetKillSwitchApps { paths: vec![] }).await.unwrap().ok);
+    }
 
     // Files outside the allowed list are refused before anything starts.
     let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
     let evil = BTreeMap::from([("../evil.dll".to_string(), b64(b"x"))]);
-    let r = request_at(&l, &Request::Start { core: "prism".into(), config: "{}".into(), files: evil, kill_switch: false }).await.unwrap();
+    let r = request_at(&l, &Request::Start { core: "prism".into(), config: "{}".into(), files: evil, kill_switch: false, tailscale: false, kill_switch_apps: vec![], recovery: false }).await.unwrap();
     assert!(!r.ok && r.error.unwrap().contains("not allowed"));
-    let r = request_at(&l, &Request::Start { core: "mihomo".into(), config: "{}".into(), files: BTreeMap::new(), kill_switch: false }).await.unwrap();
+    let r = request_at(&l, &Request::Start { core: "mihomo".into(), config: "{}".into(), files: BTreeMap::new(), kill_switch: false, tailscale: false, kill_switch_apps: vec![], recovery: false }).await.unwrap();
     assert!(!r.ok, "mihomo isn't installed");
 
     let (mixed, api) = (free_port(), free_port());
@@ -92,7 +103,7 @@ async fn runs_a_core_for_its_owner_only() {
          rules:\n  - MATCH,DIRECT\n"
     );
     let files = BTreeMap::from([("geosite.dat".to_string(), b64(b"not really geodata"))]);
-    let r = request_at(&l, &Request::Start { core: "prism".into(), config, files, kill_switch: false }).await.unwrap();
+    let r = request_at(&l, &Request::Start { core: "prism".into(), config, files, kill_switch: false, tailscale: false, kill_switch_apps: vec![], recovery: false }).await.unwrap();
     assert!(r.ok, "{:?}", r.error);
     let st = r.status.unwrap();
     assert!(st.running && st.core.as_deref() == Some("prism") && st.pid.is_some());
@@ -176,4 +187,92 @@ async fn liveness_checks_are_not_logged() {
     stop_tx.send(true).unwrap();
     srv.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(l.data.parent().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn independent_recovery_preserves_reload_and_selection_and_manual_stop_wins() {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let source = target.join("debug").join(format!("prism-core{}", prism_service::EXE));
+    assert!(source.exists(), "build prism-core before this test");
+    let me = std::env::current_exe().unwrap(); let l = layout("recovery", me);
+    let executable = l.cores_dir().join(format!("prism-core{}", prism_service::EXE));
+    std::fs::copy(source, &executable).unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let service = tokio::spawn(server::serve(l.clone(), stop_rx)); wait_ready(&l).await;
+    let ctl = free_port();
+    let config = format!("mixed-port: {}\nexternal-controller: 127.0.0.1:{ctl}\nsecret: recovery-test\nproxies: [{{name: local, type: socks5, server: 127.0.0.1, port: 9}}]\nproxy-groups: [{{name: choice, type: select, proxies: [local, DIRECT]}}]\nrules: ['MATCH,choice']\n", free_port());
+    let started = request_at(&l, &Request::Start {core:"prism".into(),config:config.clone(),files:BTreeMap::new(),kill_switch:false,tailscale:false,kill_switch_apps:vec![],recovery:true}).await.unwrap();
+    assert!(started.ok, "{:?}", started.error);
+    let original = started.status.unwrap(); assert!(original.recovery.enabled); let pid = original.pid.unwrap();
+    for (method, path, body) in [
+        ("PUT", "/proxies/choice", serde_json::json!({"name":"DIRECT"})),
+        ("PATCH", "/configs", serde_json::json!({"mode":"global"})),
+    ] {
+        let result = request_at(&l, &Request::CoreMutation {method:method.into(),path:path.into(),body}).await.unwrap();
+        assert!(result.ok, "{:?}", result.error);
+    }
+    let updated = format!("{config}\nhosts: {{reload-check.invalid: 203.0.113.77}}\n");
+    let result = request_at(&l, &Request::Reload {config:updated,files:BTreeMap::new()}).await.unwrap();
+    assert!(result.ok, "{:?}", result.error);
+    assert!(std::fs::read_to_string(l.run_dir().join("config.yaml")).unwrap().contains("reload-check.invalid"));
+    let bad = request_at(&l, &Request::Reload {config:"not a config".into(),files:BTreeMap::new()}).await.unwrap();
+    assert!(!bad.ok);
+    // Terminate only the exact isolated child whose image matches this fixture.
+    assert!(prism_service::client::same_path(&prism_service::client::process_image(pid).unwrap(), &executable));
+    #[cfg(windows)] unsafe {
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE}};
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid); assert!(!handle.is_null());
+        assert_ne!(TerminateProcess(handle, 77), 0); CloseHandle(handle);
+    }
+    #[cfg(not(windows))] unsafe { assert_eq!(libc::kill(pid as i32, libc::SIGKILL), 0); }
+    let mut recovered = None;
+    for _ in 0..300 {
+        let state = request_at(&l, &Request::Status).await.unwrap().status.unwrap();
+        if state.running && state.pid != Some(pid) && state.recovery.restarts == 1 && state.recovery.phase == "monitoring" { recovered = Some(state); break; }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let state = recovered.expect("service did not independently restore the child");
+    assert_eq!(state.recovery.last_exit_pid, Some(pid)); assert!(state.recovery.incident.is_some());
+    let http = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build().unwrap();
+    let cfg: serde_json::Value = http.get(format!("http://127.0.0.1:{ctl}/configs")).bearer_auth("recovery-test").send().await.unwrap().json().await.unwrap();
+    assert_eq!(cfg["mode"], "global");
+    let choice: serde_json::Value = http.get(format!("http://127.0.0.1:{ctl}/proxies/choice")).bearer_auth("recovery-test").send().await.unwrap().json().await.unwrap();
+    assert_eq!(choice["now"], "DIRECT");
+    assert!(!serde_json::to_string(&state.recovery).unwrap().contains("recovery-test"));
+    assert!(request_at(&l, &Request::Stop).await.unwrap().ok);
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    let stopped = request_at(&l, &Request::Status).await.unwrap().status.unwrap();
+    assert!(!stopped.running && !stopped.recovery.enabled);
+    stop_tx.send(true).unwrap(); service.await.unwrap().unwrap();
+    std::fs::remove_dir_all(l.data.parent().unwrap()).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failure_before_api_readiness_keeps_bounded_recovery_enabled() {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let source = target.join("debug").join(format!("prism-core{}", prism_service::EXE));
+    let l = layout("startup-failure", std::env::current_exe().unwrap());
+    std::fs::copy(source, l.cores_dir().join(format!("prism-core{}", prism_service::EXE))).unwrap();
+    // Only this fixture's listener is occupied; no system networking changes.
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = format!("mixed-port: {}\nexternal-controller: 127.0.0.1:{}\nproxies: []\nrules: ['MATCH,DIRECT']\n", occupied.local_addr().unwrap().port(), free_port());
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let service = tokio::spawn(server::serve(l.clone(), stop_rx)); wait_ready(&l).await;
+    let started = request_at(&l, &Request::Start {core:"prism".into(),config,files:BTreeMap::new(),kill_switch:false,tailscale:false,kill_switch_apps:vec![],recovery:true}).await.unwrap();
+    assert!(started.ok, "{:?}", started.error);
+    let state = started.status.unwrap();
+    assert!(state.recovery.enabled, "early startup exit must not disable recovery");
+    let original = state.recovery.last_exit_pid.expect("fixture must fail before API startup");
+    let mut retried = false;
+    for _ in 0..200 {
+        let state = request_at(&l, &Request::Status).await.unwrap().status.unwrap();
+        if state.recovery.last_exit_pid != Some(original) && matches!(state.recovery.phase.as_str(), "failed" | "cooldown") {
+            assert!(state.recovery.enabled); retried = true; break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(retried, "service did not retry the early startup failure");
+    assert!(request_at(&l, &Request::Stop).await.unwrap().ok);
+    stop_tx.send(true).unwrap(); service.await.unwrap().unwrap();
+    std::fs::remove_dir_all(l.data.parent().unwrap()).unwrap();
 }

@@ -25,6 +25,13 @@ tun:
   enable: true
   auto-route: true
   inet6-address: [fdfe:dcba:9876::1/126]
+# TUN DNS now fails closed; explicitly configure its resolver just as the GUI does.
+dns:
+  enable: true
+  enhanced-mode: redir-host
+  nameserver: ['https://1.1.1.1/dns-query']
+  proxy-server-nameserver: ['https://1.1.1.1/dns-query']
+  default-nameserver: [1.1.1.1]
 proxies: []
 rules:
   - MATCH,DIRECT
@@ -91,6 +98,14 @@ if dig +time=3 +tries=1 @223.5.5.5 www.example.com A +short | grep -Eq '^[0-9.]+
 else
   bad "no DNS answer from 223.5.5.5"
 fi
+
+curl -fsS http://127.0.0.1:19090/prism/health | python3 -c '
+import json, sys
+h = json.load(sys.stdin)
+assert h["enabled"] and h["fault"] is None
+assert h["running_pumps"] & 15 == 15
+assert h["rx_packets"] > 0 and h["tx_packets"] > 0
+' && ok "TUN pumps healthy with bidirectional traffic" || bad "TUN health failed"
 
 sudo pkill -f "$CORE" || true
 sleep 2

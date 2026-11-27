@@ -6,7 +6,7 @@ name: macOS
 on:
   workflow_dispatch:
   push:
-    branches: [macos]
+    branches: [master, macos]
 
 jobs:
   build:
