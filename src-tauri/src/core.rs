@@ -73,10 +73,18 @@ fn overrides(s: &Settings) -> clash::Overrides {
 /// The active profile's content with the merged profiles' nodes added and
 /// the user's 覆写 applied, plus warnings from merging.
 fn active_profile_full(store: &Store, s: &Settings) -> Result<(String, Vec<String>)> {
+    let (id, raw, warnings) = merged_profile(store, s)?;
+    let name = store.profiles().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
+    let out = crate::patches::apply_both(&crate::patches::load(&store.dir, None), &crate::patches::load(&store.dir, Some(&id)), &raw, &name)?;
+    Ok((out, warnings))
+}
+
+/// The active profile's id and content with the merged profiles' nodes
+/// added (before 覆写), plus warnings from merging.
+fn merged_profile(store: &Store, s: &Settings) -> Result<(String, String, Vec<String>)> {
     let id = s.active_profile.clone().ok_or_else(|| anyhow!("请先在「订阅」页导入并启用一个订阅"))?;
     let raw = store.read_content(&id)?.trim_start_matches('\u{feff}').to_string();
     let profiles = store.profiles();
-    let name = profiles.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
     let parts: Vec<crate::merge::Part> = s
         .merged()
         .iter()
@@ -86,8 +94,13 @@ fn active_profile_full(store: &Store, s: &Settings) -> Result<(String, Vec<Strin
         })
         .collect();
     let (raw, warnings) = crate::merge::merge(&raw, &parts)?;
-    let out = crate::patches::apply_both(&crate::patches::load(&store.dir, None), &crate::patches::load(&store.dir, Some(&id)), &raw, &name)?;
-    Ok((out, warnings))
+    Ok((id, raw, warnings))
+}
+
+/// Node names of the active profile after merging, in order. Merged nodes
+/// that clash are named after their profile, so a rename changes them.
+pub fn merged_node_names(store: &Store, s: &Settings) -> Result<Vec<String>> {
+    Ok(config::parse_any(&merged_profile(store, s)?.1)?.proxies.into_iter().map(|p| p.name).collect())
 }
 
 fn active_profile(store: &Store, s: &Settings) -> Result<String> {

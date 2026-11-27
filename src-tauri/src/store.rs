@@ -133,6 +133,44 @@ impl Settings {
     pub fn uses_profile(&self, id: &str) -> bool {
         self.active_profile.as_deref() == Some(id) || self.merged().iter().any(|m| m == id)
     }
+
+    /// Follows renamed nodes (old name → new) in the active profile's node
+    /// choices, chains and domain / IP / app rules.
+    pub fn rename_nodes(&mut self, renamed: &HashMap<String, String>) {
+        let follow = |n: &mut String| {
+            if let Some(new) = renamed.get(n.as_str()) {
+                *n = new.clone();
+            }
+        };
+        if let Some(sel) = self.active_profile.as_ref().and_then(|id| self.selections.get_mut(id)) {
+            sel.values_mut().for_each(follow);
+        }
+        self.chains.iter_mut().flat_map(|c| c.hops.iter_mut()).for_each(follow);
+        self.route_rules.iter_mut().for_each(|r| follow(&mut r.target));
+        self.app_rules.iter_mut().for_each(|r| follow(&mut r.target));
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    #[test]
+    fn renamed_nodes_are_followed() {
+        let mut s = Settings { active_profile: Some("a".into()), ..Default::default() };
+        s.selections.insert("a".into(), HashMap::from([("节点选择".into(), "东京 [B]".into()), ("其他".into(), "香港".into())]));
+        s.selections.insert("z".into(), HashMap::from([("节点选择".into(), "东京 [B]".into())]));
+        s.chains.push(ChainRule { hops: vec!["东京 [B]".into(), "香港".into()], ..Default::default() });
+        s.route_rules.push(RouteRule { target: "东京 [B]".into(), ..Default::default() });
+        s.app_rules.push(AppRule { target: "DIRECT".into(), ..Default::default() });
+        s.rename_nodes(&HashMap::from([("东京 [B]".to_string(), "东京 [机场B]".to_string())]));
+        assert_eq!(s.selections["a"]["节点选择"], "东京 [机场B]");
+        assert_eq!(s.selections["a"]["其他"], "香港");
+        assert_eq!(s.selections["z"]["节点选择"], "东京 [B]", "other profiles' choices are about their own nodes");
+        assert_eq!(s.chains[0].hops, ["东京 [机场B]", "香港"]);
+        assert_eq!(s.route_rules[0].target, "东京 [机场B]");
+        assert_eq!(s.app_rules[0].target, "DIRECT");
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
